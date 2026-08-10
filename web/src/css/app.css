@@ -1,0 +1,45 @@
+@import "tailwindcss";
+@source "../../templates";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+[x-cloak] {
+  display: none !important;
+}
+
+.admin-sidebar {
+  width: min(18rem, 85vw);
+  transform: translateX(-100%);
+}
+
+html[data-mobile-sidebar-open="true"] .admin-sidebar {
+  transform: translateX(0);
+}
+
+@media (min-width: 64rem) {
+  .admin-sidebar {
+    width: 18rem;
+    transform: translateX(0);
+  }
+
+  .admin-main {
+    padding-left: 18rem;
+  }
+
+  html[data-sidebar-collapsed="true"] .admin-sidebar {
+    width: 5rem;
+  }
+
+  html[data-sidebar-collapsed="true"] .admin-main {
+    padding-left: 5rem;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-expanded-only {
+    display: none !important;
+  }
+
+  html[data-sidebar-collapsed="true"] .sidebar-top-level {
+    justify-content: center;
+    padding-inline: 0.75rem;
+  }
+}

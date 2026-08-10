@@ -1,0 +1,31 @@
+{{define "head-state-init"}}
+<script>
+(() => {
+    const root = document.documentElement;
+    let theme = "system";
+    try { theme = localStorage.getItem("theme") || "system"; } catch {}
+    if (!["light", "dark", "system"].includes(theme)) theme = "system";
+    const dark = theme === "dark" || (theme === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+    root.dataset.themePreference = theme;
+    root.classList.toggle("dark", dark);
+    root.style.colorScheme = dark ? "dark" : "light";
+    if (root.hasAttribute("data-admin-shell")) {
+        let collapsed = false;
+        try { collapsed = localStorage.getItem("sidebar-collapsed") === "true"; } catch {}
+        root.dataset.sidebarCollapsed = String(collapsed);
+
+        const disclosures = Object.create(null);
+        try {
+            const stored = JSON.parse(localStorage.getItem("sidebar-disclosures") || "{}");
+            if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+                for (const [key, open] of Object.entries(stored)) {
+                    if (typeof open === "boolean") disclosures[key] = open;
+                }
+            }
+        } catch {}
+        window.__sidebarDisclosures = disclosures;
+        root.dataset.sidebarDisclosurePending = "true";
+    }
+})();
+</script>
+{{end}}

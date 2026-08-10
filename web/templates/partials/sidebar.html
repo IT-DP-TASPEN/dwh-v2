@@ -1,0 +1,73 @@
+{{define "sidebar"}}
+<aside id="admin-sidebar" class="admin-sidebar fixed inset-y-0 left-0 z-50 flex flex-col border-r border-slate-200 bg-white shadow-xl transition-[width,transform] duration-200 lg:z-30 lg:shadow-none dark:border-slate-800 dark:bg-slate-900" aria-label="Primary navigation">
+    <div class="flex h-16 shrink-0 items-center gap-3 border-b border-slate-200 px-4 dark:border-slate-800">
+        <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-emerald-500 font-bold text-slate-950">G</span>
+        <span class="sidebar-expanded-only min-w-0 flex-1 truncate font-semibold text-slate-900 dark:text-white">{{.AppName}}</span>
+        <button type="button" class="sidebar-expanded-only rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900 lg:hidden dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white" @click="closeMobile()" aria-label="Close navigation">
+            <i data-lucide="x" class="size-5" aria-hidden="true"></i>
+        </button>
+    </div>
+
+    <nav class="flex-1 overflow-y-auto px-3 py-5">
+        {{range .Navigation}}
+        <section class="mb-6" aria-labelledby="nav-group-{{.Key}}">
+            <h2 id="nav-group-{{.Key}}" class="sidebar-expanded-only mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">{{.Label}}</h2>
+            {{template "navigation-items" .Items}}
+        </section>
+        {{end}}
+    </nav>
+    <script>
+    (() => {
+        const root = document.documentElement;
+        try {
+            const disclosures = window.__sidebarDisclosures || {};
+            document.querySelectorAll("#admin-sidebar [data-navigation-disclosure]").forEach((item) => {
+                const active = item.dataset.navigationActive === "true";
+                const manualOpen = disclosures[item.dataset.navigationKey] === true;
+                const open = active || manualOpen;
+                item.dataset.navigationManualOpen = String(manualOpen);
+                const button = item.querySelector("[data-navigation-button]");
+                const panel = item.querySelector("[data-navigation-panel]");
+                if (button) button.setAttribute("aria-expanded", String(open));
+                if (panel) panel.style.display = open ? "" : "none";
+            });
+        } finally {
+            root.removeAttribute("data-sidebar-disclosure-pending");
+        }
+    })();
+    </script>
+
+    <div class="sidebar-expanded-only border-t border-slate-200 p-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+        Secure admin starter
+    </div>
+</aside>
+{{end}}
+
+{{define "navigation-items"}}
+<ul class="space-y-1">
+    {{range .}}
+    <li{{if .Children}} x-data="navigationDisclosure" data-navigation-disclosure data-navigation-key="{{.Key}}" data-navigation-active="{{if .Open}}true{{else}}false{{end}}" data-navigation-manual-open="false"{{end}}>
+        {{if .Children}}
+        <button type="button" data-navigation-button
+            class="{{if eq .Depth 1}}sidebar-top-level{{end}} flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition {{if .Active}}bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300{{else}}text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white{{end}}"
+            {{if eq .Depth 1}}@click="if (sidebarCollapsed) { expandSidebar(); openDisclosure() } else { toggleDisclosure() }"{{else}}@click="toggleDisclosure()"{{end}}
+            :aria-expanded="open.toString()" aria-expanded="{{if .Open}}true{{else}}false{{end}}" aria-controls="nav-children-{{.Key}}">
+            {{if .Icon}}<i data-lucide="{{.Icon}}" class="size-5 shrink-0" aria-hidden="true"></i>{{end}}
+            <span class="sidebar-expanded-only min-w-0 flex-1 truncate">{{.Label}}</span>
+            <i data-lucide="chevron-down" class="sidebar-expanded-only size-4 shrink-0 transition-transform" :class="open && 'rotate-180'" aria-hidden="true"></i>
+        </button>
+        <div id="nav-children-{{.Key}}" data-navigation-panel class="sidebar-expanded-only mt-1" x-show="open" {{if not .Open}}style="display:none"{{end}}>
+            {{template "navigation-items" .Children}}
+        </div>
+        {{else}}
+        <a href="{{.Path}}" {{if .Active}}aria-current="page"{{end}} title="{{.Label}}"
+            class="{{if eq .Depth 1}}sidebar-top-level{{end}} flex items-center gap-3 rounded-lg py-2.5 pr-3 text-sm font-medium transition {{if eq .Depth 1}}pl-3{{else if eq .Depth 2}}pl-8{{else}}pl-11{{end}} {{if .Active}}bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300{{else}}text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white{{end}}"
+            @click="closeMobile()">
+            {{if .Icon}}<i data-lucide="{{.Icon}}" class="size-5 shrink-0" aria-hidden="true"></i>{{end}}
+            <span class="sidebar-expanded-only truncate">{{.Label}}</span>
+        </a>
+        {{end}}
+    </li>
+    {{end}}
+</ul>
+{{end}}

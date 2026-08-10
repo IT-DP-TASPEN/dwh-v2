@@ -1,0 +1,21 @@
+{
+  "name": "goment",
+  "private": true,
+  "scripts": {
+    "build": "npm run build:css && npm run build:js",
+    "build:css": "tailwindcss -i ./web/src/css/app.css -o ./web/static/css/app.css --minify",
+    "build:js": "esbuild ./web/src/js/app.js --bundle --minify --target=es2020 --outfile=./web/static/js/app.js",
+    "watch:css": "tailwindcss -i ./web/src/css/app.css -o ./web/static/css/app.css --watch=always",
+    "watch:js": "esbuild ./web/src/js/app.js --bundle --sourcemap --target=es2020 --outfile=./web/static/js/app.js --watch=forever"
+  },
+  "dependencies": {
+    "alpinejs": "^3.15.12",
+    "htmx.org": "^2.0.10",
+    "lucide": "^1.31.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "esbuild": "^0.28.2",
+    "tailwindcss": "^4.3.3"
+  }
+}

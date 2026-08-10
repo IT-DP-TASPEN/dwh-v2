@@ -1,0 +1,18 @@
+{{/* Users feature */}}{{define "content"}}
+<section>
+    <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+            <p class="text-sm font-medium text-emerald-600 dark:text-emerald-400">Management</p>
+            <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-950 dark:text-white">Users</h1>
+            <p class="mt-2 text-slate-600 dark:text-slate-400">Manage identities, roles, account status, and passwords.</p>
+        </div>
+        {{if .Data.CanCreate}}<a href="/users/new" class="inline-flex items-center justify-center rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 dark:ring-offset-slate-950">New User</a>{{end}}
+    </div>
+
+    <form method="get" action="/users" class="mb-4" hx-get="/users" hx-target="#users-table" hx-swap="outerHTML" hx-push-url="true" hx-trigger="input changed delay:300ms, search">
+        <label for="user-search" class="sr-only">Search users</label>
+        <input id="user-search" name="q" type="search" value="{{.Data.Query}}" placeholder="Search name or username" autocomplete="off" class="w-full max-w-md rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-950 shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white">
+    </form>
+    {{template "users-table" .}}
+</section>
+{{end}}

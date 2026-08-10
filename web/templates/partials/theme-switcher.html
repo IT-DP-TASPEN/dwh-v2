@@ -1,0 +1,11 @@
+{{define "theme-switcher"}}
+<label class="inline-flex items-center" x-data>
+    <span class="sr-only">Theme</span>
+    <select aria-label="Theme" x-model="$store.theme.preference" @change="$store.theme.set($event.target.value)"
+        class="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 shadow-sm outline-none transition hover:bg-slate-50 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800">
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+        <option value="system">System</option>
+    </select>
+</label>
+{{end}}

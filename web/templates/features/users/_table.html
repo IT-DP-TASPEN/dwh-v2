@@ -1,0 +1,32 @@
+{{define "users-table"}}
+<div id="users-table">
+    <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <table class="min-w-full divide-y divide-slate-200 text-left text-sm dark:divide-slate-800">
+            <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:bg-slate-900/80 dark:text-slate-400">
+                <tr><th class="px-4 py-3">Name</th><th class="px-4 py-3">Username</th><th class="px-4 py-3">Role</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Last Login</th><th class="px-4 py-3 text-right">Actions</th></tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                {{range .Data.Rows}}
+                <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                    <td class="whitespace-nowrap px-4 py-3 font-medium text-slate-950 dark:text-white"><a href="/users/{{.User.ID}}" class="hover:text-emerald-600 dark:hover:text-emerald-400">{{.User.Name}}</a></td>
+                    <td class="whitespace-nowrap px-4 py-3 text-slate-600 dark:text-slate-300">@{{.User.Username}}</td>
+                    <td class="whitespace-nowrap px-4 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-medium {{if eq .User.RoleSlug "admin"}}bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300{{else}}bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300{{end}}">{{.User.RoleName}}</span></td>
+                    <td class="whitespace-nowrap px-4 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-medium {{if .User.IsActive}}bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300{{else}}bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300{{end}}">{{if .User.IsActive}}Active{{else}}Inactive{{end}}</span></td>
+                    <td class="whitespace-nowrap px-4 py-3 text-slate-600 dark:text-slate-400">{{if .User.LastLoginAt}}{{.User.LastLoginAt.Format "02 Jan 2006 15:04 UTC"}}{{else}}Never{{end}}</td>
+                    <td class="whitespace-nowrap px-4 py-3 text-right"><a href="/users/{{.User.ID}}" class="font-medium text-emerald-700 hover:underline dark:text-emerald-400">View</a>{{if .CanEdit}} <a href="/users/{{.User.ID}}/edit" class="ml-3 font-medium text-slate-700 hover:underline dark:text-slate-300">Edit</a>{{end}}</td>
+                </tr>
+                {{else}}
+                <tr><td colspan="6" class="px-4 py-12 text-center text-slate-500 dark:text-slate-400">No users found.</td></tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    <div class="mt-4 flex items-center justify-between gap-4 text-sm text-slate-600 dark:text-slate-400">
+        <p>{{.Data.Pagination.Total}} users · Page {{.Data.Pagination.Page}} of {{.Data.Pagination.TotalPages}}</p>
+        <nav class="flex gap-2" aria-label="User pagination">
+            {{if .Data.PreviousURL}}<a href="{{.Data.PreviousURL}}" hx-get="{{.Data.PreviousURL}}" hx-target="#users-table" hx-swap="outerHTML" hx-push-url="true" class="rounded-lg border border-slate-300 px-3 py-2 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800">Previous</a>{{end}}
+            {{if .Data.NextURL}}<a href="{{.Data.NextURL}}" hx-get="{{.Data.NextURL}}" hx-target="#users-table" hx-swap="outerHTML" hx-push-url="true" class="rounded-lg border border-slate-300 px-3 py-2 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800">Next</a>{{end}}
+        </nav>
+    </div>
+</div>
+{{end}}

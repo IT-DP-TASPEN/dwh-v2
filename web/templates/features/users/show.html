@@ -1,0 +1,24 @@
+{{/* Users feature */}}{{define "content"}}
+<section>
+    <a href="/users" class="text-sm font-medium text-emerald-700 hover:underline dark:text-emerald-400">← Users</a>
+    <div class="mt-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div><h1 class="text-3xl font-bold tracking-tight text-slate-950 dark:text-white">{{.Data.User.Name}}</h1><p class="mt-1 text-slate-600 dark:text-slate-400">@{{.Data.User.Username}}</p></div>
+        <div class="flex flex-wrap gap-3">
+            {{if .Data.CanImpersonate}}<form method="post" action="/users/{{.Data.User.ID}}/impersonate"><button type="submit" class="rounded-lg bg-amber-500 px-4 py-2.5 text-sm font-semibold text-amber-950 hover:bg-amber-400">Impersonate</button></form>{{end}}
+            {{if .Data.CanEdit}}<a href="/users/{{.Data.User.ID}}/edit" class="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800">Edit Profile</a>{{end}}
+        </div>
+    </div>
+    <dl class="mt-6 grid gap-px overflow-hidden rounded-xl border border-slate-200 bg-slate-200 sm:grid-cols-2 dark:border-slate-800 dark:bg-slate-800">
+        <div class="bg-white p-4 dark:bg-slate-900"><dt class="text-sm text-slate-500">Role</dt><dd class="mt-1 font-medium">{{.Data.User.RoleName}} <span class="text-sm text-slate-500">({{.Data.User.RoleSlug}})</span></dd></div>
+        <div class="bg-white p-4 dark:bg-slate-900"><dt class="text-sm text-slate-500">Status</dt><dd class="mt-1 font-medium">{{if .Data.User.IsActive}}Active{{else}}Inactive{{end}}</dd></div>
+        <div class="bg-white p-4 dark:bg-slate-900"><dt class="text-sm text-slate-500">Last login</dt><dd class="mt-1 font-medium">{{if .Data.User.LastLoginAt}}{{.Data.User.LastLoginAt.Format "02 Jan 2006 15:04 UTC"}}{{else}}Never{{end}}</dd></div>
+        <div class="bg-white p-4 dark:bg-slate-900"><dt class="text-sm text-slate-500">Created</dt><dd class="mt-1 font-medium">{{.Data.User.CreatedAt.Format "02 Jan 2006 15:04 UTC"}}</dd></div>
+        <div class="bg-white p-4 dark:bg-slate-900"><dt class="text-sm text-slate-500">Updated</dt><dd class="mt-1 font-medium">{{.Data.User.UpdatedAt.Format "02 Jan 2006 15:04 UTC"}}</dd></div>
+    </dl>
+    <div class="mt-6 grid gap-4 lg:grid-cols-2">
+        {{if .Data.CanAssignRole}}<form method="post" action="/users/{{.Data.User.ID}}/role" class="space-y-3 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><h2 class="font-semibold">Assign Role</h2><label for="role" class="sr-only">Role</label><select id="role" name="role_id" required class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 dark:border-slate-700 dark:bg-slate-950">{{range .Data.Roles}}<option value="{{.ID}}" {{if eq .ID $.Data.User.RoleID}}selected{{end}}>{{.Name}}</option>{{end}}</select><button class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Assign Role</button></form>{{end}}
+        {{if .Data.CanChangeStatus}}<div class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><h2 class="font-semibold">Account Status</h2><p class="mt-2 text-sm text-slate-600 dark:text-slate-400">{{if .Data.User.IsActive}}Deactivation immediately revokes all sessions.{{else}}Activation permits future sign-in.{{end}}</p><form method="post" action="/users/{{.Data.User.ID}}/{{if .Data.User.IsActive}}deactivate{{else}}activate{{end}}" class="mt-4" {{if .Data.User.IsActive}}data-confirm data-confirm-title="Deactivate user?" data-confirm-message="This immediately revokes the user's sessions and any sessions impersonating this user." data-confirm-label="Deactivate"{{end}}><button class="rounded-lg px-4 py-2 text-sm font-semibold {{if .Data.User.IsActive}}bg-red-600 text-white hover:bg-red-500{{else}}bg-emerald-500 text-slate-950 hover:bg-emerald-400{{end}}">{{if .Data.User.IsActive}}Deactivate{{else}}Activate{{end}}</button></form></div>{{end}}
+        {{if .Data.CanResetPassword}}<div class="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><h2 class="font-semibold">Password</h2><p class="mt-2 text-sm text-slate-600 dark:text-slate-400">Resetting password revokes all existing sessions.</p><a href="/users/{{.Data.User.ID}}/reset-password" class="mt-4 inline-block rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800">Reset Password</a></div>{{end}}
+    </div>
+</section>
+{{end}}

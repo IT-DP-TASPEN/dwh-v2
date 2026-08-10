@@ -1,0 +1,37 @@
+{{define "topbar"}}
+<header class="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-slate-200 bg-white/90 px-4 backdrop-blur sm:px-6 dark:border-slate-800 dark:bg-slate-950/85">
+    <button type="button" class="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900 lg:hidden dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white" @click="mobileOpen = true" aria-controls="admin-sidebar" :aria-expanded="mobileOpen.toString()" aria-label="Open navigation">
+        <i data-lucide="menu" class="size-5" aria-hidden="true"></i>
+    </button>
+    <button type="button" class="hidden rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900 lg:inline-flex dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white" @click="toggleSidebar()" aria-controls="admin-sidebar" :aria-expanded="(!sidebarCollapsed).toString()" aria-label="Toggle sidebar">
+        <i data-lucide="panel-left-close" class="size-5" aria-hidden="true"></i>
+    </button>
+
+    <p class="min-w-0 flex-1 truncate font-semibold text-slate-900 dark:text-white">{{.Title}}</p>
+    {{template "theme-switcher" .}}
+
+    <details class="relative">
+        <summary class="flex cursor-pointer list-none items-center gap-2 rounded-lg p-1.5 text-left hover:bg-slate-100 dark:hover:bg-slate-800">
+            <span class="grid size-8 place-items-center rounded-full bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                <i data-lucide="user-round" class="size-4" aria-hidden="true"></i>
+            </span>
+            <span class="hidden min-w-0 sm:block">
+                <span class="block max-w-40 truncate text-sm font-medium text-slate-900 dark:text-white">{{.Principal.Name}}</span>
+                <span class="block max-w-40 truncate text-xs text-slate-500 dark:text-slate-400">{{.Principal.Username}}</span>
+            </span>
+        </summary>
+        <div class="absolute right-0 mt-2 w-64 rounded-xl border border-slate-200 bg-white p-2 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+            <div class="px-3 py-2">
+                <p class="truncate text-sm font-medium text-slate-900 dark:text-white">{{.Principal.Name}}</p>
+                <p class="truncate text-xs text-slate-500 dark:text-slate-400">@{{.Principal.Username}} · {{if .Principal.RoleName}}{{.Principal.RoleName}}{{else}}{{.Principal.RoleSlug}}{{end}}</p>
+            </div>
+            <form method="post" action="/logout" class="border-t border-slate-200 pt-2 dark:border-slate-800">
+                <button type="submit" class="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40">
+                    <i data-lucide="log-out" class="size-4" aria-hidden="true"></i>
+                    Sign out
+                </button>
+            </form>
+        </div>
+    </details>
+</header>
+{{end}}

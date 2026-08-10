@@ -1,0 +1,47 @@
+{{define "content"}}
+<main class="grid min-h-screen place-items-center px-4 py-10 sm:px-6">
+    <section class="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl shadow-slate-200/60 sm:p-8 dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/30">
+        <div class="mb-8">
+            <p class="text-sm font-semibold uppercase tracking-widest text-emerald-400">{{.AppName}}</p>
+            <h1 class="mt-3 text-3xl font-bold tracking-tight text-slate-950 dark:text-white">Create account</h1>
+            <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">Register with a username and secure password.</p>
+        </div>
+
+        <form method="post" action="/register" class="space-y-5">
+            <div>
+                <label for="name" class="block text-sm font-medium text-slate-700 dark:text-slate-200">Name</label>
+                <input id="name" name="name" type="text" autocomplete="name" required autofocus value="{{.Data.Name}}"
+                    {{if index .Data.Errors "name"}}aria-invalid="true" aria-describedby="name-error"{{end}}
+                    class="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-950 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                {{with index .Data.Errors "name"}}<p id="name-error" class="mt-2 text-sm text-red-600 dark:text-red-400">{{.}}</p>{{end}}
+            </div>
+            <div>
+                <label for="username" class="block text-sm font-medium text-slate-700 dark:text-slate-200">Username</label>
+                <input id="username" name="username" type="text" autocomplete="username" required value="{{.Data.Username}}"
+                    {{if index .Data.Errors "username"}}aria-invalid="true" aria-describedby="username-error"{{end}}
+                    class="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-950 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                {{with index .Data.Errors "username"}}<p id="username-error" class="mt-2 text-sm text-red-600 dark:text-red-400">{{.}}</p>{{end}}
+            </div>
+            <div>
+                <label for="password" class="block text-sm font-medium text-slate-700 dark:text-slate-200">Password</label>
+                <input id="password" name="password" type="password" autocomplete="new-password" required
+                    {{if index .Data.Errors "password"}}aria-invalid="true" aria-describedby="password-error"{{end}}
+                    class="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-950 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                {{with index .Data.Errors "password"}}<p id="password-error" class="mt-2 text-sm text-red-600 dark:text-red-400">{{.}}</p>{{end}}
+            </div>
+            <div>
+                <label for="password_confirmation" class="block text-sm font-medium text-slate-700 dark:text-slate-200">Confirm password</label>
+                <input id="password_confirmation" name="password_confirmation" type="password" autocomplete="new-password" required
+                    {{if index .Data.Errors "password_confirmation"}}aria-invalid="true" aria-describedby="password-confirmation-error"{{end}}
+                    class="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-950 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                {{with index .Data.Errors "password_confirmation"}}<p id="password-confirmation-error" class="mt-2 text-sm text-red-600 dark:text-red-400">{{.}}</p>{{end}}
+            </div>
+            <button type="submit" class="w-full rounded-lg bg-emerald-500 px-4 py-2.5 font-semibold text-slate-950 transition hover:bg-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-slate-900">
+                Register
+            </button>
+        </form>
+
+        <p class="mt-6 text-center text-sm text-slate-600 dark:text-slate-400">Already have an account? <a href="/login" class="font-medium text-emerald-600 hover:text-emerald-500 dark:text-emerald-400 dark:hover:text-emerald-300">Sign in</a></p>
+    </section>
+</main>
+{{end}}
