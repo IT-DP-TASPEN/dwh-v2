@@ -69,6 +69,52 @@ func TestParseSupportedEnvironments(t *testing.T) {
 	}
 }
 
+func TestParseRuntimeRequiresFincloudOnlyAtRuntimeBoundary(t *testing.T) {
+	if _, err := parse(mapLookup(baseValues("", ""))); err != nil {
+		t.Fatalf("core config unexpectedly requires Fincloud: %v", err)
+	}
+
+	_, err := parseRuntime(mapLookup(baseValues("", "")))
+	if err == nil || !strings.Contains(err.Error(), "FINCLOUD_BASE_URL") {
+		t.Fatalf("runtime config error = %v, want missing Fincloud base URL", err)
+	}
+
+	values := runtimeValues()
+	got, err := parseRuntime(mapLookup(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Fincloud.LocationID != "001" || got.Fincloud.RoleID != "role-1" || got.Fincloud.HTTPTimeout != 30*time.Second {
+		t.Fatalf("unexpected Fincloud config: %+v", got.Fincloud)
+	}
+}
+
+func TestParseFincloudValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		value   string
+		wantErr string
+	}{
+		{"http URL", "FINCLOUD_BASE_URL", "http://fincloud.test", "absolute https"},
+		{"embedded credentials", "FINCLOUD_BASE_URL", "https://user:pass@fincloud.test", "without credentials"},
+		{"query", "FINCLOUD_BASE_URL", "https://fincloud.test?token=x", "without credentials"},
+		{"blank location", "FINCLOUD_LOCATION_ID", " ", "FINCLOUD_LOCATION_ID"},
+		{"invalid timeout", "FINCLOUD_HTTP_TIMEOUT", "0s", "FINCLOUD_HTTP_TIMEOUT"},
+		{"invalid insecure flag", "FINCLOUD_INSECURE_SKIP_VERIFY", "sometimes", "FINCLOUD_INSECURE_SKIP_VERIFY"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := runtimeValues()
+			values[test.key] = test.value
+			_, err := parseRuntime(mapLookup(values))
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestLoadEnvironmentOverridesDotEnv(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := os.WriteFile(".env", []byte("DB_NAME=from_file\nDB_USER=file_user\n"), 0o600); err != nil {
@@ -88,7 +134,19 @@ func TestLoadEnvironmentOverridesDotEnv(t *testing.T) {
 
 func baseValues(key, value string) map[string]string {
 	values := map[string]string{"DB_NAME": "go_admin", "DB_USER": "root"}
-	values[key] = value
+	if key != "" {
+		values[key] = value
+	}
+	return values
+}
+
+func runtimeValues() map[string]string {
+	values := baseValues("", "")
+	values["FINCLOUD_BASE_URL"] = "https://fincloud.test/base"
+	values["FINCLOUD_USERNAME"] = "user"
+	values["FINCLOUD_PASSWORD"] = "secret"
+	values["FINCLOUD_LOCATION_ID"] = "001"
+	values["FINCLOUD_ROLE_ID"] = "role-1"
 	return values
 }
 

@@ -22,12 +22,31 @@ const (
 	defaultSessionCookieName       = "admin_session"
 	defaultSessionLifetime         = 24 * time.Hour
 	defaultSessionRememberLifetime = 30 * 24 * time.Hour
+	defaultFincloudHTTPTimeout     = 30 * time.Second
 )
 
 type Config struct {
 	App      AppConfig
 	Database DatabaseConfig
 	Session  SessionConfig
+}
+
+// RuntimeConfig contains configuration required by the long-running web
+// application. Operational commands that do not use Fincloud load Config
+// instead, so migrations and administrator bootstrap remain independent.
+type RuntimeConfig struct {
+	Config
+	Fincloud FincloudConfig
+}
+
+type FincloudConfig struct {
+	BaseURL            string
+	Username           string
+	Password           string
+	LocationID         string
+	RoleID             string
+	HTTPTimeout        time.Duration
+	InsecureSkipVerify bool
 }
 
 type AppConfig struct {
@@ -64,11 +83,89 @@ type SessionConfig struct {
 type lookupEnv func(string) (string, bool)
 
 func Load() (Config, error) {
-	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := loadDotEnv(); err != nil {
 		return Config{}, fmt.Errorf("load .env: %w", err)
 	}
 
 	return parse(os.LookupEnv)
+}
+
+func LoadRuntime() (RuntimeConfig, error) {
+	if err := loadDotEnv(); err != nil {
+		return RuntimeConfig{}, fmt.Errorf("load .env: %w", err)
+	}
+
+	return parseRuntime(os.LookupEnv)
+}
+
+func loadDotEnv() error {
+	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func parseRuntime(lookup lookupEnv) (RuntimeConfig, error) {
+	base, err := parse(lookup)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	fincloudConfig, err := parseFincloud(lookup)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	return RuntimeConfig{Config: base, Fincloud: fincloudConfig}, nil
+}
+
+func parseFincloud(lookup lookupEnv) (FincloudConfig, error) {
+	value := func(key, fallback string) string {
+		if result, ok := lookup(key); ok {
+			return result
+		}
+		return fallback
+	}
+
+	timeout, err := parseDuration("FINCLOUD_HTTP_TIMEOUT", value("FINCLOUD_HTTP_TIMEOUT", defaultFincloudHTTPTimeout.String()))
+	if err != nil {
+		return FincloudConfig{}, err
+	}
+	insecureSkipVerify, err := parseBool("FINCLOUD_INSECURE_SKIP_VERIFY", value("FINCLOUD_INSECURE_SKIP_VERIFY", "false"))
+	if err != nil {
+		return FincloudConfig{}, err
+	}
+
+	config := FincloudConfig{
+		BaseURL:            strings.TrimSpace(value("FINCLOUD_BASE_URL", "")),
+		Username:           strings.TrimSpace(value("FINCLOUD_USERNAME", "")),
+		Password:           value("FINCLOUD_PASSWORD", ""),
+		LocationID:         strings.TrimSpace(value("FINCLOUD_LOCATION_ID", "")),
+		RoleID:             strings.TrimSpace(value("FINCLOUD_ROLE_ID", "")),
+		HTTPTimeout:        timeout,
+		InsecureSkipVerify: insecureSkipVerify,
+	}
+
+	required := []struct {
+		key   string
+		value string
+	}{
+		{"FINCLOUD_BASE_URL", config.BaseURL},
+		{"FINCLOUD_USERNAME", config.Username},
+		{"FINCLOUD_PASSWORD", strings.TrimSpace(config.Password)},
+		{"FINCLOUD_LOCATION_ID", config.LocationID},
+		{"FINCLOUD_ROLE_ID", config.RoleID},
+	}
+	for _, field := range required {
+		if field.value == "" {
+			return FincloudConfig{}, fmt.Errorf("%s must not be empty", field.key)
+		}
+	}
+
+	baseURL, err := url.Parse(config.BaseURL)
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+		return FincloudConfig{}, fmt.Errorf("FINCLOUD_BASE_URL must be an absolute https URL without credentials, query, or fragment")
+	}
+
+	return config, nil
 }
 
 func parse(lookup lookupEnv) (Config, error) {

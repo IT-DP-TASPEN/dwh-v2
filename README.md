@@ -78,6 +78,10 @@ Session settings:
 
 Authentication cookies are `HttpOnly`, `SameSite=Lax`, path `/`, and use the configured secure flag.
 
+The web runtime also requires Fincloud source configuration: `FINCLOUD_BASE_URL`, `FINCLOUD_USERNAME`, `FINCLOUD_PASSWORD`, `FINCLOUD_LOCATION_ID`, and `FINCLOUD_ROLE_ID`. The base URL must be absolute HTTPS without embedded credentials. `FINCLOUD_HTTP_TIMEOUT` defaults to `30s`; TLS verification is enabled unless `FINCLOUD_INSECURE_SKIP_VERIFY=true` is explicitly set. These values are validated only by the web runtime: migrations and `app admin create` do not use or require Fincloud. Client construction performs no login or connectivity probe, so temporary Fincloud unavailability does not prevent a correctly configured web process from starting.
+
+`FINCLOUD_LOCATION_ID` is login/session context only. It is never substituted for fixed-report data scope; complete report location/account-code dimensions are source-enumerated internally.
+
 ## Permissions and management
 
 The 13 canonical permission keys are aggregated from features and synchronized additively at server and CLI bootstrap. Unknown database permissions and assignments are preserved. Migrations never run automatically at application startup. `audit.view` may be assigned to user or custom roles; administrators receive it through the normal superuser bypass.
@@ -195,6 +199,8 @@ internal/browserauth/ login, registration, logout, and principal resolution
 internal/securityctx/ neutral actor/effective request snapshots
 internal/platform/    admin shell, navigation, pagination, and web helpers
 internal/features/    dashboard, users, roles, impersonation, and audit viewer
+internal/fincloud/    lazy authenticated Fincloud source client and active DTOs
+internal/ingestion/   DWH source contracts, catalog, planning, and parsers
 internal/render/      templates, notices, and safe error responses
 internal/server/      Chi routes, middleware, and graceful server
 internal/testutil/    shared test-only infrastructure

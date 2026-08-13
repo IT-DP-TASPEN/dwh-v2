@@ -16,6 +16,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/browserauth"
 	"github.com/ibldzn/go-admin/internal/config"
 	"github.com/ibldzn/go-admin/internal/database"
+	"github.com/ibldzn/go-admin/internal/fincloud"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/render"
@@ -25,7 +26,7 @@ import (
 )
 
 func Run(ctx context.Context) error {
-	applicationConfig, err := config.Load()
+	applicationConfig, err := config.LoadRuntime()
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
 	}
@@ -36,6 +37,20 @@ func Run(ctx context.Context) error {
 		"name", applicationConfig.App.Name,
 		"environment", applicationConfig.App.Environment,
 	)
+
+	fincloudClient, err := fincloud.NewClient(fincloud.Config{
+		BaseURL:            applicationConfig.Fincloud.BaseURL,
+		Username:           applicationConfig.Fincloud.Username,
+		Password:           applicationConfig.Fincloud.Password,
+		LocationID:         applicationConfig.Fincloud.LocationID,
+		RoleID:             applicationConfig.Fincloud.RoleID,
+		HTTPTimeout:        applicationConfig.Fincloud.HTTPTimeout,
+		InsecureSkipVerify: applicationConfig.Fincloud.InsecureSkipVerify,
+	})
+	if err != nil {
+		return fmt.Errorf("initialize Fincloud client: %w", err)
+	}
+	defer fincloudClient.CloseIdleConnections()
 
 	databaseContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 	databaseConnection, err := database.Open(databaseContext, applicationConfig.Database)
