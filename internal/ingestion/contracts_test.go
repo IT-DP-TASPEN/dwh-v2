@@ -2,6 +2,7 @@ package ingestion
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -122,6 +123,24 @@ func TestPurePlanUsesFrozenDeterministicInternalDimensions(t *testing.T) {
 			}
 		}
 		_ = definition
+	}
+}
+
+func TestFixedManifestCanonicalGolden(t *testing.T) {
+	definition := FixedDefinitions()[2]
+	date, _ := ParseCalendarDate("2026-08-12")
+	locations, _ := FreezeLocations([]string{"008", "000"})
+	plan, err := BuildFixedSnapshotPlan(definition, FixedSnapshotDateParams{Date: date}, locations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checksum, err := FixedManifestChecksum(definition, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "00c5ca8db9364afbcec149515f30f98353d879c33d8e254dad2f0a30cc109e3b"
+	if got := hex.EncodeToString(checksum[:]); got != want {
+		t.Fatalf("manifest checksum = %s", got)
 	}
 }
 

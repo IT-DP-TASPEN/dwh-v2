@@ -241,7 +241,7 @@ type ParsedMaintenanceCSV struct {
 }
 
 var reservedMaintenanceColumns = map[string]struct{}{
-	"as_of_date": {}, "business_key_hash": {}, "source_file_name": {}, "source_row_number": {},
+	"requested_date": {}, "as_of_date": {}, "business_key_hash": {}, "source_file_name": {}, "source_row_number": {},
 	"source_row_checksum": {}, "ingestion_run_id": {}, "created_at": {}, "updated_at": {},
 }
 

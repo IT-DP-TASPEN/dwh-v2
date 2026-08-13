@@ -61,6 +61,19 @@ Open <http://localhost:8080> after creating the initial administrator.
 
 Frontend source under `web/src/` is authoritative. Generated `web/static/css/app.css` and `web/static/js/app.js` are committed; do not edit them manually.
 
+## Existing `dwh2` adoption
+
+`dwh2` has legacy 14-digit Goose history above the current 12-digit authentication bootstrap versions. Do not run ordinary `make migrate` on that database until the one-time adoption succeeds.
+
+After a verified backup and explicit shutdown of every database writer:
+
+```sh
+go run ./cmd/adopt-dwh2 preflight
+go run ./cmd/adopt-dwh2 apply --confirm <fingerprint-from-preflight>
+```
+
+The command is hard-restricted to exact database `dwh2`. It recomputes the schema/data fingerprint before writing, replaces approved legacy authentication, applies only the seven allowlisted lower bootstrap migrations out of order, and then executes Phase 3 migrations normally. It never runs from web startup, tests, or `cmd/migrate`. Recreate the first target administrator explicitly after adoption.
+
 ## Configuration
 
 `APP_ENV` accepts `development`, `production`, or `test`. `APP_NAME` controls runtime branding and is independent of the Go module name.
@@ -169,9 +182,9 @@ set -a; . ./.env.test.local; set +a
 make test-integration
 ```
 
-All five `TEST_DB_*` variables must be explicitly present. The password may be empty. `TEST_DB_NAME` must name an existing disposable database and must differ from the normal `DB_NAME`; tests apply real migrations and truncate application tables there. They never fall back to normal runtime configuration or create/drop a database.
+All five `TEST_DB_*` variables must be explicitly present. The password may be empty. `TEST_DB_NAME` must name an existing disposable database, must differ from the normal `DB_NAME`, and may never be `dwh2` or `dwh3`; tests apply real migrations and truncate application tables there. They never fall back to normal runtime configuration or create/drop a database.
 
-Integration coverage exercises InnoDB last-admin serialization, audit rollback, impersonation token/state atomicity, session revocation, permission preservation, and MySQL constraint/error mapping.
+Integration coverage also exercises the real Goose adoption topology, snapshot transactions, member-complete fixed-report promotion, runtime additive DDL, schema-lock races, and physical disposal of a connection with uncertain named-lock release.
 
 ## Renaming the starter
 
@@ -189,6 +202,7 @@ The stdlib-only tool validates a conservative module path, edits the exact `go.m
 
 ```text
 cmd/app/              server and administrator CLI
+cmd/adopt-dwh2/       explicit one-time dwh2 adoption administration
 cmd/migrate/          operator-controlled Goose wrapper
 cmd/rename-module/    safe starter module renaming
 cmd/feature/          minimal feature scaffolder
@@ -201,6 +215,9 @@ internal/platform/    admin shell, navigation, pagination, and web helpers
 internal/features/    dashboard, users, roles, impersonation, and audit viewer
 internal/fincloud/    lazy authenticated Fincloud source client and active DTOs
 internal/ingestion/   DWH source contracts, catalog, planning, and parsers
+internal/ingestionstore/ fixed/detail/maintenance persistence and dynamic DDL
+internal/adoption/    fail-closed dwh2 preflight and adoption engine
+internal/dwhschema/   canonical DWH schema/adoption metadata
 internal/render/      templates, notices, and safe error responses
 internal/server/      Chi routes, middleware, and graceful server
 internal/testutil/    shared test-only infrastructure

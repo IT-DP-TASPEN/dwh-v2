@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/hex"
 	"fmt"
@@ -16,6 +17,8 @@ type LocationStrategy string
 type AccountCodeStrategy string
 
 const (
+	SingleFixedMemberKey = "__single__"
+
 	SingleRequestAllLocationsEmpty LocationStrategy = "single_request_all_locations_empty"
 	PerLocation                    LocationStrategy = "per_location"
 
@@ -36,10 +39,46 @@ type FixedDefinition struct {
 }
 
 type RequestDescriptor struct {
+	MemberKey        string
 	ReportName       string
 	Parameters       []string
 	SourceLocationID string
 	AccountCode      string
+}
+
+func FixedManifestChecksum(definition FixedDefinition, plan FixedPlan) ([32]byte, error) {
+	if plan.JobKey != definition.Key || len(plan.Members) == 0 || !plan.RequireAllMembers {
+		return [32]byte{}, fmt.Errorf("complete fixed plan for %s is required", definition.Key)
+	}
+	members := make([]string, len(plan.Members))
+	seen := make(map[string]struct{}, len(members))
+	for index, member := range plan.Members {
+		if member.MemberKey == "" {
+			return [32]byte{}, fmt.Errorf("fixed plan member key is required")
+		}
+		if _, duplicate := seen[member.MemberKey]; duplicate {
+			return [32]byte{}, fmt.Errorf("duplicate fixed plan member %q", member.MemberKey)
+		}
+		seen[member.MemberKey] = struct{}{}
+		members[index] = member.MemberKey
+	}
+	sort.Strings(members)
+	var encoded bytes.Buffer
+	encoded.WriteString("DWH-FIXED-MANIFEST\x00")
+	_ = binary.Write(&encoded, binary.BigEndian, uint16(1))
+	for _, value := range []string{plan.JobKey, string(definition.LocationStrategy), string(definition.AccountCodeStrategy), plan.Range.From.String(), plan.Range.To.String()} {
+		writeManifestString(&encoded, value)
+	}
+	_ = binary.Write(&encoded, binary.BigEndian, uint32(len(members)))
+	for _, member := range members {
+		writeManifestString(&encoded, member)
+	}
+	return sha256.Sum256(encoded.Bytes()), nil
+}
+
+func writeManifestString(buffer *bytes.Buffer, value string) {
+	_ = binary.Write(buffer, binary.BigEndian, uint32(len([]byte(value))))
+	buffer.WriteString(value)
 }
 
 type FixedPlan struct {
@@ -110,17 +149,17 @@ func BuildFixedPlan(definition FixedDefinition, requested FixedDateRangeParams, 
 			return FixedPlan{}, fmt.Errorf("%s requires a frozen location set", definition.Key)
 		}
 		for _, location := range locations {
-			members = append(members, descriptor(definition, requested, location, ""))
+			members = append(members, descriptor(definition, requested, location, "", location))
 		}
 	case definition.AccountCodeStrategy == AllAccountCodes:
 		if len(accounts) == 0 {
 			return FixedPlan{}, fmt.Errorf("%s requires a frozen account-code set", definition.Key)
 		}
 		for _, account := range accounts {
-			members = append(members, descriptor(definition, requested, "", account))
+			members = append(members, descriptor(definition, requested, "", account, account))
 		}
 	default:
-		members = []RequestDescriptor{descriptor(definition, requested, "", "")}
+		members = []RequestDescriptor{descriptor(definition, requested, "", "", SingleFixedMemberKey)}
 	}
 	return FixedPlan{
 		JobKey: definition.Key, Range: requested,
@@ -136,7 +175,7 @@ func BuildFixedSnapshotPlan(definition FixedDefinition, requested FixedSnapshotD
 	return BuildFixedPlan(definition, FixedDateRangeParams{From: requested.Date, To: requested.Date}, frozenLocations, FrozenAccountCodes{})
 }
 
-func descriptor(definition FixedDefinition, requested FixedDateRangeParams, location, account string) RequestDescriptor {
+func descriptor(definition FixedDefinition, requested FixedDateRangeParams, location, account, memberKey string) RequestDescriptor {
 	from, to := requested.From.String(), requested.To.String()
 	var parameters []string
 	switch definition.Key {
@@ -157,8 +196,10 @@ func descriptor(definition FixedDefinition, requested FixedDateRangeParams, loca
 	case "teller_mutation_report":
 		parameters = []string{location, "ALL", from, to}
 	}
-	return RequestDescriptor{ReportName: definition.FincloudReportName, Parameters: parameters, SourceLocationID: location, AccountCode: account}
+	return RequestDescriptor{MemberKey: memberKey, ReportName: definition.FincloudReportName, Parameters: parameters, SourceLocationID: location, AccountCode: account}
 }
+
+func FixedColumnName(header string) string { return toSnakeCase(header) }
 
 type DateChunk struct{ From, To CalendarDate }
 

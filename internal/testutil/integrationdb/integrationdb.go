@@ -164,6 +164,9 @@ func testConfig(t *testing.T, root string) config.DatabaseConfig {
 	if values["TEST_DB_NAME"] == "" {
 		t.Fatal("TEST_DB_NAME must not be empty")
 	}
+	if values["TEST_DB_NAME"] == "dwh2" || values["TEST_DB_NAME"] == "dwh3" {
+		t.Fatalf("TEST_DB_NAME %q is reserved; refusing destructive integration tests", values["TEST_DB_NAME"])
+	}
 	normalName := os.Getenv("DB_NAME")
 	if normalName == "" {
 		if environment, err := godotenv.Read(filepath.Join(root, ".env")); err == nil {
