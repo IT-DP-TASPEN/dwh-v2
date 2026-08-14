@@ -7175,6 +7175,26 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     return element.parentNode?.replaceChild(svgElement, element);
   };
 
+  // node_modules/lucide/dist/esm/icons/activity.mjs
+  var Activity = [
+    [
+      "path",
+      {
+        d: "M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"
+      }
+    ]
+  ];
+
+  // node_modules/lucide/dist/esm/icons/calendar-clock.mjs
+  var CalendarClock = [
+    ["path", { d: "M16 14v2.2l1.6 1" }],
+    ["path", { d: "M16 2v3" }],
+    ["path", { d: "M21 7.338V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h2.338" }],
+    ["path", { d: "M3 9h5.859" }],
+    ["path", { d: "M8 2v3" }],
+    ["circle", { cx: "16", cy: "16", r: "6" }]
+  ];
+
   // node_modules/lucide/dist/esm/icons/chevron-down.mjs
   var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
 
@@ -7182,6 +7202,13 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
   var CircleCheckBig = [
     ["path", { d: "M21.801 10A10 10 0 1 1 17 3.335" }],
     ["path", { d: "m9 11 3 3L22 4" }]
+  ];
+
+  // node_modules/lucide/dist/esm/icons/database.mjs
+  var Database = [
+    ["ellipse", { cx: "12", cy: "5", rx: "9", ry: "3" }],
+    ["path", { d: "M3 5V19A9 3 0 0 0 21 19V5" }],
+    ["path", { d: "M3 12A9 3 0 0 0 21 12" }]
   ];
 
   // node_modules/lucide/dist/esm/icons/layout-dashboard.mjs
@@ -7211,6 +7238,13 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
     ["path", { d: "M9 3v18" }],
     ["path", { d: "m16 15-3-3 3-3" }]
+  ];
+
+  // node_modules/lucide/dist/esm/icons/rotate-ccw-clock.mjs
+  var RotateCcwClock = [
+    ["path", { d: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" }],
+    ["path", { d: "M3 3v5h5" }],
+    ["path", { d: "M12 7v5l4 2" }]
   ];
 
   // node_modules/lucide/dist/esm/icons/scroll-text.mjs
@@ -7438,7 +7472,7 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     window.dispatchEvent(new CustomEvent("confirm-submit", { detail: { form, trigger: event.submitter } }));
   });
   var initializeIcons = () => createIcons({
-    icons: { ChevronDown, CircleCheckBig, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Shield, ShieldCheck, UserRound, Users, X }
+    icons: { Activity, CalendarClock, ChevronDown, CircleCheckBig, Database, History: RotateCcwClock, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Shield, ShieldCheck, UserRound, Users, X }
   });
   document.addEventListener("DOMContentLoaded", initializeIcons);
   document.body.addEventListener("htmx:afterSwap", initializeIcons);
@@ -7453,12 +7487,16 @@ lucide/dist/esm/shared/src/utils/mergeClasses.mjs:
 lucide/dist/esm/shared/src/utils/toCamelCase.mjs:
 lucide/dist/esm/shared/src/utils/toPascalCase.mjs:
 lucide/dist/esm/replaceElement.mjs:
+lucide/dist/esm/icons/activity.mjs:
+lucide/dist/esm/icons/calendar-clock.mjs:
 lucide/dist/esm/icons/chevron-down.mjs:
 lucide/dist/esm/icons/circle-check-big.mjs:
+lucide/dist/esm/icons/database.mjs:
 lucide/dist/esm/icons/layout-dashboard.mjs:
 lucide/dist/esm/icons/log-out.mjs:
 lucide/dist/esm/icons/menu.mjs:
 lucide/dist/esm/icons/panel-left-close.mjs:
+lucide/dist/esm/icons/rotate-ccw-clock.mjs:
 lucide/dist/esm/icons/scroll-text.mjs:
 lucide/dist/esm/icons/shield-check.mjs:
 lucide/dist/esm/icons/shield.mjs:

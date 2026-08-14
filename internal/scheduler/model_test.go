@@ -27,6 +27,10 @@ func TestPolicyCronAndRetryContracts(t *testing.T) {
 	if _, err := validatePolicy(policy); !errors.Is(err, ErrInvalidDefinition) {
 		t.Fatalf("checksum mismatch error=%v", err)
 	}
+	live := DetailLiveSnapshotPolicy()
+	if live.Kind != PolicyDetailLiveSnapshot || string(live.Payload) != "{}" || live.Checksum == PreviousCalendarDayPolicy().Checksum {
+		t.Fatalf("invalid live snapshot policy: %+v", live)
+	}
 
 	reference := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
 	parsed, err := parseCron("0 1 * * *", "Asia/Jakarta", reference)
@@ -58,6 +62,24 @@ func TestPolicyCronAndRetryContracts(t *testing.T) {
 		if got := retryDelay(uint32(index + 1)); got != want {
 			t.Fatalf("attempt %d delay=%s want=%s", index+1, got, want)
 		}
+	}
+}
+
+func TestJobPolicyCompatibility(t *testing.T) {
+	catalog, _ := ingestion.NewCatalog()
+	reference := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	definition := Definition{Name: "test", CronExpression: "0 1 * * *", Timezone: "UTC"}
+	definition.JobKey, definition.Policy = "cif_detail", DetailLiveSnapshotPolicy()
+	if _, _, err := validateDefinition(catalog, definition, reference); err != nil {
+		t.Fatal(err)
+	}
+	definition.Policy = PreviousCalendarDayPolicy()
+	if _, _, err := validateDefinition(catalog, definition, reference); !errors.Is(err, ErrInvalidDefinition) {
+		t.Fatalf("detail accepted historical policy: %v", err)
+	}
+	definition.JobKey, definition.Policy = "cif_opening_report", DetailLiveSnapshotPolicy()
+	if _, _, err := validateDefinition(catalog, definition, reference); !errors.Is(err, ErrInvalidDefinition) {
+		t.Fatalf("replayable job accepted live policy: %v", err)
 	}
 }
 

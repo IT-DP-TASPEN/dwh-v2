@@ -351,8 +351,12 @@ func newIntegrationService(t *testing.T, db *sqlx.DB) *Service {
 
 func createDueSchedule(t *testing.T, db *sqlx.DB, service *Service, name, job string, due time.Time) Schedule {
 	t.Helper()
+	policy := PreviousCalendarDayPolicy()
+	if definition, found := service.catalog.Find(job); found && definition.DateStrategy == ingestion.NoDate {
+		policy = DetailLiveSnapshotPolicy()
+	}
 	created, err := service.Create(context.Background(), CreateInput{Definition: Definition{
-		Name: name, JobKey: job, CronExpression: "0 1 * * *", Timezone: "UTC", Policy: PreviousCalendarDayPolicy(),
+		Name: name, JobKey: job, CronExpression: "0 1 * * *", Timezone: "UTC", Policy: policy,
 	}, Enabled: true})
 	if err != nil {
 		t.Fatal(err)

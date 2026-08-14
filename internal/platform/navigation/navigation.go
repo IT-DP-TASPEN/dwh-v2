@@ -22,13 +22,14 @@ type Group struct {
 }
 
 type Item struct {
-	Key        string
-	Label      string
-	Icon       string
-	Path       string
-	Permission string
-	Match      MatchMode
-	Children   []Item
+	Key            string
+	Label          string
+	Icon           string
+	Path           string
+	Permission     string
+	AnyPermissions []string
+	Match          MatchMode
+	Children       []Item
 }
 
 type GroupView struct {
@@ -112,9 +113,17 @@ func validateItem(item Item, depth int, itemKeys, knownPermissions map[string]st
 	if strings.TrimSpace(item.Label) == "" {
 		return fmt.Errorf("navigation item %q has empty label", item.Key)
 	}
+	if item.Permission != "" && len(item.AnyPermissions) != 0 {
+		return fmt.Errorf("navigation item %q cannot combine permission modes", item.Key)
+	}
 	if item.Permission != "" {
 		if _, exists := knownPermissions[item.Permission]; !exists {
 			return fmt.Errorf("navigation item %q has unknown permission %q", item.Key, item.Permission)
+		}
+	}
+	for _, permission := range item.AnyPermissions {
+		if _, exists := knownPermissions[permission]; !exists {
+			return fmt.Errorf("navigation item %q has unknown permission %q", item.Key, permission)
 		}
 	}
 
@@ -133,7 +142,7 @@ func validateItem(item Item, depth int, itemKeys, knownPermissions map[string]st
 	if item.Path == "" {
 		return fmt.Errorf("navigation leaf %q has empty path", item.Key)
 	}
-	if item.Permission == "" {
+	if item.Permission == "" && len(item.AnyPermissions) == 0 {
 		return fmt.Errorf("navigation leaf %q has empty permission", item.Key)
 	}
 	if item.Match != MatchExact && item.Match != MatchPrefix {
@@ -149,6 +158,15 @@ func validateItem(item Item, depth int, itemKeys, knownPermissions map[string]st
 func prepareItem(item Item, depth int, currentPath string, can func(string) bool) (ItemView, bool) {
 	if item.Permission != "" && !can(item.Permission) {
 		return ItemView{}, false
+	}
+	if len(item.AnyPermissions) != 0 {
+		visible := false
+		for _, permission := range item.AnyPermissions {
+			visible = visible || can(permission)
+		}
+		if !visible {
+			return ItemView{}, false
+		}
 	}
 
 	view := ItemView{Key: item.Key, Label: item.Label, Icon: item.Icon, Path: item.Path, Depth: depth}
@@ -193,6 +211,7 @@ func cloneItems(items []Item) []Item {
 	cloned := make([]Item, len(items))
 	for index, item := range items {
 		cloned[index] = item
+		cloned[index].AnyPermissions = append([]string(nil), item.AnyPermissions...)
 		cloned[index].Children = cloneItems(item.Children)
 	}
 	return cloned

@@ -6,7 +6,10 @@ import (
 	"github.com/ibldzn/go-admin/internal/access"
 	"github.com/ibldzn/go-admin/internal/features/auditlogs"
 	"github.com/ibldzn/go-admin/internal/features/dashboard"
+	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	"github.com/ibldzn/go-admin/internal/features/roles"
+	schedulesfeature "github.com/ibldzn/go-admin/internal/features/schedules"
+	sourcesfeature "github.com/ibldzn/go-admin/internal/features/sources"
 	"github.com/ibldzn/go-admin/internal/features/users"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
 )
@@ -28,6 +31,11 @@ func TestPhaseFourNavigation(t *testing.T) {
 		{name: "users", path: "/users/7", permissions: []string{users.PermissionView}, groups: 1, active: "users"},
 		{name: "roles", path: "/roles/7", permissions: []string{roles.PermissionView}, groups: 1, active: "roles", open: "access-control"},
 		{name: "audit", path: "/audit-logs/7", permissions: []string{auditlogs.PermissionView}, groups: 1, active: "audit-logs"},
+		{name: "ingestion overview", path: "/ingestion", permissions: []string{ingestionfeature.PermissionView}, groups: 1, active: "ingestion-overview"},
+		{name: "source-only overview", path: "/ingestion", permissions: []string{sourcesfeature.PermissionView}, groups: 1, active: "ingestion-overview"},
+		{name: "sources", path: "/sources", permissions: []string{sourcesfeature.PermissionView}, groups: 1, active: "sources"},
+		{name: "runs", path: "/runs/7", permissions: []string{ingestionfeature.PermissionView}, groups: 1, active: "ingestion-runs"},
+		{name: "schedules", path: "/schedules/7", permissions: []string{schedulesfeature.PermissionView}, groups: 1, active: "schedules"},
 		{name: "management hidden", path: "/", permissions: nil, groups: 0},
 	}
 	for _, test := range tests {
@@ -49,8 +57,8 @@ func TestPhaseFourNavigation(t *testing.T) {
 
 func TestPermissionAggregation(t *testing.T) {
 	definitions := PermissionDefinitions()
-	if len(definitions) != 13 {
-		t.Fatalf("got %d permissions, want 13", len(definitions))
+	if len(definitions) != 25 {
+		t.Fatalf("got %d permissions, want 25", len(definitions))
 	}
 	if err := access.ValidateRegistry(definitions); err != nil {
 		t.Fatal(err)
@@ -61,7 +69,12 @@ func TestPermissionAggregation(t *testing.T) {
 		users.PermissionDisable: true, users.PermissionResetPassword: true,
 		roles.PermissionView: true, roles.PermissionCreate: true, roles.PermissionUpdate: true,
 		roles.PermissionDelete: true, roles.PermissionAssign: true, roles.PermissionManagePermissions: true,
-		auditlogs.PermissionView: true,
+		auditlogs.PermissionView:        true,
+		ingestionfeature.PermissionView: true, ingestionfeature.PermissionRun: true, ingestionfeature.PermissionRunAll: true,
+		ingestionfeature.PermissionCancel: true, ingestionfeature.PermissionRecoverAbandoned: true,
+		sourcesfeature.PermissionView: true, sourcesfeature.PermissionManage: true,
+		schedulesfeature.PermissionView: true, schedulesfeature.PermissionCreate: true, schedulesfeature.PermissionUpdate: true,
+		schedulesfeature.PermissionEnableDisable: true, schedulesfeature.PermissionArchive: true,
 	}
 	for _, definition := range definitions {
 		delete(want, definition.Key)

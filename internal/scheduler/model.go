@@ -20,6 +20,7 @@ import (
 const (
 	DefaultTimezone                  = "Asia/Jakarta"
 	PolicyPreviousCalendarDay        = "previous_calendar_day_jakarta"
+	PolicyDetailLiveSnapshot         = "detail_live_snapshot"
 	policyVersionV1           uint16 = 1
 	defaultLookbackDays              = 3
 )
@@ -77,8 +78,16 @@ func PreviousCalendarDayPolicy() Policy {
 	return policy
 }
 
+func DetailLiveSnapshotPolicy() Policy {
+	policy, err := canonicalPolicy(PolicyDetailLiveSnapshot, policyVersionV1, []byte("{}"))
+	if err != nil {
+		panic(err)
+	}
+	return policy
+}
+
 func canonicalPolicy(kind string, version uint16, payload []byte) (Policy, error) {
-	if kind != PolicyPreviousCalendarDay || version != policyVersionV1 {
+	if (kind != PolicyPreviousCalendarDay && kind != PolicyDetailLiveSnapshot) || version != policyVersionV1 {
 		return Policy{}, fmt.Errorf("%w: unsupported policy %q version %d", ErrInvalidDefinition, kind, version)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -154,12 +163,20 @@ func validateDefinition(catalog ingestion.Catalog, definition Definition, refere
 	if definition.Name == "" || len([]rune(definition.Name)) > 128 {
 		return Definition{}, cronDefinition{}, fmt.Errorf("%w: schedule name is required and limited to 128 characters", ErrInvalidDefinition)
 	}
-	if _, found := catalog.Find(definition.JobKey); !found {
+	job, found := catalog.Find(definition.JobKey)
+	if !found {
 		return Definition{}, cronDefinition{}, fmt.Errorf("%w: unknown job %q", ErrInvalidDefinition, definition.JobKey)
 	}
 	policy, err := validatePolicy(definition.Policy)
 	if err != nil {
 		return Definition{}, cronDefinition{}, err
+	}
+	wantPolicy := PolicyPreviousCalendarDay
+	if job.DateStrategy == ingestion.NoDate {
+		wantPolicy = PolicyDetailLiveSnapshot
+	}
+	if policy.Kind != wantPolicy {
+		return Definition{}, cronDefinition{}, fmt.Errorf("%w: job %q requires policy %q", ErrInvalidDefinition, job.Key, wantPolicy)
 	}
 	parsed, err := parseCron(definition.CronExpression, definition.Timezone, reference)
 	if err != nil {

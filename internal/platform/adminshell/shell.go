@@ -48,6 +48,25 @@ func (handler *Shell) RequirePermission(permission string) func(http.Handler) ht
 	}
 }
 
+func (handler *Shell) RequireAnyPermission(permissions ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			principal, ok := browserauth.CurrentPrincipal(request.Context())
+			if !ok {
+				handler.errors.Internal(writer, request, "permission middleware", errors.New("principal missing from request context"))
+				return
+			}
+			for _, permission := range permissions {
+				if principal.Can(permission) {
+					next.ServeHTTP(writer, request)
+					return
+				}
+			}
+			handler.RenderPage(writer, request, http.StatusForbidden, "forbidden", "Forbidden", nil)
+		})
+	}
+}
+
 func (handler *Shell) RequireImpersonationActorAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		principal, ok := browserauth.CurrentPrincipal(request.Context())

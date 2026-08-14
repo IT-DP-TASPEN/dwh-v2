@@ -91,6 +91,12 @@ func TestControlledBootstrapMatchesDWH2Topology(t *testing.T) {
 		AND EXTRA LIKE '%STORED GENERATED%'`); err != nil || generatedTrigger != 1 {
 		t.Fatalf("scheduler trigger guard=%d error=%v", generatedTrigger, err)
 	}
+	var adminIndexes int
+	if err := db.Get(&adminIndexes, `SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ingestion_runs'
+		AND INDEX_NAME IN ('idx_ingestion_runs_admin_job','idx_ingestion_runs_admin_status','idx_ingestion_runs_admin_trigger')`); err != nil || adminIndexes != 3 {
+		t.Fatalf("ingestion admin indexes=%d error=%v", adminIndexes, err)
+	}
 }
 
 func resetToLegacyTopology(t *testing.T, db *sqlx.DB) {

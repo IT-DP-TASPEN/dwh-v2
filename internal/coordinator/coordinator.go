@@ -15,6 +15,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/ingestionexec"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/ingestionstore"
+	"github.com/ibldzn/go-admin/internal/securityctx"
 )
 
 type Coordinator struct {
@@ -70,12 +71,12 @@ func (coordinator *Coordinator) SubmitRunAll(ctx context.Context, from, to inges
 	return coordinator.runs.CreateRunAll(ctx, from, to, lookback, trigger, reference, requester)
 }
 
-func (coordinator *Coordinator) Cancel(ctx context.Context, runID uint64, reason string) error {
-	return coordinator.runs.RequestCancellation(ctx, runID, reason)
+func (coordinator *Coordinator) Cancel(ctx context.Context, runID uint64, reason string, requester securityctx.Requester) error {
+	return coordinator.runs.RequestCancellation(ctx, runID, reason, requester)
 }
 
-func (coordinator *Coordinator) RecoverAbandoned(ctx context.Context, runID uint64, expectedOwner string, expectedHeartbeat time.Time, reason string) error {
-	return coordinator.runs.RecoverAbandoned(ctx, runID, expectedOwner, expectedHeartbeat, reason)
+func (coordinator *Coordinator) RecoverAbandoned(ctx context.Context, runID uint64, expectedOwner string, expectedHeartbeat time.Time, reason string, requester securityctx.Requester) error {
+	return coordinator.runs.RecoverAbandoned(ctx, runID, expectedOwner, expectedHeartbeat, reason, requester)
 }
 
 func (coordinator *Coordinator) Run(ctx context.Context) {

@@ -13,29 +13,32 @@ import (
 type Action string
 
 const (
-	ActionAuthLogin              Action = "auth.login"
-	ActionAuthLogout             Action = "auth.logout"
-	ActionAuthRegistration       Action = "auth.registration"
-	ActionImpersonationStarted   Action = "impersonation.started"
-	ActionImpersonationStopped   Action = "impersonation.stopped"
-	ActionUserCreated            Action = "user.created"
-	ActionUserProfileUpdated     Action = "user.profile_updated"
-	ActionUserRoleChanged        Action = "user.role_changed"
-	ActionUserActivated          Action = "user.activated"
-	ActionUserDeactivated        Action = "user.deactivated"
-	ActionUserPasswordReset      Action = "user.password_reset"
-	ActionRoleCreated            Action = "role.created"
-	ActionRoleUpdated            Action = "role.updated"
-	ActionRoleDeleted            Action = "role.deleted"
-	ActionRolePermissionsUpdated Action = "role.permissions_updated"
-	ActionAdminBootstrap         Action = "admin.bootstrap"
+	ActionAuthLogin                      Action = "auth.login"
+	ActionAuthLogout                     Action = "auth.logout"
+	ActionAuthRegistration               Action = "auth.registration"
+	ActionImpersonationStarted           Action = "impersonation.started"
+	ActionImpersonationStopped           Action = "impersonation.stopped"
+	ActionUserCreated                    Action = "user.created"
+	ActionUserProfileUpdated             Action = "user.profile_updated"
+	ActionUserRoleChanged                Action = "user.role_changed"
+	ActionUserActivated                  Action = "user.activated"
+	ActionUserDeactivated                Action = "user.deactivated"
+	ActionUserPasswordReset              Action = "user.password_reset"
+	ActionRoleCreated                    Action = "role.created"
+	ActionRoleUpdated                    Action = "role.updated"
+	ActionRoleDeleted                    Action = "role.deleted"
+	ActionRolePermissionsUpdated         Action = "role.permissions_updated"
+	ActionAdminBootstrap                 Action = "admin.bootstrap"
+	ActionIngestionCancellationRequested Action = "ingestion.cancellation_requested"
+	ActionIngestionAbandonedRecovered    Action = "ingestion.abandoned_recovered"
 )
 
 type ResourceType string
 
 const (
-	ResourceUser ResourceType = "user"
-	ResourceRole ResourceType = "role"
+	ResourceUser         ResourceType = "user"
+	ResourceRole         ResourceType = "role"
+	ResourceIngestionRun ResourceType = "ingestion_run"
 )
 
 type Identity struct {
@@ -106,7 +109,7 @@ func Append(ctx context.Context, executor sqlx.ExtContext, event Event) error {
 	if (event.Resource == "") != (event.ResourceID == 0) {
 		return fmt.Errorf("audit resource type and ID must be set together")
 	}
-	if event.Resource != "" && event.Resource != ResourceUser && event.Resource != ResourceRole {
+	if event.Resource != "" && event.Resource != ResourceUser && event.Resource != ResourceRole && event.Resource != ResourceIngestionRun {
 		return fmt.Errorf("unknown audit resource type %q", event.Resource)
 	}
 	if event.CreatedAt.IsZero() {
@@ -178,7 +181,9 @@ func knownAction(action Action) bool {
 		ActionRoleUpdated,
 		ActionRoleDeleted,
 		ActionRolePermissionsUpdated,
-		ActionAdminBootstrap:
+		ActionAdminBootstrap,
+		ActionIngestionCancellationRequested,
+		ActionIngestionAbandonedRecovered:
 		return true
 	default:
 		return false

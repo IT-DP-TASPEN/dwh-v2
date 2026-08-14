@@ -581,6 +581,12 @@ func (engine *Engine) verifyFinal(ctx context.Context) error {
 			return fmt.Errorf("adoption postcondition missing table %s", table)
 		}
 	}
+	var indexes int
+	if err := engine.db.GetContext(ctx, &indexes, `SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ingestion_runs'
+		AND INDEX_NAME IN ('idx_ingestion_runs_admin_job','idx_ingestion_runs_admin_status','idx_ingestion_runs_admin_trigger')`); err != nil || indexes != 3 {
+		return fmt.Errorf("adoption postcondition missing ingestion admin indexes")
+	}
 	return nil
 }
 

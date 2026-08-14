@@ -11,7 +11,9 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 
+	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/ingestion"
+	"github.com/ibldzn/go-admin/internal/securityctx"
 )
 
 type Repository struct {
@@ -247,7 +249,7 @@ func (repository *Repository) Finish(ctx context.Context, runID uint64, ownerID 
 	return nil
 }
 
-func (repository *Repository) RequestCancellation(ctx context.Context, runID uint64, reason string) error {
+func (repository *Repository) RequestCancellation(ctx context.Context, runID uint64, reason string, requester securityctx.Requester) error {
 	reason = safeText(reason, 255)
 	tx, err := repository.db.BeginTxx(ctx, nil)
 	if err != nil {
@@ -285,15 +287,23 @@ func (repository *Repository) RequestCancellation(ctx context.Context, runID uin
 			return err
 		}
 	}
+	if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionCancellationRequested, runID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
-func (repository *Repository) RecoverAbandoned(ctx context.Context, runID uint64, expectedOwner string, expectedHeartbeat time.Time, reason string) error {
+func (repository *Repository) RecoverAbandoned(ctx context.Context, runID uint64, expectedOwner string, expectedHeartbeat time.Time, reason string, requester securityctx.Requester) error {
 	reason = safeText(reason, 500)
 	if expectedOwner == "" || expectedHeartbeat.IsZero() || reason == "" {
 		return fmt.Errorf("exact owner, heartbeat, and recovery reason are required")
 	}
-	result, err := repository.db.ExecContext(ctx, `UPDATE ingestion_runs SET status='abandoned',error_class='abandoned',error_message=?,
+	tx, err := repository.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET status='abandoned',error_class='abandoned',error_message=?,
 		abandoned_previous_owner=owner_id,abandoned_previous_heartbeat=heartbeat_at,finished_at=CURRENT_TIMESTAMP(6)
 		WHERE id=? AND status='running' AND owner_id=? AND heartbeat_at=?`, reason, runID, expectedOwner, expectedHeartbeat)
 	if err != nil {
@@ -302,7 +312,19 @@ func (repository *Repository) RecoverAbandoned(ctx context.Context, runID uint64
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrTransition
 	}
-	return nil
+	if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionAbandonedRecovered, runID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func appendRunAudit(ctx context.Context, executor sqlx.ExtContext, requester securityctx.Requester, action audit.Action, runID uint64) error {
+	actor := audit.Identity{UserID: requester.Actor.UserID, Username: requester.Actor.Username}
+	effective := audit.Identity{UserID: requester.Effective.UserID, Username: requester.Effective.Username}
+	return audit.Append(ctx, executor, audit.Event{
+		Attribution: audit.Attribution{Actor: &actor, Effective: &effective},
+		Action:      action, Resource: audit.ResourceIngestionRun, ResourceID: runID, CreatedAt: time.Now().UTC(),
+	})
 }
 
 func (repository *Repository) ReconcileOneParent(ctx context.Context) (bool, error) {

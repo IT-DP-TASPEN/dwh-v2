@@ -1,9 +1,13 @@
 import Alpine from "alpinejs";
 import htmx from "htmx.org";
 import {
+  Activity,
+  CalendarClock,
   ChevronDown,
   CircleCheckBig,
   createIcons,
+  Database,
+  History,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -148,7 +152,7 @@ document.addEventListener("submit", (event) => {
 
 const initializeIcons = () =>
   createIcons({
-    icons: { ChevronDown, CircleCheckBig, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Shield, ShieldCheck, UserRound, Users, X },
+    icons: { Activity, CalendarClock, ChevronDown, CircleCheckBig, Database, History, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Shield, ShieldCheck, UserRound, Users, X },
   });
 
 document.addEventListener("DOMContentLoaded", initializeIcons);

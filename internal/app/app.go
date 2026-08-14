@@ -180,7 +180,7 @@ func Run(ctx context.Context) error {
 		RegisterAuthenticated: func(router chi.Router) {
 			registerFeatureRoutes(router, featureDependencies{
 				database: databaseConnection, users: userRepository, access: accessRepository,
-				admin: adminHTTP, cookies: cookieManager,
+				admin: adminHTTP, cookies: cookieManager, coordinator: ingestionCoordinator, scheduler: scheduleService,
 			})
 		},
 		Errors: errorResponder,
