@@ -107,7 +107,7 @@ func (engine *Engine) Preflight(ctx context.Context) (Result, error) {
 	result := Result{
 		Database: databaseName, MySQLVersion: mysqlVersion, Fingerprint: hex.EncodeToString(hash[:]),
 		CurrentGooseVersion: current, SourceSettings: sources, UnexpectedSources: unexpected,
-		Actions: []string{"replace approved legacy authentication", "apply seven allowlisted bootstrap migrations", "replace zero-gated DWH/control tables", "execute Phase 3 and Phase 4 migrations normally"},
+		Actions: []string{"replace approved legacy authentication", "apply seven allowlisted bootstrap migrations", "replace zero-gated DWH/control tables", "execute Phase 3, Phase 4, and Phase 5 migrations normally"},
 	}
 	var otherConnections int
 	if err := engine.db.GetContext(ctx, &otherConnections, `SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE DB = ? AND ID <> CONNECTION_ID()`, databaseName); err == nil && otherConnections > 0 {
@@ -575,7 +575,7 @@ func (engine *Engine) verifyFinal(ctx context.Context) error {
 	if len(settings) < 36 {
 		return fmt.Errorf("source settings postcondition failed")
 	}
-	for _, table := range []string{"roles", "permissions", "role_permissions", "users", "sessions", "audit_logs", "ingestion_runtime_settings", "ingestion_runs", "fixed_report_loads", "fincloud_cifs", "dynamic_csv_sources"} {
+	for _, table := range []string{"roles", "permissions", "role_permissions", "users", "sessions", "audit_logs", "ingestion_runtime_settings", "ingestion_runs", "fixed_report_loads", "fincloud_cifs", "dynamic_csv_sources", "schedules", "schedule_occurrences", "schedule_attempts"} {
 		var count int
 		if err := engine.db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, table); err != nil || count != 1 {
 			return fmt.Errorf("adoption postcondition missing table %s", table)

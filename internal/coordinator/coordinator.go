@@ -62,6 +62,10 @@ func (coordinator *Coordinator) Submit(ctx context.Context, jobKey string, param
 	return coordinator.runs.Submit(ctx, jobKey, parameters, trigger, reference, requester)
 }
 
+func (coordinator *Coordinator) SubmitInTx(ctx context.Context, tx *sqlx.Tx, jobKey string, parameters ingestionrun.Parameters, trigger ingestionrun.Trigger, reference string, requester *uint64) (uint64, error) {
+	return coordinator.runs.SubmitInTx(ctx, tx, jobKey, parameters, trigger, reference, requester)
+}
+
 func (coordinator *Coordinator) SubmitRunAll(ctx context.Context, from, to ingestion.CalendarDate, lookback int, trigger ingestionrun.Trigger, reference string, requester *uint64) (uint64, error) {
 	return coordinator.runs.CreateRunAll(ctx, from, to, lookback, trigger, reference, requester)
 }

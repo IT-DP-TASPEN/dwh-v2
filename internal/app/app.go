@@ -21,6 +21,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/render"
+	"github.com/ibldzn/go-admin/internal/scheduler"
 	"github.com/ibldzn/go-admin/internal/server"
 	"github.com/ibldzn/go-admin/internal/user"
 	webfiles "github.com/ibldzn/go-admin/web"
@@ -92,6 +93,21 @@ func Run(ctx context.Context) error {
 		<-coordinatorDone
 	}()
 	logger.Info("ingestion coordinator initialized", "owner_id", ingestionCoordinator.OwnerID())
+	scheduleService, err := scheduler.New(databaseConnection, ingestionCoordinator.SubmitInTx, logger)
+	if err != nil {
+		return fmt.Errorf("initialize ingestion scheduler: %w", err)
+	}
+	schedulerContext, stopScheduler := context.WithCancel(ctx)
+	schedulerDone := make(chan struct{})
+	go func() {
+		defer close(schedulerDone)
+		scheduleService.Run(schedulerContext)
+	}()
+	defer func() {
+		stopScheduler()
+		<-schedulerDone
+	}()
+	logger.Info("ingestion scheduler initialized")
 
 	userRepository := user.NewRepository(databaseConnection)
 	accessRepository := access.NewRepository(databaseConnection)

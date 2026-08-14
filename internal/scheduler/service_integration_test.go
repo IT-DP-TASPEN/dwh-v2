@@ -1,0 +1,442 @@
+//go:build integration
+
+package scheduler
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/ibldzn/go-admin/internal/ingestion"
+	"github.com/ibldzn/go-admin/internal/ingestionrun"
+	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
+)
+
+func TestRetryUntilSuccessAndChronologicalCursor(t *testing.T) {
+	db, service := integrationService(t)
+	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)
+	schedule := createDueSchedule(t, db, service, "retry", "cif_opening_report", due)
+
+	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("submit first changed=%v error=%v", changed, err)
+	}
+	first := latestAttempt(t, db, schedule.ID)
+	finishRun(t, db, first.RunID, ingestionrun.StatusFailed, due.Add(time.Hour))
+	clearThrottle(t, db, schedule.ID)
+	restarted := newIntegrationService(t, db)
+	if changed, err := restarted.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("record first backoff changed=%v error=%v", changed, err)
+	}
+	assertCursor(t, db, schedule.ID, due)
+	assertRetry(t, db, schedule.ID, due.Add(time.Hour+time.Minute))
+	expireThrottle(t, db, schedule.ID)
+	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("submit second changed=%v error=%v", changed, err)
+	}
+	second := latestAttempt(t, db, schedule.ID)
+	if second.AttemptNo != 2 {
+		t.Fatalf("second attempt=%d", second.AttemptNo)
+	}
+	finishRun(t, db, second.RunID, ingestionrun.StatusFailed, due.Add(2*time.Hour))
+	clearThrottle(t, db, schedule.ID)
+	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("record second backoff changed=%v error=%v", changed, err)
+	}
+	assertCursor(t, db, schedule.ID, due)
+	assertRetry(t, db, schedule.ID, due.Add(2*time.Hour+2*time.Minute))
+	expireThrottle(t, db, schedule.ID)
+	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("submit third changed=%v error=%v", changed, err)
+	}
+	third := latestAttempt(t, db, schedule.ID)
+	finishRun(t, db, third.RunID, ingestionrun.StatusSucceeded, due.Add(3*time.Hour))
+	clearThrottle(t, db, schedule.ID)
+	restarted = newIntegrationService(t, db) // Simulate crash after run success, before cursor reconciliation.
+	if changed, err := restarted.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("resolve success changed=%v error=%v", changed, err)
+	}
+	assertCursor(t, db, schedule.ID, due.AddDate(0, 0, 1))
+	var attempts int
+	if err := db.Get(&attempts, `SELECT COUNT(*) FROM schedule_attempts WHERE occurrence_id=?`, third.OccurrenceID); err != nil || attempts != 3 {
+		t.Fatalf("attempts=%d error=%v", attempts, err)
+	}
+	assertCanonicalLink(t, db, schedule.ID, third)
+}
+
+func TestNoDateCoalescesAndAdvancesFromSuccessfulFinish(t *testing.T) {
+	db, service := integrationService(t)
+	due := time.Date(2026, 8, 1, 1, 0, 0, 0, time.UTC)
+	schedule := createDueSchedule(t, db, service, "detail", "cif_detail", due)
+	_, _ = service.process(context.Background(), schedule.ID)
+	first := latestAttempt(t, db, schedule.ID)
+	finishRun(t, db, first.RunID, ingestionrun.StatusCancelled, due.Add(time.Hour))
+	clearThrottle(t, db, schedule.ID)
+	_, _ = service.process(context.Background(), schedule.ID)
+	expireThrottle(t, db, schedule.ID)
+	_, _ = service.process(context.Background(), schedule.ID)
+	second := latestAttempt(t, db, schedule.ID)
+	finished := time.Date(2026, 8, 14, 3, 4, 5, 123456000, time.UTC)
+	finishRun(t, db, second.RunID, ingestionrun.StatusSucceeded, finished)
+	clearThrottle(t, db, schedule.ID)
+	if _, err := service.process(context.Background(), schedule.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertCursor(t, db, schedule.ID, time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC))
+	var occurrences int
+	if err := db.Get(&occurrences, `SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id=?`, schedule.ID); err != nil || occurrences != 1 {
+		t.Fatalf("coalesced occurrences=%d error=%v", occurrences, err)
+	}
+	var mode string
+	if err := db.Get(&mode, `SELECT resolution_mode FROM schedule_occurrences WHERE schedule_id=?`, schedule.ID); err != nil || mode != "live_coalesced" {
+		t.Fatalf("resolution mode=%q error=%v", mode, err)
+	}
+}
+
+func TestCancelledAndAbandonedAttemptsRemainUnresolved(t *testing.T) {
+	db, service := integrationService(t)
+	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)
+	for index, test := range []struct {
+		job    string
+		status ingestionrun.Status
+	}{
+		{"fund_distribution_report", ingestionrun.StatusCancelled},
+		{"vault_mutation_report", ingestionrun.StatusAbandoned},
+	} {
+		occurrence := due.AddDate(0, 0, index)
+		schedule := createDueSchedule(t, db, service, string(test.status), test.job, occurrence)
+		_, _ = service.process(context.Background(), schedule.ID)
+		attempt := latestAttempt(t, db, schedule.ID)
+		finished := occurrence.Add(time.Hour)
+		finishRun(t, db, attempt.RunID, test.status, finished)
+		clearThrottle(t, db, schedule.ID)
+		if _, err := service.process(context.Background(), schedule.ID); err != nil {
+			t.Fatal(err)
+		}
+		assertCursor(t, db, schedule.ID, occurrence)
+		assertRetry(t, db, schedule.ID, finished.Add(time.Minute))
+	}
+}
+
+func TestDisableUpdateEnableFencesOldAttempt(t *testing.T) {
+	db, service := integrationService(t)
+	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)
+	schedule := createDueSchedule(t, db, service, "stale", "cif_opening_report", due)
+	_, _ = service.process(context.Background(), schedule.ID)
+	oldAttempt := latestAttempt(t, db, schedule.ID)
+
+	disabled, err := service.Disable(context.Background(), schedule.ID, schedule.Revision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.Update(context.Background(), schedule.ID, UpdateInput{Definition: Definition{
+		Name: "replacement", JobKey: "journal_transaction_report", CronExpression: "0 2 * * *", Timezone: "UTC", Policy: PreviousCalendarDayPolicy(),
+	}, ExpectedRevision: disabled.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := service.Enable(context.Background(), schedule.ID, updated.Revision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCursor := *enabled.NextRunAt
+	finishRun(t, db, oldAttempt.RunID, ingestionrun.StatusSucceeded, due.Add(time.Hour))
+	if got, err := service.Get(context.Background(), schedule.ID); err != nil || got.Definition.JobKey != "journal_transaction_report" || !got.NextRunAt.Equal(newCursor) {
+		t.Fatalf("stale result changed replacement schedule=%+v error=%v", got, err)
+	}
+	var status string
+	if err := db.Get(&status, `SELECT status FROM schedule_occurrences WHERE id=?`, oldAttempt.OccurrenceID); err != nil || status != "discarded" {
+		t.Fatalf("old occurrence status=%q error=%v", status, err)
+	}
+}
+
+func TestSemanticEditCannotDiscardBacklogButNameEditPreservesIt(t *testing.T) {
+	db, service := integrationService(t)
+	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)
+	schedule := createDueSchedule(t, db, service, "edit", "cif_opening_report", due)
+	_, _ = service.process(context.Background(), schedule.ID)
+	_, err := service.Update(context.Background(), schedule.ID, UpdateInput{Definition: Definition{
+		Name: "semantic", JobKey: "journal_transaction_report", CronExpression: "0 1 * * *", Timezone: "UTC", Policy: PreviousCalendarDayPolicy(),
+	}, ExpectedRevision: schedule.Revision})
+	if !errors.Is(err, ErrBacklog) {
+		t.Fatalf("semantic backlog edit error=%v", err)
+	}
+	updated, err := service.Update(context.Background(), schedule.ID, UpdateInput{Definition: Definition{
+		Name: "renamed", JobKey: schedule.Definition.JobKey, CronExpression: schedule.Definition.CronExpression,
+		Timezone: schedule.Definition.Timezone, Policy: schedule.Definition.Policy,
+	}, ExpectedRevision: schedule.Revision})
+	if err != nil || updated.Definition.Name != "renamed" || updated.Revision != schedule.Revision+1 || !updated.NextRunAt.Equal(due) {
+		t.Fatalf("name edit=%+v error=%v", updated, err)
+	}
+}
+
+func TestCorruptDefinitionUsesCursorFallbackAndRevisionedDisable(t *testing.T) {
+	db, service := integrationService(t)
+	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)
+	schedule := createDueSchedule(t, db, service, "corrupt", "cif_opening_report", due)
+	if _, err := db.Exec(`UPDATE schedules SET cron_expression='not a cron' WHERE id=?`, schedule.ID); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("corrupt changed=%v error=%v", changed, err)
+	}
+	var row struct {
+		Enabled bool         `db:"enabled"`
+		Next    sql.NullTime `db:"next_run_at"`
+		Rev     uint64       `db:"revision"`
+	}
+	if err := db.Get(&row, `SELECT enabled,next_run_at,revision FROM schedules WHERE id=?`, schedule.ID); err != nil || row.Enabled || row.Next.Valid || row.Rev != schedule.Revision+1 {
+		t.Fatalf("disabled=%+v error=%v", row, err)
+	}
+	var occurrence struct {
+		ScheduledFor   time.Time `db:"scheduled_for"`
+		Identity       string    `db:"identity_source"`
+		Mode, Status   string
+		RejectRevision uint64 `db:"rejection_revision"`
+	}
+	if err := db.Get(&occurrence, `SELECT scheduled_for,identity_source,resolution_mode mode,status,rejection_revision
+		FROM schedule_occurrences WHERE schedule_id=?`, schedule.ID); err != nil || !occurrence.ScheduledFor.Equal(due) ||
+		occurrence.Identity != "persisted_cursor_fallback" || occurrence.Mode != "invalid" || occurrence.Status != "rejected_invalid" || occurrence.RejectRevision != schedule.Revision {
+		t.Fatalf("fallback occurrence=%+v error=%v", occurrence, err)
+	}
+}
+
+func TestBusyDisabledFairnessAndConcurrentAttemptAllocation(t *testing.T) {
+	db, service := integrationService(t)
+	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)
+	busy := createDueSchedule(t, db, service, "busy", "cif_opening_report", due)
+	catalog, _ := ingestion.NewCatalog()
+	runs, _ := ingestionrun.NewRepository(db, catalog)
+	date, _ := ingestion.ParseCalendarDate("2026-08-09")
+	parameters, _ := ingestionrun.NewRangeExecution("cif_opening_report", date, date)
+	manualID, err := runs.Submit(context.Background(), "cif_opening_report", parameters, ingestionrun.TriggerDirect, "busy-control", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := service.process(context.Background(), busy.ID); err != nil || !changed {
+		t.Fatalf("busy delivery changed=%v error=%v", changed, err)
+	}
+	assertAttemptCount(t, db, busy.ID, 0)
+	assertCursor(t, db, busy.ID, due)
+	var reason string
+	if err := db.Get(&reason, `SELECT delivery_block_reason FROM schedules WHERE id=?`, busy.ID); err != nil || reason != "job_busy" {
+		t.Fatalf("busy reason=%q error=%v", reason, err)
+	}
+	finishRun(t, db, manualID, ingestionrun.StatusFailed, due)
+
+	disabled := createDueSchedule(t, db, service, "disabled", "journal_transaction_report", due)
+	if _, err := db.Exec(`UPDATE source_settings SET enabled=FALSE WHERE source_id='journal_transaction_report'`); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = service.process(context.Background(), disabled.ID)
+	assertAttemptCount(t, db, disabled.ID, 0)
+	assertCursor(t, db, disabled.ID, due)
+	if err := db.Get(&reason, `SELECT delivery_block_reason FROM schedules WHERE id=?`, disabled.ID); err != nil || reason != "source_disabled" {
+		t.Fatalf("disabled reason=%q error=%v", reason, err)
+	}
+	if _, err := db.Exec(`UPDATE source_settings SET enabled=TRUE WHERE source_id='journal_transaction_report'`); err != nil {
+		t.Fatal(err)
+	}
+	expireThrottle(t, db, disabled.ID)
+
+	third := createDueSchedule(t, db, service, "third", "fund_distribution_report", due)
+	if err := service.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertAttemptCount(t, db, disabled.ID, 1)
+	assertAttemptCount(t, db, third.ID, 1)
+
+	concurrent := createDueSchedule(t, db, service, "concurrent", "vault_mutation_report", due)
+	otherInstance := newIntegrationService(t, db)
+	var wait sync.WaitGroup
+	errorsSeen := make(chan error, 2)
+	for _, instance := range []*Service{service, otherInstance} {
+		wait.Add(1)
+		go func(instance *Service) {
+			defer wait.Done()
+			_, err := instance.process(context.Background(), concurrent.ID)
+			errorsSeen <- err
+		}(instance)
+	}
+	wait.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertAttemptCount(t, db, concurrent.ID, 1)
+	var unresolved int
+	if err := db.Get(&unresolved, `SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id=? AND status='unresolved'`, concurrent.ID); err != nil || unresolved != 1 {
+		t.Fatalf("concurrent unresolved occurrences=%d error=%v", unresolved, err)
+	}
+}
+
+func TestUTCSessionAndMicrosecondRoundTrip(t *testing.T) {
+	db, _ := integrationService(t)
+	connections := make([]*sqlx.Conn, 3)
+	connectionIDs := map[uint64]bool{}
+	for index := range connections {
+		connection, err := db.Connx(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		connections[index] = connection
+		defer connection.Close()
+		var zone string
+		var connectionID uint64
+		if err := connection.QueryRowxContext(context.Background(), `SELECT @@session.time_zone,CONNECTION_ID()`).Scan(&zone, &connectionID); err != nil || zone != "+00:00" {
+			t.Fatalf("connection %d timezone=%q error=%v", index, zone, err)
+		}
+		connectionIDs[connectionID] = true
+	}
+	if len(connectionIDs) != len(connections) {
+		t.Fatalf("pooled connections not distinct: %v", connectionIDs)
+	}
+	want := time.Date(2026, 8, 14, 1, 2, 3, 456789000, time.UTC)
+	var got time.Time
+	if err := connections[0].QueryRowxContext(context.Background(), `SELECT CAST(? AS DATETIME(6))`, want).Scan(&got); err != nil || !got.Equal(want) || got.Location() != time.UTC {
+		t.Fatalf("roundtrip=%s location=%v error=%v", got, got.Location(), err)
+	}
+}
+
+func integrationService(t *testing.T) (*sqlx.DB, *Service) {
+	t.Helper()
+	db := integrationdb.Open(t)
+	if _, err := db.Exec(`UPDATE source_settings SET enabled=TRUE`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM schedule_attempts`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM schedule_occurrences`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM schedules`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM ingestion_runs WHERE trigger_type='scheduler' OR trigger_reference='busy-control'`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM schedule_attempts`)
+		_, _ = db.Exec(`DELETE FROM schedule_occurrences`)
+		_, _ = db.Exec(`DELETE FROM schedules`)
+		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE trigger_type='scheduler' OR trigger_reference='busy-control'`)
+		_, _ = db.Exec(`UPDATE source_settings SET enabled=TRUE WHERE source_id IN ('journal_transaction_report')`)
+	})
+	return db, newIntegrationService(t, db)
+}
+
+func newIntegrationService(t *testing.T, db *sqlx.DB) *Service {
+	t.Helper()
+	catalog, _ := ingestion.NewCatalog()
+	runs, err := ingestionrun.NewRepository(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(db, runs.SubmitInTx, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+func createDueSchedule(t *testing.T, db *sqlx.DB, service *Service, name, job string, due time.Time) Schedule {
+	t.Helper()
+	created, err := service.Create(context.Background(), CreateInput{Definition: Definition{
+		Name: name, JobKey: job, CronExpression: "0 1 * * *", Timezone: "UTC", Policy: PreviousCalendarDayPolicy(),
+	}, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schedules SET next_run_at=?,scheduler_not_before=NULL WHERE id=?`, due, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	created.NextRunAt = &due
+	return created
+}
+
+type attemptView struct {
+	OccurrenceID uint64 `db:"occurrence_id"`
+	RunID        uint64 `db:"run_id"`
+	AttemptNo    uint32 `db:"attempt_no"`
+}
+
+func latestAttempt(t *testing.T, db *sqlx.DB, scheduleID uint64) attemptView {
+	t.Helper()
+	var value attemptView
+	if err := db.Get(&value, `SELECT a.occurrence_id,a.ingestion_run_id run_id,a.attempt_no FROM schedule_attempts a
+		JOIN schedule_occurrences o ON o.id=a.occurrence_id WHERE o.schedule_id=? ORDER BY a.attempt_no DESC LIMIT 1`, scheduleID); err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func finishRun(t *testing.T, db *sqlx.DB, runID uint64, status ingestionrun.Status, finished time.Time) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE ingestion_runs SET status=?,finished_at=? WHERE id=?`, status, finished, runID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func clearThrottle(t *testing.T, db *sqlx.DB, scheduleID uint64) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE schedules SET scheduler_not_before=NULL WHERE id=?`, scheduleID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func expireThrottle(t *testing.T, db *sqlx.DB, scheduleID uint64) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE schedules s JOIN schedule_occurrences o ON o.schedule_id=s.id AND o.status='unresolved'
+		SET s.scheduler_not_before=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND,o.retry_not_before=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE s.id=?`, scheduleID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertCursor(t *testing.T, db *sqlx.DB, scheduleID uint64, want time.Time) {
+	t.Helper()
+	var got time.Time
+	if err := db.Get(&got, `SELECT next_run_at FROM schedules WHERE id=?`, scheduleID); err != nil || !got.Equal(want) {
+		t.Fatalf("cursor=%s want=%s error=%v", got, want, err)
+	}
+}
+
+func assertRetry(t *testing.T, db *sqlx.DB, scheduleID uint64, want time.Time) {
+	t.Helper()
+	var got time.Time
+	if err := db.Get(&got, `SELECT retry_not_before FROM schedule_occurrences WHERE schedule_id=? AND status='unresolved'`, scheduleID); err != nil || !got.Equal(want) {
+		t.Fatalf("retry=%s want=%s error=%v", got, want, err)
+	}
+}
+
+func assertAttemptCount(t *testing.T, db *sqlx.DB, scheduleID uint64, want int) {
+	t.Helper()
+	var got int
+	if err := db.Get(&got, `SELECT COUNT(*) FROM schedule_attempts a JOIN schedule_occurrences o ON o.id=a.occurrence_id WHERE o.schedule_id=?`, scheduleID); err != nil || got != want {
+		t.Fatalf("schedule %d attempts=%d want=%d error=%v", scheduleID, got, want, err)
+	}
+}
+
+func assertCanonicalLink(t *testing.T, db *sqlx.DB, scheduleID uint64, attempt attemptView) {
+	t.Helper()
+	var reference string
+	var scheduledFor time.Time
+	err := db.QueryRowx(`SELECT o.scheduled_for,r.trigger_reference FROM schedules s
+		JOIN schedule_occurrences o ON o.schedule_id=s.id
+		JOIN schedule_attempts a ON a.occurrence_id=o.id
+		JOIN ingestion_runs r ON r.id=a.ingestion_run_id
+		WHERE s.id=? AND o.id=? AND a.attempt_no=? AND r.id=?`, scheduleID, attempt.OccurrenceID, attempt.AttemptNo, attempt.RunID).Scan(&scheduledFor, &reference)
+	want := fmt.Sprintf("schedule:%d:%s:attempt:%d", scheduleID, scheduledFor.UTC().Format(time.RFC3339Nano), attempt.AttemptNo)
+	if err != nil || reference != want {
+		t.Fatalf("canonical linkage reference=%q want=%q error=%v", reference, want, err)
+	}
+}

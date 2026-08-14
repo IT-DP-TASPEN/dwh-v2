@@ -46,6 +46,30 @@ func (repository *Repository) RuntimeSettings(ctx context.Context) (RuntimeSetti
 }
 
 func (repository *Repository) Submit(ctx context.Context, jobKey string, parameters Parameters, trigger Trigger, reference string, requester *uint64) (uint64, error) {
+	tx, err := repository.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	id, err := repository.SubmitInTx(ctx, tx, jobKey, parameters, trigger, reference, requester)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// SubmitInTx is the canonical job-submission path for callers that must link a
+// run to their own durable state in the same transaction.
+func (repository *Repository) SubmitInTx(ctx context.Context, tx *sqlx.Tx, jobKey string, parameters Parameters, trigger Trigger, reference string, requester *uint64) (uint64, error) {
+	if tx == nil {
+		return 0, fmt.Errorf("transaction is required")
+	}
+	if trigger == TriggerScheduler && strings.TrimSpace(reference) == "" {
+		return 0, fmt.Errorf("scheduler trigger reference is required")
+	}
 	job, found := repository.catalog.Find(jobKey)
 	if !found {
 		return 0, fmt.Errorf("unknown job %q", jobKey)
@@ -53,11 +77,6 @@ func (repository *Repository) Submit(ctx context.Context, jobKey string, paramet
 	if err := parameters.Validate(job); err != nil {
 		return 0, err
 	}
-	tx, err := repository.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
 	enabled, err := sourceEnabled(ctx, tx, jobKey)
 	if err != nil {
 		return 0, err
@@ -73,9 +92,6 @@ func (repository *Repository) Submit(ctx context.Context, jobKey string, paramet
 		return 0, err
 	}
 	id, _ := result.LastInsertId()
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
 	return uint64(id), nil
 }
 

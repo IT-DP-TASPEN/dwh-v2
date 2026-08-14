@@ -67,6 +67,30 @@ func TestControlledBootstrapMatchesDWH2Topology(t *testing.T) {
 	if err := db.Get(&unknownCount, `SELECT COUNT(*) FROM source_settings WHERE source_id='legacy_unknown_job'`); err != nil || unknownCount != 1 {
 		t.Fatalf("unknown source was not preserved: count=%d error=%v", unknownCount, err)
 	}
+	schedulerVersion, err := migrationVersion(migrationDir, "create_ingestion_scheduler.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var applied int
+	if err := db.Get(&applied, `SELECT COUNT(*) FROM goose_db_version WHERE version_id=? AND is_applied=1`, schedulerVersion); err != nil || applied != 1 {
+		t.Fatalf("scheduler migration applied=%d error=%v", applied, err)
+	}
+	var canonicalObjects int
+	if err := db.Get(&canonicalObjects, `SELECT COUNT(*) FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('schedules','schedule_occurrences','schedule_attempts')`); err != nil || canonicalObjects != 3 {
+		t.Fatalf("canonical scheduler tables=%d error=%v", canonicalObjects, err)
+	}
+	var legacyObjects int
+	if err := db.Get(&legacyObjects, `SELECT COUNT(*) FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='schedule_executions'`); err != nil || legacyObjects != 0 {
+		t.Fatalf("legacy scheduler tables=%d error=%v", legacyObjects, err)
+	}
+	var generatedTrigger int
+	if err := db.Get(&generatedTrigger, `SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ingestion_runs' AND COLUMN_NAME='scheduler_trigger_reference'
+		AND EXTRA LIKE '%STORED GENERATED%'`); err != nil || generatedTrigger != 1 {
+		t.Fatalf("scheduler trigger guard=%d error=%v", generatedTrigger, err)
+	}
 }
 
 func resetToLegacyTopology(t *testing.T, db *sqlx.DB) {
@@ -107,6 +131,15 @@ func resetToLegacyTopology(t *testing.T, db *sqlx.DB) {
 			created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
 			updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
 			PRIMARY KEY (source_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE schedules (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			name VARCHAR(128) NOT NULL,
+			cron_expression VARCHAR(128) NOT NULL,
+			created_by_user_id BIGINT UNSIGNED NULL) ENGINE=InnoDB`,
+		`CREATE TABLE schedule_executions (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			schedule_id BIGINT UNSIGNED NOT NULL,
+			CONSTRAINT fk_legacy_schedule_execution FOREIGN KEY (schedule_id) REFERENCES schedules(id)) ENGINE=InnoDB`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
