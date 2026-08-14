@@ -205,10 +205,19 @@ func (repository *Repository) HeartbeatAndCancellations(ctx context.Context, own
 	return ids, nil
 }
 
-func (repository *Repository) UpdateProgress(ctx context.Context, runID uint64, ownerID string, progress Progress) error {
+func (repository *Repository) UpdateProgress(ctx context.Context, runID uint64, ownerID string, progress Progress, diagnostics *MapperDiagnostics) error {
+	var encoded any
+	if diagnostics != nil {
+		data, err := diagnostics.Marshal()
+		if err != nil {
+			return err
+		}
+		encoded = string(data)
+	}
 	result, err := repository.db.ExecContext(ctx, `UPDATE ingestion_runs SET progress_total=?,progress_started=?,progress_succeeded=?,
-		progress_failed=?,rows_processed=?,current_step=? WHERE id=? AND status='running' AND owner_id=?`,
-		progress.Total, progress.Started, progress.Succeeded, progress.Failed, progress.Rows, nullable(progress.Step), runID, ownerID)
+		progress_failed=?,rows_processed=?,current_step=?,mapper_diagnostics=COALESCE(?,mapper_diagnostics)
+		WHERE id=? AND status='running' AND owner_id=?`,
+		progress.Total, progress.Started, progress.Succeeded, progress.Failed, progress.Rows, nullable(progress.Step), encoded, runID, ownerID)
 	if err != nil {
 		return err
 	}
@@ -445,6 +454,7 @@ type runRow struct {
 	ProgressFailed    uint64         `db:"progress_failed"`
 	RowsProcessed     uint64         `db:"rows_processed"`
 	CurrentStep       sql.NullString `db:"current_step"`
+	MapperDiagnostics []byte         `db:"mapper_diagnostics"`
 }
 
 func getRun(ctx context.Context, query sqlx.QueryerContext, id uint64) (Run, error) {
@@ -452,7 +462,7 @@ func getRun(ctx context.Context, query sqlx.QueryerContext, id uint64) (Run, err
 	if err := sqlx.GetContext(ctx, query, &row, `SELECT id,parent_run_id,child_position,kind,COALESCE(job_key,'') job_key,status,
 		parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,trigger_reference,requested_by_user_id,
 		owner_id,heartbeat_at,DATE_FORMAT(snapshot_date,'%Y-%m-%d') snapshot_date,cancel_requested_at,
-		progress_total,progress_started,progress_succeeded,progress_failed,rows_processed,current_step FROM ingestion_runs WHERE id=?`, id); err != nil {
+		progress_total,progress_started,progress_succeeded,progress_failed,rows_processed,current_step,mapper_diagnostics FROM ingestion_runs WHERE id=?`, id); err != nil {
 		return Run{}, err
 	}
 	run := Run{ID: uint64(row.ID.Int64), Kind: Kind(row.Kind), JobKey: row.JobKey, Status: Status(row.Status), Trigger: Trigger(row.TriggerType), TriggerReference: row.TriggerReference.String,
@@ -481,6 +491,11 @@ func getRun(ctx context.Context, query sqlx.QueryerContext, id uint64) (Run, err
 	if len(row.ParameterChecksum) == 32 {
 		copy(run.Parameters.Checksum[:], row.ParameterChecksum)
 	}
+	diagnostics, err := decodeMapperDiagnostics(row.MapperDiagnostics)
+	if err != nil {
+		return Run{}, err
+	}
+	run.MapperDiagnostics = diagnostics
 	return run, nil
 }
 

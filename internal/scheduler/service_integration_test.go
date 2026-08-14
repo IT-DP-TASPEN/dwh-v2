@@ -100,6 +100,28 @@ func TestNoDateCoalescesAndAdvancesFromSuccessfulFinish(t *testing.T) {
 	}
 }
 
+func TestSchedulerParametersRoundTripMySQLForEveryCanonicalKind(t *testing.T) {
+	db, service := integrationService(t)
+	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)
+	catalog, _ := ingestion.NewCatalog()
+	runs, _ := ingestionrun.NewRepository(db, catalog)
+	for index, jobKey := range []string{"cif_opening_report", "balance_sheet_report", "eod_cif_opening_report_full", "saving_detail"} {
+		schedule := createDueSchedule(t, db, service, fmt.Sprintf("parameter-kind-%d", index), jobKey, due)
+		if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
+			t.Fatalf("submit %s changed=%v error=%v", jobKey, changed, err)
+		}
+		attempt := latestAttempt(t, db, schedule.ID)
+		run, err := runs.Get(context.Background(), attempt.RunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, _ := catalog.Find(jobKey)
+		if err := run.Parameters.Validate(job); err != nil {
+			t.Fatalf("scheduled %s parameters failed after MySQL JSON round-trip: %v; json=%s", jobKey, err, run.Parameters.JSON)
+		}
+	}
+}
+
 func TestCancelledAndAbandonedAttemptsRemainUnresolved(t *testing.T) {
 	db, service := integrationService(t)
 	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)

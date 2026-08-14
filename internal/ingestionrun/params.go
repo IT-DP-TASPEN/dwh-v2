@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/ibldzn/go-admin/internal/ingestion"
 )
@@ -98,7 +99,7 @@ func NewRunAllRange(from, to ingestion.CalendarDate) (Parameters, error) {
 }
 
 func (parameters Parameters) Validate(job ingestion.JobDefinition) error {
-	if parameters.Version != 1 || len(parameters.JSON) == 0 || sha256.Sum256(parameters.JSON) != parameters.Checksum || !json.Valid(parameters.JSON) {
+	if parameters.Version != 1 || len(parameters.JSON) == 0 || !json.Valid(parameters.JSON) {
 		return fmt.Errorf("invalid canonical parameter envelope")
 	}
 	switch parameters.Kind {
@@ -107,29 +108,30 @@ func (parameters Parameters) Validate(job ingestion.JobDefinition) error {
 			return fmt.Errorf("job %s does not accept range parameters", job.Key)
 		}
 		var value Range
-		return decodeCanonical(parameters.JSON, &value, func() error { _, err := validRange(value.From, value.To); return err })
+		return validateCanonical(parameters, &value, func() error { _, err := validRange(value.From, value.To); return err })
 	case FixedDateSeriesV1:
 		if job.Category != ingestion.CategoryFixed || job.DateStrategy != ingestion.SingleDate {
 			return fmt.Errorf("job %s does not accept date-series parameters", job.Key)
 		}
 		var value DateSeries
-		return decodeCanonical(parameters.JSON, &value, func() error { return validateDateSeries(value.Dates) })
+		return validateCanonical(parameters, &value, func() error { return validateDateSeries(value.Dates) })
 	case MaintenanceDateSeriesV1:
 		if job.Category != ingestion.CategoryEOD && job.Category != ingestion.CategoryCBR {
 			return fmt.Errorf("job %s does not accept maintenance parameters", job.Key)
 		}
 		var value MaintenanceSeries
-		return decodeCanonical(parameters.JSON, &value, func() error {
+		return validateCanonical(parameters, &value, func() error {
 			if value.LookbackDays < 0 || value.LookbackDays > 3 {
 				return fmt.Errorf("maintenance lookback must be between 0 and 3")
 			}
 			return validateDateSeries(value.Dates)
 		})
 	case DetailLiveSnapshotV1:
-		if job.Category != ingestion.CategoryDetail || job.DateStrategy != ingestion.NoDate || !bytes.Equal(parameters.JSON, []byte("{}")) {
+		if job.Category != ingestion.CategoryDetail || job.DateStrategy != ingestion.NoDate {
 			return fmt.Errorf("job %s does not accept live-snapshot parameters", job.Key)
 		}
-		return nil
+		var value struct{}
+		return validateCanonical(parameters, &value, func() error { return nil })
 	default:
 		return fmt.Errorf("unsupported parameter kind %q", parameters.Kind)
 	}
@@ -181,12 +183,24 @@ func decodeCanonical(data []byte, target any, validate func() error) error {
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("decode canonical parameters: %w", err)
 	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("decode canonical parameters: trailing JSON value")
+	}
 	if err := validate(); err != nil {
 		return err
 	}
-	canonical, err := json.Marshal(target)
-	if err != nil || !bytes.Equal(data, canonical) {
-		return fmt.Errorf("parameters are not canonical")
+	return nil
+}
+
+// validateCanonical deliberately reuses encode, the typed constructor encoder.
+// MySQL JSON may change whitespace or object-key order without changing meaning.
+func validateCanonical(parameters Parameters, target any, validate func() error) error {
+	if err := decodeCanonical(parameters.JSON, target, validate); err != nil {
+		return err
+	}
+	canonical, err := encode(parameters.Kind, target)
+	if err != nil || canonical.Checksum != parameters.Checksum {
+		return fmt.Errorf("invalid canonical parameter checksum")
 	}
 	return nil
 }

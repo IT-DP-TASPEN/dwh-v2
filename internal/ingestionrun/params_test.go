@@ -73,3 +73,32 @@ func TestOwnerIdentityIsOpaqueAndUnique(t *testing.T) {
 		t.Fatalf("owner identity is not lowercase hex: %v", err)
 	}
 }
+
+func TestValidateReencodesTypedParametersBeforeChecksum(t *testing.T) {
+	catalog, _ := ingestion.NewCatalog()
+	from, _ := ingestion.ParseCalendarDate("2026-06-01")
+	to, _ := ingestion.ParseCalendarDate("2026-06-03")
+	tests := []struct {
+		job  string
+		make func() (Parameters, error)
+		json string
+	}{
+		{"cif_opening_report", func() (Parameters, error) { return NewRangeExecution("cif_opening_report", from, to) }, `{ "to": "2026-06-03", "from": "2026-06-01" }`},
+		{"balance_sheet_report", func() (Parameters, error) { return NewDateSeriesExecution("balance_sheet_report", from, to) }, `{ "dates": [ "2026-06-01", "2026-06-02", "2026-06-03" ] }`},
+		{"eod_cif_opening_report_full", func() (Parameters, error) {
+			return NewMaintenanceSeriesExecution("eod_cif_opening_report_full", from, to, 3)
+		}, `{ "lookback_days": 3, "dates": ["2026-06-01","2026-06-02","2026-06-03"] }`},
+		{"saving_detail", func() (Parameters, error) { return NewLiveSnapshotExecution("saving_detail") }, `{ }`},
+	}
+	for _, test := range tests {
+		parameters, err := test.make()
+		if err != nil {
+			t.Fatal(err)
+		}
+		parameters.JSON = []byte(test.json)
+		job, _ := catalog.Find(test.job)
+		if err := parameters.Validate(job); err != nil {
+			t.Fatalf("%s reformatted parameters rejected: %v", test.job, err)
+		}
+	}
+}

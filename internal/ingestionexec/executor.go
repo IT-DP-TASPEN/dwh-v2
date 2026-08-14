@@ -118,7 +118,7 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 		return failed("persistence", "could not begin fixed report load", "stage", err)
 	}
 	progress := ingestionrun.Progress{Total: uint64(len(plan.Members)), Step: "fetch_members"}
-	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress)
+	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
 
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -166,7 +166,7 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 			progress.Succeeded++
 			progress.Rows += result.rows
 		}
-		_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress)
+		_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
 	}
 	if ctx.Err() != nil {
 		return cancelled("fixed execution cancelled", "fetch_members", ctx.Err())
@@ -175,7 +175,7 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 		return failed("source_or_persistence", "fixed report member failed", "fetch_members", first)
 	}
 	progress.Step = "promote"
-	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress)
+	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
 	if err := executor.fixed.Promote(ctx, definition, loadID); err != nil {
 		if ctx.Err() != nil {
 			return cancelled("fixed promotion cancelled", "promote", err)
@@ -221,28 +221,73 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 		return sourceFailure(err, "enumerate_identifiers")
 	}
 	progress := ingestionrun.Progress{Total: uint64(len(identifiers)), Step: "fetch_details"}
-	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress)
+	if err := executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil); err != nil {
+		return failed("persistence", "could not persist detail run progress", "persist_run_progress", err)
+	}
+	outcome := runDetailPool(ctx, identifiers, executor.detailConcurrency,
+		func(workCtx context.Context, identifier string) detailItemResult {
+			return executor.fetchAndSaveDetail(workCtx, job.Key, identifier, snapshotDate)
+		},
+		func(progress ingestionrun.Progress, diagnostics *ingestionrun.MapperDiagnostics) error {
+			return executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, diagnostics)
+		},
+	)
+	if outcome.progress.Started < outcome.progress.Total && ctx.Err() != nil {
+		return cancelled("detail execution cancelled", "fetch_detail", ctx.Err())
+	}
+	if outcome.fatal != nil {
+		return detailFatalFailure(outcome.fatalLayer, outcome.fatal)
+	}
+	if outcome.firstLocal != nil {
+		return failed("item_data", "one or more detail identifiers failed", "map_detail", outcome.firstLocal)
+	}
+	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
+}
+
+type detailLayer uint8
+
+const (
+	detailLayerNone detailLayer = iota
+	detailLayerFetch
+	detailLayerMap
+	detailLayerPersist
+	detailLayerRunProgress
+)
+
+type detailItemResult struct {
+	rows  uint64
+	layer detailLayer
+	err   error
+}
+
+type detailPoolOutcome struct {
+	progress    ingestionrun.Progress
+	diagnostics ingestionrun.MapperDiagnostics
+	firstLocal  error
+	fatal       error
+	fatalLayer  detailLayer
+}
+
+func runDetailPool(ctx context.Context, identifiers []string, concurrency int, work func(context.Context, string) detailItemResult,
+	flush func(ingestionrun.Progress, *ingestionrun.MapperDiagnostics) error,
+) detailPoolOutcome {
+	outcome := detailPoolOutcome{progress: ingestionrun.Progress{Total: uint64(len(identifiers)), Step: "fetch_details"}}
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	type itemResult struct {
-		rows  uint64
-		local bool
-		err   error
-	}
 	jobs := make(chan string)
-	results := make(chan itemResult, executor.detailConcurrency)
-	workers := min(executor.detailConcurrency, len(identifiers))
+	results := make(chan detailItemResult, concurrency)
+	workers := min(concurrency, len(identifiers))
 	var wait sync.WaitGroup
 	for range workers {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
 			for identifier := range jobs {
-				rows, local, err := executor.fetchAndSaveDetail(workCtx, job.Key, identifier, snapshotDate)
-				results <- itemResult{rows: rows, local: local, err: err}
-				if err != nil && !local {
+				result := work(workCtx, identifier)
+				if result.err != nil && result.layer != detailLayerMap {
 					cancel()
 				}
+				results <- result
 			}
 		}()
 	}
@@ -257,36 +302,61 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 		}
 	}()
 	go func() { wait.Wait(); close(results) }()
-	var firstLocal, fatal error
+	flushEnabled := true
 	for result := range results {
-		progress.Started++
+		outcome.progress.Started++
 		if result.err != nil {
 			if errors.Is(result.err, context.Canceled) && ctx.Err() == nil {
 				continue
 			}
-			progress.Failed++
-			if result.local && firstLocal == nil {
-				firstLocal = result.err
-			}
-			if !result.local && fatal == nil {
-				fatal = result.err
+			outcome.progress.Failed++
+			if result.layer == detailLayerMap {
+				if outcome.firstLocal == nil {
+					outcome.firstLocal = result.err
+				}
+				var mapper *ingestion.MapperError
+				if errors.As(result.err, &mapper) {
+					if err := outcome.diagnostics.Add(mapper.Metadata()); err != nil && outcome.fatal == nil {
+						outcome.fatal, outcome.fatalLayer = err, detailLayerRunProgress
+						flushEnabled = false
+						cancel()
+					}
+				}
+			} else if outcome.fatal == nil {
+				outcome.fatal, outcome.fatalLayer = result.err, result.layer
 			}
 		} else {
-			progress.Succeeded++
-			progress.Rows += result.rows
+			outcome.progress.Succeeded++
+			outcome.progress.Rows += result.rows
 		}
-		_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress)
+		if flushEnabled {
+			var diagnostics *ingestionrun.MapperDiagnostics
+			if outcome.diagnostics.TotalCount > 0 {
+				diagnostics = &outcome.diagnostics
+			}
+			if err := flush(outcome.progress, diagnostics); err != nil {
+				if outcome.fatal == nil {
+					outcome.fatal, outcome.fatalLayer = err, detailLayerRunProgress
+				}
+				flushEnabled = false
+				cancel()
+			}
+		}
 	}
-	if progress.Started < progress.Total && ctx.Err() != nil {
-		return cancelled("detail execution cancelled", "fetch_details", ctx.Err())
+	return outcome
+}
+
+func detailFatalFailure(layer detailLayer, err error) Result {
+	switch layer {
+	case detailLayerFetch:
+		return sourceFailure(err, "fetch_detail")
+	case detailLayerPersist:
+		return failed("persistence", "detail snapshot persistence failed", "persist_detail", err)
+	case detailLayerRunProgress:
+		return failed("persistence", "could not persist detail run progress", "persist_run_progress", err)
+	default:
+		return failed("contract", "unknown detail failure layer", "detail", err)
 	}
-	if fatal != nil {
-		return sourceFailure(fatal, "fetch_details")
-	}
-	if firstLocal != nil {
-		return failed("item_data", "one or more detail identifiers failed", "fetch_details", firstLocal)
-	}
-	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
 }
 
 func (executor *Executor) enumerateDetails(ctx context.Context, jobKey string, snapshotDate ingestion.CalendarDate) ([]string, error) {
@@ -304,7 +374,7 @@ func (executor *Executor) enumerateDetails(ctx context.Context, jobKey string, s
 	}
 }
 
-func (executor *Executor) fetchAndSaveDetail(ctx context.Context, jobKey, identifier string, snapshotDate ingestion.CalendarDate) (uint64, bool, error) {
+func (executor *Executor) fetchAndSaveDetail(ctx context.Context, jobKey, identifier string, snapshotDate ingestion.CalendarDate) detailItemResult {
 	fetchedAt := executor.now().UTC()
 	var record ingestion.DetailRecord
 	var err error
@@ -312,30 +382,30 @@ func (executor *Executor) fetchAndSaveDetail(ctx context.Context, jobKey, identi
 	case "cif_detail":
 		value, fetchErr := executor.client.FetchCIFDetail(ctx, identifier)
 		if fetchErr != nil {
-			return 0, false, fetchErr
+			return detailItemResult{layer: detailLayerFetch, err: fetchErr}
 		}
 		record, err = ingestion.MapCIFDetail(ctx, value, snapshotDate, fetchedAt)
 	case "saving_detail":
 		value, fetchErr := executor.client.FetchSavingDetail(ctx, identifier)
 		if fetchErr != nil {
-			return 0, false, fetchErr
+			return detailItemResult{layer: detailLayerFetch, err: fetchErr}
 		}
 		record, err = ingestion.MapSavingDetail(ctx, value, snapshotDate, fetchedAt)
 	case "time_deposit_detail":
 		value, fetchErr := executor.client.FetchTimeDepositDetail(ctx, identifier)
 		if fetchErr != nil {
-			return 0, false, fetchErr
+			return detailItemResult{layer: detailLayerFetch, err: fetchErr}
 		}
 		record, err = ingestion.MapTimeDepositDetail(ctx, value, snapshotDate, fetchedAt)
 	case "loan_detail":
 		value, fetchErr := executor.client.FetchLoanDetail(ctx, identifier)
 		if fetchErr != nil {
-			return 0, false, fetchErr
+			return detailItemResult{layer: detailLayerFetch, err: fetchErr}
 		}
 		record, err = ingestion.MapLoanDetail(ctx, value, snapshotDate, fetchedAt)
 	}
 	if err != nil {
-		return 0, true, err
+		return detailItemResult{layer: detailLayerMap, err: err}
 	}
 	switch jobKey {
 	case "cif_detail":
@@ -348,13 +418,17 @@ func (executor *Executor) fetchAndSaveDetail(ctx context.Context, jobKey, identi
 		err = executor.detail.SaveLoanSnapshot(ctx, record)
 	}
 	if err != nil {
-		return 0, false, err
+		return detailPersistenceFailure(err)
 	}
 	rows := uint64(1)
 	for _, children := range record.Children {
 		rows += uint64(len(children))
 	}
-	return rows, false, nil
+	return detailItemResult{rows: rows}
+}
+
+func detailPersistenceFailure(err error) detailItemResult {
+	return detailItemResult{layer: detailLayerPersist, err: err}
 }
 
 func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
@@ -363,7 +437,7 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 		return failed("contract", "invalid maintenance date series", "plan", err)
 	}
 	progress := ingestionrun.Progress{Total: uint64(len(series.Dates)), Step: "maintenance_dates"}
-	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress)
+	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
 	var first error
 	for _, requested := range series.Dates {
 		if err := ctx.Err(); err != nil {
@@ -380,14 +454,14 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 				first = err
 			}
 			if sourceWide(err) {
-				_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress)
+				_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
 				return sourceFailure(err, "maintenance_dates")
 			}
 		} else {
 			progress.Succeeded++
 			progress.Rows += rows
 		}
-		_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress)
+		_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
 	}
 	if first != nil {
 		return failed("date_local", "one or more maintenance dates failed", "maintenance_dates", first)

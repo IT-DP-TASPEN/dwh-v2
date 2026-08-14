@@ -3,6 +3,7 @@
 package ingestionrun
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,153 @@ import (
 	"github.com/ibldzn/go-admin/internal/securityctx"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 )
+
+func TestMySQLCanonicalParametersAndAllRunAllChildren(t *testing.T) {
+	db := integrationdb.Open(t)
+	catalog, _ := ingestion.NewCatalog()
+	repository, err := NewRepository(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type sourceState struct {
+		Key     string `db:"source_id"`
+		Enabled bool   `db:"enabled"`
+	}
+	var states []sourceState
+	if err := db.Select(&states, `SELECT source_id,enabled FROM source_settings`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE source_settings SET enabled=TRUE`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, state := range states {
+			_, _ = db.Exec(`UPDATE source_settings SET enabled=? WHERE source_id=?`, state.Enabled, state.Key)
+		}
+	})
+	from, _ := ingestion.ParseCalendarDate("2026-06-01")
+	to, _ := ingestion.ParseCalendarDate("2026-06-03")
+	tests := []struct {
+		job, transformed string
+		parameters       Parameters
+	}{
+		{job: "cif_opening_report", transformed: `{ "to":"2026-06-03", "from":"2026-06-01" }`},
+		{job: "balance_sheet_report", transformed: `{ "dates":["2026-06-01", "2026-06-02", "2026-06-03"] }`},
+		{job: "eod_cif_opening_report_full", transformed: `{ "lookback_days":3, "dates":["2026-06-01","2026-06-02","2026-06-03"] }`},
+		{job: "saving_detail", transformed: `{ }`},
+	}
+	tests[0].parameters, _ = NewRangeExecution(tests[0].job, from, to)
+	tests[1].parameters, _ = NewDateSeriesExecution(tests[1].job, from, to)
+	tests[2].parameters, _ = NewMaintenanceSeriesExecution(tests[2].job, from, to, 3)
+	tests[3].parameters, _ = NewLiveSnapshotExecution(tests[3].job)
+	for _, test := range tests {
+		runID, err := repository.Submit(context.Background(), test.job, test.parameters, TriggerDirect, "mysql-json-roundtrip", nil)
+		if err != nil {
+			t.Fatalf("submit %s: %v", test.job, err)
+		}
+		if _, err := db.Exec(`UPDATE ingestion_runs SET parameters_json=? WHERE id=?`, test.transformed, runID); err != nil {
+			t.Fatal(err)
+		}
+		run, err := repository.Get(context.Background(), runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, _ := catalog.Find(test.job)
+		if err := run.Parameters.Validate(job); err != nil {
+			t.Fatalf("%s failed after MySQL JSON round-trip: %v; json=%s", test.job, err, run.Parameters.JSON)
+		}
+		if test.parameters.Kind != DetailLiveSnapshotV1 && bytes.Equal(run.Parameters.JSON, test.parameters.JSON) {
+			t.Fatalf("%s test did not reproduce MySQL JSON transformation", test.job)
+		}
+		if _, err := db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, runID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	parentID, err := repository.CreateRunAll(context.Background(), from, to, 3, TriggerDirect, "mysql-run-all-roundtrip", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE parent_run_id=?`, parentID)
+		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, parentID)
+	})
+	owner, _ := NewOwnerID()
+	jobs := catalog.Jobs()
+	for index, job := range jobs {
+		changed, err := repository.ReconcileOneParent(context.Background())
+		if err != nil || !changed {
+			t.Fatalf("activate child %d changed=%v error=%v", index+1, changed, err)
+		}
+		run, err := repository.Claim(context.Background(), owner)
+		if err != nil || run == nil {
+			t.Fatalf("claim child %d run=%+v error=%v", index+1, run, err)
+		}
+		if run.Kind != KindRunAllChild || run.ChildPosition == nil || int(*run.ChildPosition) != index+1 || run.JobKey != job.Key {
+			t.Fatalf("child %d order/run mismatch: %+v want=%s", index+1, run, job.Key)
+		}
+		if err := run.Parameters.Validate(job); err != nil {
+			t.Fatalf("child %d %s MySQL parameters: %v; json=%s", index+1, job.Key, err, run.Parameters.JSON)
+		}
+		if err := repository.Finish(context.Background(), run.ID, owner, StatusSucceeded, SafeError{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if changed, err := repository.ReconcileOneParent(context.Background()); err != nil || !changed {
+		t.Fatalf("finish Run All parent changed=%v error=%v", changed, err)
+	}
+	parent, err := repository.Get(context.Background(), parentID)
+	if err != nil || parent.Status != StatusCompleted {
+		t.Fatalf("Run All parent=%+v error=%v", parent, err)
+	}
+}
+
+func TestMapperDiagnosticsShareProgressFlushAndSurviveCancellation(t *testing.T) {
+	db := integrationdb.Open(t)
+	catalog, _ := ingestion.NewCatalog()
+	repository, _ := NewRepository(db, catalog)
+	var enabled bool
+	if err := db.Get(&enabled, `SELECT enabled FROM source_settings WHERE source_id='saving_detail'`); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`UPDATE source_settings SET enabled=TRUE WHERE source_id='saving_detail'`)
+	t.Cleanup(func() {
+		_, _ = db.Exec(`UPDATE source_settings SET enabled=? WHERE source_id='saving_detail'`, enabled)
+	})
+	parameters, _ := NewLiveSnapshotExecution("saving_detail")
+	runID, err := repository.Submit(context.Background(), "saving_detail", parameters, TriggerDirect, "mapper-diagnostics", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, runID) })
+	owner, _ := NewOwnerID()
+	run, err := repository.Claim(context.Background(), owner)
+	if err != nil || run == nil || run.ID != runID {
+		t.Fatalf("claim=%+v error=%v", run, err)
+	}
+	if _, err := db.Exec(`UPDATE ingestion_runs SET cancel_requested_at=UTC_TIMESTAMP(6),cancel_reason='operator' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	var diagnostics MapperDiagnostics
+	if err := diagnostics.Add(savingMapperError(t, "diagnostic-secret", "1").Metadata()); err != nil {
+		t.Fatal(err)
+	}
+	progress := Progress{Total: 2, Started: 1, Failed: 1, Step: "fetch_details"}
+	if err := repository.UpdateProgress(context.Background(), runID, owner, progress, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	var cancellationPreserved int
+	if err := db.Get(&cancellationPreserved, `SELECT cancel_requested_at IS NOT NULL AND cancel_reason='operator' FROM ingestion_runs WHERE id=?`, runID); err != nil || cancellationPreserved != 1 {
+		t.Fatalf("progress flush overwrote cancellation state: preserved=%d error=%v", cancellationPreserved, err)
+	}
+	if err := repository.Finish(context.Background(), runID, owner, StatusCancelled, SafeError{Class: "cancelled", Message: "operator cancelled", Step: "fetch_detail"}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := repository.Get(context.Background(), runID)
+	if err != nil || stored.MapperDiagnostics == nil || stored.MapperDiagnostics.TotalCount != 1 || stored.MapperDiagnostics.Groups[0].Field != "beginning_balance" {
+		t.Fatalf("cancelled run diagnostics=%+v error=%v", stored.MapperDiagnostics, err)
+	}
+}
 
 func TestDurableQueueRunAllAndTerminalCAS(t *testing.T) {
 	db := integrationdb.Open(t)

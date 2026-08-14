@@ -25,6 +25,86 @@ const (
 	DetailLoan        DetailDomain = "loan"
 )
 
+type MapperMetadata struct {
+	class, field, category, reason, safeMessage string
+}
+
+func (metadata MapperMetadata) Class() string       { return metadata.class }
+func (metadata MapperMetadata) Field() string       { return metadata.field }
+func (metadata MapperMetadata) Category() string    { return metadata.category }
+func (metadata MapperMetadata) Reason() string      { return metadata.reason }
+func (metadata MapperMetadata) SafeMessage() string { return metadata.safeMessage }
+
+func IsSafeMapperDiagnostic(class, field, category, reason, message string) bool {
+	if class != "detail_mapping" || !mapperFieldAllowed(field) {
+		return false
+	}
+	if _, found := map[string]struct{}{"string": {}, "decimal": {}, "integer": {}, "date": {}, "datetime": {}, "identifier": {}, "structure": {}}[category]; !found {
+		return false
+	}
+	if _, found := map[string]struct{}{"missing": {}, "required": {}, "invalid_json": {}, "expected_array": {}, "expected_object": {}, "invalid_value": {}}[reason]; !found {
+		return false
+	}
+	_, found := map[string]struct{}{
+		"detail payload is missing": {}, "detail payload is invalid": {}, "detail identifier is missing": {},
+		"required detail field is missing": {}, "detail field value is invalid": {},
+		"detail child collection is invalid": {}, "detail child item is invalid": {},
+	}[message]
+	return found
+}
+
+func mapperFieldAllowed(field string) bool {
+	if field == "payload" || field == "identifier" {
+		return true
+	}
+	for _, domain := range []DetailDomain{DetailCIF, DetailSaving, DetailTimeDeposit, DetailLoan} {
+		shape, _ := detailShapeFor(domain)
+		for _, candidate := range shape.fields {
+			if field == candidate.target {
+				return true
+			}
+		}
+		for _, child := range shape.children {
+			if field == child.sourceKey {
+				return true
+			}
+			for _, candidate := range child.fields {
+				if field == child.sourceKey+"."+candidate.target {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+type MapperError struct {
+	metadata MapperMetadata
+	cause    error
+}
+
+func (err *MapperError) Error() string {
+	if err == nil {
+		return "detail mapping failed"
+	}
+	return err.metadata.safeMessage
+}
+
+func (err *MapperError) Unwrap() error { return err.cause }
+
+func (err *MapperError) Metadata() MapperMetadata {
+	if err == nil {
+		return MapperMetadata{}
+	}
+	return err.metadata
+}
+
+func mapperError(field, category, reason, message string, cause error) error {
+	return &MapperError{metadata: MapperMetadata{
+		class: "detail_mapping", field: field, category: category, reason: reason, safeMessage: message,
+	}, cause: cause}
+}
+
 type DetailRecord struct {
 	Domain        DetailDomain
 	Identifier    string
@@ -47,28 +127,28 @@ type DetailChildRecord struct {
 
 func MapCIFDetail(ctx context.Context, detail *fincloud.CIFDetail, asOfDate CalendarDate, fetchedAt time.Time) (DetailRecord, error) {
 	if detail == nil {
-		return DetailRecord{}, fmt.Errorf("CIF detail is required")
+		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
 	}
 	return MapDetailPayload(ctx, DetailCIF, detail.RawPayload, asOfDate, fetchedAt)
 }
 
 func MapSavingDetail(ctx context.Context, detail *fincloud.SavingDetail, asOfDate CalendarDate, fetchedAt time.Time) (DetailRecord, error) {
 	if detail == nil {
-		return DetailRecord{}, fmt.Errorf("saving detail is required")
+		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
 	}
 	return MapDetailPayload(ctx, DetailSaving, detail.RawPayload, asOfDate, fetchedAt)
 }
 
 func MapTimeDepositDetail(ctx context.Context, detail *fincloud.TimeDepositDetail, asOfDate CalendarDate, fetchedAt time.Time) (DetailRecord, error) {
 	if detail == nil {
-		return DetailRecord{}, fmt.Errorf("time-deposit detail is required")
+		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
 	}
 	return MapDetailPayload(ctx, DetailTimeDeposit, detail.RawPayload, asOfDate, fetchedAt)
 }
 
 func MapLoanDetail(ctx context.Context, detail *fincloud.LoanDetail, asOfDate CalendarDate, fetchedAt time.Time) (DetailRecord, error) {
 	if detail == nil {
-		return DetailRecord{}, fmt.Errorf("loan detail is required")
+		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
 	}
 	return MapDetailPayload(ctx, DetailLoan, detail.RawPayload, asOfDate, fetchedAt)
 }
@@ -82,17 +162,17 @@ func MapDetailPayload(ctx context.Context, domain DetailDomain, raw json.RawMess
 	}
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
-		return DetailRecord{}, fmt.Errorf("raw detail payload is required")
+		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
 	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, raw); err != nil {
-		return DetailRecord{}, fmt.Errorf("compact raw detail payload: %w", err)
+		return DetailRecord{}, mapperError("payload", "structure", "invalid_json", "detail payload is invalid", err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(compact.Bytes()))
 	decoder.UseNumber()
 	fields := make(map[string]any)
 	if err := decoder.Decode(&fields); err != nil {
-		return DetailRecord{}, fmt.Errorf("decode raw detail payload: %w", err)
+		return DetailRecord{}, mapperError("payload", "structure", "invalid_json", "detail payload is invalid", err)
 	}
 	shape, err := detailShapeFor(domain)
 	if err != nil {
@@ -100,9 +180,9 @@ func MapDetailPayload(ctx context.Context, domain DetailDomain, raw json.RawMess
 	}
 	identifier, ok := fields[shape.identifierKey].(string)
 	if !ok || strings.TrimSpace(identifier) == "" {
-		return DetailRecord{}, fmt.Errorf("%s detail identifier %q is required", domain, shape.identifierKey)
+		return DetailRecord{}, mapperError(identifierField(shape), "identifier", "required", "detail identifier is missing", nil)
 	}
-	mappedFields, err := mapFields(fields, shape.fields)
+	mappedFields, err := mapFields(fields, shape.fields, "")
 	if err != nil {
 		return DetailRecord{}, fmt.Errorf("%s detail: %w", domain, err)
 	}
@@ -118,7 +198,7 @@ func MapDetailPayload(ctx context.Context, domain DetailDomain, raw json.RawMess
 		}
 		children, ok := rawChildren.([]any)
 		if !ok {
-			return DetailRecord{}, fmt.Errorf("%s must be an array", childShape.sourceKey)
+			return DetailRecord{}, mapperError(childShape.sourceKey, "structure", "expected_array", "detail child collection is invalid", nil)
 		}
 		mapped := make([]DetailChildRecord, len(children))
 		for index, child := range children {
@@ -127,13 +207,13 @@ func MapDetailPayload(ctx context.Context, domain DetailDomain, raw json.RawMess
 			}
 			object, ok := child.(map[string]any)
 			if !ok {
-				return DetailRecord{}, fmt.Errorf("%s[%d] must be an object", childShape.sourceKey, index)
+				return DetailRecord{}, mapperError(childShape.sourceKey, "structure", "expected_object", "detail child item is invalid", nil)
 			}
 			data, err := json.Marshal(object)
 			if err != nil {
-				return DetailRecord{}, err
+				return DetailRecord{}, mapperError(childShape.sourceKey, "structure", "invalid_json", "detail child item is invalid", err)
 			}
-			mappedFields, err := mapFields(object, childShape.fields)
+			mappedFields, err := mapFields(object, childShape.fields, childShape.sourceKey+".")
 			if err != nil {
 				return DetailRecord{}, fmt.Errorf("%s[%d]: %w", childShape.sourceKey, index, err)
 			}
@@ -217,25 +297,51 @@ func detailShapeFor(domain DetailDomain) (detailShape, error) {
 	}
 }
 
-func mapFields(source map[string]any, specifications []detailField) (map[string]any, error) {
+func mapFields(source map[string]any, specifications []detailField, prefix string) (map[string]any, error) {
 	mapped := make(map[string]any, len(specifications))
 	for _, specification := range specifications {
 		value, exists := source[specification.source]
 		valueString, isString := value.(string)
 		if !exists || value == nil || (isString && strings.TrimSpace(valueString) == "") {
 			if specification.required {
-				return nil, fmt.Errorf("%s is required", specification.target)
+				return nil, mapperError(prefix+specification.target, specification.valueType.category(), "required", "required detail field is missing", nil)
 			}
 			mapped[specification.target] = nil
 			continue
 		}
 		converted, err := convertDetailValue(value, specification.valueType)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", specification.target, err)
+			return nil, mapperError(prefix+specification.target, specification.valueType.category(), "invalid_value", "detail field value is invalid", err)
 		}
 		mapped[specification.target] = converted
 	}
 	return mapped, nil
+}
+
+func (valueType detailValueType) category() string {
+	switch valueType {
+	case detailString:
+		return "string"
+	case detailDecimal:
+		return "decimal"
+	case detailInteger:
+		return "integer"
+	case detailDate:
+		return "date"
+	case detailDateTime:
+		return "datetime"
+	default:
+		return "structure"
+	}
+}
+
+func identifierField(shape detailShape) string {
+	for _, field := range shape.fields {
+		if field.source == shape.identifierKey {
+			return field.target
+		}
+	}
+	return "identifier"
 }
 
 func convertDetailValue(value any, valueType detailValueType) (any, error) {
