@@ -31,6 +31,8 @@ var EmptyBeforeAdoption = []string{
 	"fincloud_loan_repayment_schedule", "fincloud_loan_payment_history",
 	"dynamic_csv_sources", "dynamic_csv_source_columns",
 	"fixed_report_publications", "fixed_report_load_members", "fixed_report_loads",
+	"maintenance_csv_ingestions", "run_log_events", "ingestion_row_errors", "ingestion_run_steps",
+	"schedule_executions", "ingestion_run_items", "ingestion_runs", "schedules",
 }
 
 type MigrationGroup struct {
@@ -39,6 +41,10 @@ type MigrationGroup struct {
 }
 
 var AdoptionMigrationGroups = []MigrationGroup{
+	{"create_ingestion_execution_runtime.sql", []string{
+		"maintenance_csv_ingestions", "run_log_events", "ingestion_row_errors", "ingestion_run_steps",
+		"schedule_executions", "ingestion_run_items", "ingestion_runs", "schedules", "ingestion_runtime_settings",
+	}},
 	{"create_fixed_report_load_control.sql", []string{"fixed_report_publications", "fixed_report_load_members", "fixed_report_loads"}},
 	{"create_fixed_report_storage.sql", []string{
 		"stg_fincloud_cif_opening_reports", "stg_fincloud_journal_transaction_reports",

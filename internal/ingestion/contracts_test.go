@@ -126,6 +126,26 @@ func TestPurePlanUsesFrozenDeterministicInternalDimensions(t *testing.T) {
 	}
 }
 
+func TestBalanceDateSeriesFreezesDateLocationMembers(t *testing.T) {
+	from, _ := ParseCalendarDate("2026-06-01")
+	to, _ := ParseCalendarDate("2026-06-02")
+	locations, _ := FreezeLocations([]string{"008", "000"})
+	plan, err := BuildFixedDateSeriesPlan(FixedDefinitions()[2], []CalendarDate{from, to}, locations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Members) != 4 || plan.Range.From != from || plan.Range.To != to {
+		t.Fatalf("balance series plan=%+v", plan)
+	}
+	seen := map[string]bool{}
+	for _, member := range plan.Members {
+		if len(member.MemberKey) != 64 || seen[member.MemberKey] || member.Parameters[0] != member.SourceLocationID || len(member.Parameters) != 2 {
+			t.Fatalf("invalid balance descriptor=%+v", member)
+		}
+		seen[member.MemberKey] = true
+	}
+}
+
 func TestFixedManifestCanonicalGolden(t *testing.T) {
 	definition := FixedDefinitions()[2]
 	date, _ := ParseCalendarDate("2026-08-12")

@@ -36,10 +36,11 @@ const (
 )
 
 type Error struct {
-	Kind      ErrorKind
-	Operation string
-	Message   string
-	Cause     error
+	Kind       ErrorKind
+	Operation  string
+	Message    string
+	HTTPStatus int
+	Cause      error
 }
 
 func (e *Error) Error() string {
@@ -126,7 +127,7 @@ func (c *Client) do(ctx context.Context, operation string, build func(sessionID 
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		resp.Body.Close()
-		return nil, &Error{Kind: ErrorUnauthorized, Operation: operation, Message: "Fincloud rejected the request after reauthentication"}
+		return nil, &Error{Kind: ErrorUnauthorized, Operation: operation, Message: "Fincloud rejected the request after reauthentication", HTTPStatus: http.StatusUnauthorized}
 	}
 	return resp, nil
 }
@@ -204,7 +205,7 @@ func (c *Client) loginRequest(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", &Error{Kind: ErrorAuthentication, Operation: "authenticate", Message: "Fincloud rejected the configured login"}
+		return "", &Error{Kind: ErrorAuthentication, Operation: "authenticate", Message: "Fincloud rejected the configured login", HTTPStatus: resp.StatusCode}
 	}
 	var payload struct {
 		Status string `json:"status"`
@@ -260,5 +261,5 @@ func sanitizeTransportError(err error) error {
 }
 
 func responseError(operation string, status int) error {
-	return &Error{Kind: ErrorUpstream, Operation: operation, Message: fmt.Sprintf("Fincloud returned HTTP %d", status)}
+	return &Error{Kind: ErrorUpstream, Operation: operation, Message: fmt.Sprintf("Fincloud returned HTTP %d", status), HTTPStatus: status}
 }

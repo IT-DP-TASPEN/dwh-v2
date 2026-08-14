@@ -26,27 +26,27 @@ func TestFixedCompleteSetPromotionAndStaleOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := NewFixedRepository(db)
-	load1, err := repository.BeginLoad(context.Background(), definition, plan)
+	load1, err := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, member := range plan.Members {
 		rows := fixedRows(t, definition, member.SourceLocationID)
-		if err := repository.StageMember(context.Background(), definition, load1, member.MemberKey, []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: rows}}); err != nil {
+		if err := repository.StageMember(context.Background(), definition, load1, member, []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: rows}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := repository.Promote(context.Background(), definition, load1); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.StageMember(context.Background(), definition, load1, plan.Members[0].MemberKey, []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}}); err == nil {
+	if err := repository.StageMember(context.Background(), definition, load1, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}}); err == nil {
 		t.Fatal("published load accepted member replacement")
 	}
-	load2, err := repository.BeginLoad(context.Background(), definition, plan)
+	load2, err := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.StageMember(context.Background(), definition, load2, plan.Members[0].MemberKey, []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}}); err != nil {
+	if err := repository.StageMember(context.Background(), definition, load2, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.Promote(context.Background(), definition, load2); err == nil {
@@ -56,12 +56,12 @@ func TestFixedCompleteSetPromotionAndStaleOrdering(t *testing.T) {
 	if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, date.String(), date.String()); err != nil || active != load1 {
 		t.Fatalf("active load=%d want=%d error=%v", active, load1, err)
 	}
-	load3, err := repository.BeginLoad(context.Background(), definition, plan)
+	load3, err := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, member := range plan.Members {
-		if err := repository.StageMember(context.Background(), definition, load3, member.MemberKey, []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, member.SourceLocationID)}}); err != nil {
+		if err := repository.StageMember(context.Background(), definition, load3, member, []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, member.SourceLocationID)}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -86,11 +86,11 @@ func TestFixedFirstPublicationRaceUsesMonotonicLoadID(t *testing.T) {
 	repository := NewFixedRepository(db)
 	loads := make([]uint64, 2)
 	for index := range loads {
-		loads[index], err = repository.BeginLoad(context.Background(), definition, plan)
+		loads[index], err = repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := repository.StageMember(context.Background(), definition, loads[index], ingestion.SingleFixedMemberKey,
+		if err := repository.StageMember(context.Background(), definition, loads[index], plan.Members[0],
 			[]FixedSegment{{Index: 0, AsOfDate: to, SourceRows: fixedRows(t, definition, "")}}); err != nil {
 			t.Fatal(err)
 		}
@@ -308,4 +308,19 @@ func resetFixed(t *testing.T, db *sql.DB) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func fixedRunID(t *testing.T, db *sql.DB, jobKey string) uint64 {
+	t.Helper()
+	result, err := db.Exec(`INSERT INTO ingestion_runs
+		(kind,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,finished_at)
+		VALUES ('job',?,'succeeded','fixed_range_v1',1,JSON_OBJECT(),UNHEX(REPEAT('00',32)),'direct',CURRENT_TIMESTAMP(6))`, jobKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return uint64(id)
 }

@@ -3,11 +3,14 @@ package fincloud
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 )
 
@@ -55,6 +58,107 @@ func (c *Client) FetchAccountCodes(ctx context.Context) ([]AccountCode, error) {
 		return nil, &Error{Kind: ErrorUpstream, Operation: "fetch account codes", Message: "Fincloud reported a source failure"}
 	}
 	return payload.Data.Result.AccountCodes, nil
+}
+
+func (c *Client) FetchCIFNumbers(ctx context.Context, throughDate string) ([]string, error) {
+	content, err := c.DownloadReport(ctx, "CIF Opening Report", "", "1900-01-01", throughDate)
+	if err != nil {
+		return nil, err
+	}
+	reader := csv.NewReader(strings.NewReader(strings.TrimPrefix(content, "\uFEFF")))
+	reader.Comma = '|'
+	headers, err := reader.Read()
+	if err != nil {
+		return nil, &Error{Kind: ErrorMalformed, Operation: "fetch CIF numbers", Message: "Fincloud CIF listing was malformed", Cause: err}
+	}
+	column := -1
+	for index, header := range headers {
+		if header == "CIF No" {
+			column = index
+			break
+		}
+	}
+	if column < 0 {
+		return nil, &Error{Kind: ErrorMalformed, Operation: "fetch CIF numbers", Message: "Fincloud CIF listing omitted CIF No"}
+	}
+	var values []string
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil || column >= len(row) {
+			return nil, &Error{Kind: ErrorMalformed, Operation: "fetch CIF numbers", Message: "Fincloud CIF listing was malformed", Cause: err}
+		}
+		values = append(values, row[column])
+	}
+	return normalizeIdentifiers(values), nil
+}
+
+func (c *Client) FetchSavingAccounts(ctx context.Context) ([]string, error) {
+	return c.fetchAccountList(ctx, "fetch saving accounts", "/tabungan/inquiry/rekening/cari", url.Values{
+		"cabang": {"ALL"}, "datamutasi": {"false"}, "pagenumber": {"0"}, "pagesize": {"9999999999999"}, "rowcount": {"0"},
+	})
+}
+
+func (c *Client) FetchTimeDepositAccounts(ctx context.Context) ([]string, error) {
+	return c.fetchAccountList(ctx, "fetch time-deposit accounts", "/deposito/inquiry/rekening/cari", url.Values{
+		"cabang": {"ALL"}, "pagenumber": {"0"}, "pagesize": {"9999999999999"}, "rowcount": {"0"}, "status": {""},
+	})
+}
+
+func (c *Client) FetchLoanAccounts(ctx context.Context) ([]string, error) {
+	var all []string
+	for _, status := range []string{"Aktif", "Closed", "HT", "WO"} {
+		values, err := c.fetchAccountList(ctx, "fetch loan accounts", "/pinjaman/inquiry/rekening/cari", url.Values{
+			"cabang": {"ALL"}, "jenispinjaman": {""}, "pagenumber": {"0"}, "pagesize": {"9999999999999"}, "rowcount": {"0"}, "status": {status},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("loan status %s: %w", status, err)
+		}
+		all = append(all, values...)
+	}
+	return normalizeIdentifiers(all), nil
+}
+
+func (c *Client) fetchAccountList(ctx context.Context, operation, endpoint string, query url.Values) ([]string, error) {
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				ID string `json:"id"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := c.getJSON(ctx, operation, endpoint+"?"+query.Encode(), &payload); err != nil {
+		return nil, err
+	}
+	if payload.Status != "ok" {
+		return nil, &Error{Kind: ErrorUpstream, Operation: operation, Message: "Fincloud reported a source failure"}
+	}
+	values := make([]string, len(payload.Data.Result))
+	for index, row := range payload.Data.Result {
+		values[index] = row.ID
+	}
+	return normalizeIdentifiers(values), nil
+}
+
+func normalizeIdentifiers(values []string) []string {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			set[value] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (c *Client) DownloadReport(ctx context.Context, name string, parameters ...string) (string, error) {

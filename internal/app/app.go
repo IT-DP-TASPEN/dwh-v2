@@ -15,6 +15,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/auth"
 	"github.com/ibldzn/go-admin/internal/browserauth"
 	"github.com/ibldzn/go-admin/internal/config"
+	"github.com/ibldzn/go-admin/internal/coordinator"
 	"github.com/ibldzn/go-admin/internal/database"
 	"github.com/ibldzn/go-admin/internal/fincloud"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
@@ -76,6 +77,21 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("initialize access control: %w", err)
 	}
 	logger.Info("access control initialized")
+	ingestionCoordinator, err := coordinator.New(ctx, databaseConnection, fincloudClient, logger)
+	if err != nil {
+		return fmt.Errorf("initialize ingestion coordinator: %w", err)
+	}
+	coordinatorContext, stopCoordinator := context.WithCancel(ctx)
+	coordinatorDone := make(chan struct{})
+	go func() {
+		defer close(coordinatorDone)
+		ingestionCoordinator.Run(coordinatorContext)
+	}()
+	defer func() {
+		stopCoordinator()
+		<-coordinatorDone
+	}()
+	logger.Info("ingestion coordinator initialized", "owner_id", ingestionCoordinator.OwnerID())
 
 	userRepository := user.NewRepository(databaseConnection)
 	accessRepository := access.NewRepository(databaseConnection)

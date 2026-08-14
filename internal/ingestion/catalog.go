@@ -6,21 +6,27 @@ import (
 )
 
 type JobCategory string
+type DateStrategy string
 
 const (
 	CategoryFixed  JobCategory = "fixed"
 	CategoryEOD    JobCategory = "maintenance_eod"
 	CategoryCBR    JobCategory = "maintenance_cbr"
 	CategoryDetail JobCategory = "detail"
+
+	RangeCapable DateStrategy = "range_capable"
+	SingleDate   DateStrategy = "single_date"
+	NoDate       DateStrategy = "no_date"
 )
 
 type JobDefinition struct {
-	Key         string
-	Name        string
-	Category    JobCategory
-	Active      bool
-	Fixed       *FixedDefinition
-	Maintenance *MaintenanceDefinition
+	Key          string
+	Name         string
+	Category     JobCategory
+	DateStrategy DateStrategy
+	Active       bool
+	Fixed        *FixedDefinition
+	Maintenance  *MaintenanceDefinition
 }
 
 type Catalog struct {
@@ -36,7 +42,11 @@ func NewCatalog() (Catalog, error) {
 	}
 	for _, definition := range fixedDefinitions {
 		copy := definition
-		jobs = append(jobs, JobDefinition{Key: copy.Key, Name: copy.Name, Category: CategoryFixed, Active: true, Fixed: &copy})
+		strategy := RangeCapable
+		if copy.SnapshotDate {
+			strategy = SingleDate
+		}
+		jobs = append(jobs, JobDefinition{Key: copy.Key, Name: copy.Name, Category: CategoryFixed, DateStrategy: strategy, Active: true, Fixed: &copy})
 	}
 	maintenanceDefinitions := MaintenanceDefinitions()
 	if err := validateMaintenanceDefinitions(maintenanceDefinitions); err != nil {
@@ -48,7 +58,7 @@ func NewCatalog() (Catalog, error) {
 		if copy.Kind == MaintenanceCBR {
 			category = CategoryCBR
 		}
-		jobs = append(jobs, JobDefinition{Key: copy.Key, Name: copy.Name, Category: category, Active: true, Maintenance: &copy})
+		jobs = append(jobs, JobDefinition{Key: copy.Key, Name: copy.Name, Category: category, DateStrategy: SingleDate, Active: true, Maintenance: &copy})
 	}
 	for _, detail := range []struct{ key, name string }{
 		{"cif_detail", "CIF Detail"},
@@ -56,12 +66,13 @@ func NewCatalog() (Catalog, error) {
 		{"time_deposit_detail", "Time Deposit Detail"},
 		{"loan_detail", "Loan Detail"},
 	} {
-		jobs = append(jobs, JobDefinition{Key: detail.key, Name: detail.name, Category: CategoryDetail, Active: true})
+		jobs = append(jobs, JobDefinition{Key: detail.key, Name: detail.name, Category: CategoryDetail, DateStrategy: NoDate, Active: true})
 	}
 	if len(jobs) != 36 {
 		return Catalog{}, fmt.Errorf("canonical catalog has %d jobs, want 36", len(jobs))
 	}
 	byKey := make(map[string]JobDefinition, len(jobs))
+	strategies := map[DateStrategy]int{}
 	for _, job := range jobs {
 		if !regexp.MustCompile(`^[a-z][a-z0-9_]*$`).MatchString(job.Key) {
 			return Catalog{}, fmt.Errorf("invalid job key %q", job.Key)
@@ -69,7 +80,11 @@ func NewCatalog() (Catalog, error) {
 		if _, exists := byKey[job.Key]; exists {
 			return Catalog{}, fmt.Errorf("duplicate job key %q", job.Key)
 		}
+		strategies[job.DateStrategy]++
 		byKey[job.Key] = job
+	}
+	if strategies[RangeCapable] != 7 || strategies[SingleDate] != 25 || strategies[NoDate] != 4 {
+		return Catalog{}, fmt.Errorf("canonical date strategies are range=%d single=%d none=%d", strategies[RangeCapable], strategies[SingleDate], strategies[NoDate])
 	}
 	return Catalog{jobs: jobs, byKey: byKey}, nil
 }

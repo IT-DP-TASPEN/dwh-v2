@@ -42,6 +42,8 @@ type RequestDescriptor struct {
 	MemberKey        string
 	ReportName       string
 	Parameters       []string
+	RequestedFrom    CalendarDate
+	RequestedTo      CalendarDate
 	SourceLocationID string
 	AccountCode      string
 }
@@ -175,6 +177,36 @@ func BuildFixedSnapshotPlan(definition FixedDefinition, requested FixedSnapshotD
 	return BuildFixedPlan(definition, FixedDateRangeParams{From: requested.Date, To: requested.Date}, frozenLocations, FrozenAccountCodes{})
 }
 
+// BuildFixedDateSeriesPlan creates one complete Balance Sheet load spanning
+// every frozen date and location. Enumeration remains external to this pure builder.
+func BuildFixedDateSeriesPlan(definition FixedDefinition, dates []CalendarDate, frozenLocations FrozenLocations) (FixedPlan, error) {
+	if definition.Key != "balance_sheet_report" || !definition.SnapshotDate || len(dates) == 0 {
+		return FixedPlan{}, fmt.Errorf("balance sheet date series is required")
+	}
+	for index, date := range dates {
+		if date.IsZero() || (index > 0 && date != dates[index-1].AddDays(1)) {
+			return FixedPlan{}, fmt.Errorf("fixed date series must be ascending and contiguous")
+		}
+	}
+	locations := frozenLocations.Values()
+	if len(locations) == 0 {
+		return FixedPlan{}, fmt.Errorf("%s requires a frozen location set", definition.Key)
+	}
+	members := make([]RequestDescriptor, 0, len(dates)*len(locations))
+	for _, date := range dates {
+		requested := FixedDateRangeParams{From: date, To: date}
+		for _, location := range locations {
+			members = append(members, descriptor(definition, requested, location, "", dateLocationMemberKey(date, location)))
+		}
+	}
+	from, to := dates[0], dates[len(dates)-1]
+	return FixedPlan{
+		JobKey: definition.Key, Range: FixedDateRangeParams{From: from, To: to},
+		ReplacementScope: ReplacementScope{JobKey: definition.Key, From: from, To: to},
+		Members:          members, RequireAllMembers: true,
+	}, nil
+}
+
 func descriptor(definition FixedDefinition, requested FixedDateRangeParams, location, account, memberKey string) RequestDescriptor {
 	from, to := requested.From.String(), requested.To.String()
 	var parameters []string
@@ -196,7 +228,32 @@ func descriptor(definition FixedDefinition, requested FixedDateRangeParams, loca
 	case "teller_mutation_report":
 		parameters = []string{location, "ALL", from, to}
 	}
-	return RequestDescriptor{MemberKey: memberKey, ReportName: definition.FincloudReportName, Parameters: parameters, SourceLocationID: location, AccountCode: account}
+	return RequestDescriptor{MemberKey: memberKey, ReportName: definition.FincloudReportName, Parameters: parameters, RequestedFrom: requested.From, RequestedTo: requested.To, SourceLocationID: location, AccountCode: account}
+}
+
+func BuildFixedRequestDescriptor(definition FixedDefinition, requested FixedDateRangeParams, location, account, memberKey string) (RequestDescriptor, error) {
+	if requested.From.IsZero() || requested.To.IsZero() || requested.From.String() > requested.To.String() || memberKey == "" {
+		return RequestDescriptor{}, fmt.Errorf("valid fixed request descriptor is required")
+	}
+	canonical := false
+	for _, candidate := range FixedDefinitions() {
+		if candidate.Key == definition.Key {
+			canonical = true
+			break
+		}
+	}
+	if !canonical {
+		return RequestDescriptor{}, fmt.Errorf("unknown fixed definition %q", definition.Key)
+	}
+	return descriptor(definition, requested, location, account, memberKey), nil
+}
+
+func dateLocationMemberKey(date CalendarDate, location string) string {
+	var encoded bytes.Buffer
+	writeManifestString(&encoded, date.String())
+	writeManifestString(&encoded, location)
+	sum := sha256.Sum256(encoded.Bytes())
+	return hex.EncodeToString(sum[:])
 }
 
 func FixedColumnName(header string) string { return toSnakeCase(header) }

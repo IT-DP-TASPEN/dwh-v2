@@ -36,10 +36,31 @@ func TestSourceEnumerationReportProtocolAndTypedDetail(t *testing.T) {
 			if err := json.Unmarshal([]byte(request.URL.Query().Get("p")), &parameters); err != nil {
 				t.Error(err)
 			}
-			if !reflect.DeepEqual(parameters, []string{"", "2026-08-12", "2026-08-12"}) {
+			want := []string{"", "2026-08-12", "2026-08-12"}
+			content := "\uFEFFA|B\n1|2\n"
+			if request.URL.Query().Get("nm") == "CIF Opening Report" {
+				want = []string{"", "1900-01-01", "2026-08-12"}
+				content = "\uFEFFCIF No|Name\n C2 |x\nC1|y\nC1|z\n"
+			}
+			if !reflect.DeepEqual(parameters, want) {
 				t.Errorf("parameters = %v", parameters)
 			}
-			_, _ = io.WriteString(response, "\uFEFFA|B\n1|2\n")
+			_, _ = io.WriteString(response, content)
+		case "/fincloud/tabungan/inquiry/rekening/cari":
+			if request.URL.Query().Get("cabang") != "ALL" || request.URL.Query().Get("datamutasi") != "false" {
+				t.Errorf("saving query=%v", request.URL.Query())
+			}
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":[{"id":"S2"},{"id":"S1"}]}}`)
+		case "/fincloud/deposito/inquiry/rekening/cari":
+			if request.URL.Query().Get("cabang") != "ALL" {
+				t.Errorf("time-deposit query=%v", request.URL.Query())
+			}
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":[{"id":"T1"}]}}`)
+		case "/fincloud/pinjaman/inquiry/rekening/cari":
+			if request.URL.Query().Get("cabang") != "ALL" {
+				t.Errorf("loan query=%v", request.URL.Query())
+			}
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":[{"id":"L2"},{"id":"L1"}]}}`)
 		case "/fincloud/pinjaman/inquiry/rekening/pinjaman":
 			if request.URL.Query().Get("id") != "LN-1" {
 				t.Errorf("loan id = %q", request.URL.Query().Get("id"))
@@ -61,6 +82,22 @@ func TestSourceEnumerationReportProtocolAndTypedDetail(t *testing.T) {
 	codes, err := client.FetchAccountCodes(context.Background())
 	if err != nil || len(codes) != 2 || codes[1].ID != "" {
 		t.Fatalf("codes=%v error=%v", codes, err)
+	}
+	cifs, err := client.FetchCIFNumbers(context.Background(), "2026-08-12")
+	if err != nil || !reflect.DeepEqual(cifs, []string{"C1", "C2"}) {
+		t.Fatalf("CIFs=%v error=%v", cifs, err)
+	}
+	savings, err := client.FetchSavingAccounts(context.Background())
+	if err != nil || !reflect.DeepEqual(savings, []string{"S1", "S2"}) {
+		t.Fatalf("savings=%v error=%v", savings, err)
+	}
+	deposits, err := client.FetchTimeDepositAccounts(context.Background())
+	if err != nil || !reflect.DeepEqual(deposits, []string{"T1"}) {
+		t.Fatalf("deposits=%v error=%v", deposits, err)
+	}
+	loans, err := client.FetchLoanAccounts(context.Background())
+	if err != nil || !reflect.DeepEqual(loans, []string{"L1", "L2"}) {
+		t.Fatalf("loans=%v error=%v", loans, err)
 	}
 	report, err := client.DownloadReport(context.Background(), "Vault Mutation Report csv", "", "2026-08-12", "2026-08-12")
 	if err != nil || strings.HasPrefix(report, "\uFEFF") {

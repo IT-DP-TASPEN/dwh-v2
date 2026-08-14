@@ -1,0 +1,187 @@
+package coordinator
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/ibldzn/go-admin/internal/fincloud"
+	"github.com/ibldzn/go-admin/internal/ingestion"
+	"github.com/ibldzn/go-admin/internal/ingestionexec"
+	"github.com/ibldzn/go-admin/internal/ingestionrun"
+	"github.com/ibldzn/go-admin/internal/ingestionstore"
+)
+
+type Coordinator struct {
+	runs     *ingestionrun.Repository
+	executor *ingestionexec.Executor
+	ownerID  string
+	workers  int
+	logger   *slog.Logger
+
+	mu    sync.Mutex
+	local map[uint64]context.CancelFunc
+}
+
+func New(ctx context.Context, db *sqlx.DB, client *fincloud.Client, logger *slog.Logger) (*Coordinator, error) {
+	if db == nil || client == nil || logger == nil {
+		return nil, fmt.Errorf("database, Fincloud client, and logger are required")
+	}
+	catalog, err := ingestion.NewCatalog()
+	if err != nil {
+		return nil, err
+	}
+	runs, err := ingestionrun.NewRepository(db, catalog)
+	if err != nil {
+		return nil, err
+	}
+	settings, err := runs.RuntimeSettings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load ingestion runtime settings: %w", err)
+	}
+	ownerID, err := ingestionrun.NewOwnerID()
+	if err != nil {
+		return nil, err
+	}
+	executor, err := ingestionexec.New(client, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db),
+		ingestionstore.NewMaintenanceRepository(db), runs, catalog, settings.FixedMemberConcurrency, settings.DetailConcurrency)
+	if err != nil {
+		return nil, err
+	}
+	return &Coordinator{runs: runs, executor: executor, ownerID: ownerID, workers: settings.MaxRunningJobs, logger: logger, local: map[uint64]context.CancelFunc{}}, nil
+}
+
+func (coordinator *Coordinator) OwnerID() string { return coordinator.ownerID }
+
+func (coordinator *Coordinator) Submit(ctx context.Context, jobKey string, parameters ingestionrun.Parameters, trigger ingestionrun.Trigger, reference string, requester *uint64) (uint64, error) {
+	return coordinator.runs.Submit(ctx, jobKey, parameters, trigger, reference, requester)
+}
+
+func (coordinator *Coordinator) SubmitRunAll(ctx context.Context, from, to ingestion.CalendarDate, lookback int, trigger ingestionrun.Trigger, reference string, requester *uint64) (uint64, error) {
+	return coordinator.runs.CreateRunAll(ctx, from, to, lookback, trigger, reference, requester)
+}
+
+func (coordinator *Coordinator) Cancel(ctx context.Context, runID uint64, reason string) error {
+	return coordinator.runs.RequestCancellation(ctx, runID, reason)
+}
+
+func (coordinator *Coordinator) RecoverAbandoned(ctx context.Context, runID uint64, expectedOwner string, expectedHeartbeat time.Time, reason string) error {
+	return coordinator.runs.RecoverAbandoned(ctx, runID, expectedOwner, expectedHeartbeat, reason)
+}
+
+func (coordinator *Coordinator) Run(ctx context.Context) {
+	var wait sync.WaitGroup
+	for range coordinator.workers {
+		wait.Add(1)
+		go func() { defer wait.Done(); coordinator.worker(ctx) }()
+	}
+	wait.Add(2)
+	go func() { defer wait.Done(); coordinator.supervise(ctx) }()
+	go func() { defer wait.Done(); coordinator.reconcile(ctx) }()
+	<-ctx.Done()
+	coordinator.cancelAll()
+	wait.Wait()
+}
+
+func (coordinator *Coordinator) worker(ctx context.Context) {
+	for ctx.Err() == nil {
+		run, err := coordinator.runs.Claim(ctx, coordinator.ownerID)
+		if err != nil {
+			if ctx.Err() == nil {
+				coordinator.logger.Error("claim ingestion run", "error", err)
+			}
+			wait(ctx, 500*time.Millisecond)
+			continue
+		}
+		if run == nil {
+			wait(ctx, 250*time.Millisecond)
+			continue
+		}
+		runCtx, cancel := context.WithCancel(ctx)
+		coordinator.mu.Lock()
+		coordinator.local[run.ID] = cancel
+		coordinator.mu.Unlock()
+		result := coordinator.executor.Execute(runCtx, *run, coordinator.ownerID)
+		coordinator.mu.Lock()
+		delete(coordinator.local, run.ID)
+		coordinator.mu.Unlock()
+		cancel()
+		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		err = coordinator.runs.Finish(finishCtx, run.ID, coordinator.ownerID, result.Status, result.Error)
+		finishCancel()
+		if err != nil && !errors.Is(err, ingestionrun.ErrTransition) {
+			coordinator.logger.Error("finish ingestion run", "run_id", run.ID, "job_key", run.JobKey, "error", err)
+		}
+		if result.Cause != nil {
+			coordinator.logger.Warn("ingestion run completed with error", "run_id", run.ID, "job_key", run.JobKey, "class", result.Error.Class, "error", result.Cause)
+		}
+	}
+}
+
+func (coordinator *Coordinator) supervise(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ids, err := coordinator.runs.HeartbeatAndCancellations(ctx, coordinator.ownerID)
+			if err != nil {
+				coordinator.logger.Error("supervise ingestion runs", "error", err)
+				continue
+			}
+			coordinator.mu.Lock()
+			for _, id := range ids {
+				if cancel := coordinator.local[id]; cancel != nil {
+					cancel()
+				}
+			}
+			coordinator.mu.Unlock()
+		}
+	}
+}
+
+func (coordinator *Coordinator) reconcile(ctx context.Context) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for {
+				changed, err := coordinator.runs.ReconcileOneParent(ctx)
+				if err != nil {
+					coordinator.logger.Error("reconcile Run All", "error", err)
+					break
+				}
+				if !changed {
+					break
+				}
+			}
+		}
+	}
+}
+
+func (coordinator *Coordinator) cancelAll() {
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	for _, cancel := range coordinator.local {
+		cancel()
+	}
+}
+
+func wait(ctx context.Context, duration time.Duration) {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}

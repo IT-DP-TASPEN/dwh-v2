@@ -35,9 +35,12 @@ type FixedSegment struct {
 
 func NewFixedRepository(db *sqlx.DB) *FixedRepository { return &FixedRepository{db: db} }
 
-func (repository *FixedRepository) BeginLoad(ctx context.Context, definition ingestion.FixedDefinition, plan ingestion.FixedPlan) (uint64, error) {
+func (repository *FixedRepository) BeginLoad(ctx context.Context, ingestionRunID uint64, definition ingestion.FixedDefinition, plan ingestion.FixedPlan) (uint64, error) {
 	if repository == nil || repository.db == nil {
 		return 0, fmt.Errorf("fixed repository is not configured")
+	}
+	if ingestionRunID == 0 {
+		return 0, fmt.Errorf("ingestion run is required")
 	}
 	if _, err := fixedStorageFor(definition); err != nil {
 		return 0, err
@@ -53,8 +56,8 @@ func (repository *FixedRepository) BeginLoad(ctx context.Context, definition ing
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
 	result, err := tx.ExecContext(ctx, `INSERT INTO fixed_report_loads
-		(job_key, period_from, period_to, status, expected_member_count, manifest_checksum)
-		VALUES (?, ?, ?, ?, ?, ?)`, plan.JobKey, plan.Range.From.String(), plan.Range.To.String(), fixedLoadPending, len(plan.Members), manifest[:])
+		(ingestion_run_id, job_key, period_from, period_to, status, expected_member_count, manifest_checksum)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ingestionRunID, plan.JobKey, plan.Range.From.String(), plan.Range.To.String(), fixedLoadPending, len(plan.Members), manifest[:])
 	if err != nil {
 		return 0, fmt.Errorf("create fixed load: %w", err)
 	}
@@ -76,7 +79,7 @@ func (repository *FixedRepository) BeginLoad(ctx context.Context, definition ing
 	return uint64(loadID), nil
 }
 
-func (repository *FixedRepository) StageMember(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, memberKey string, segments []FixedSegment) error {
+func (repository *FixedRepository) StageMember(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segments []FixedSegment) error {
 	if repository == nil || repository.db == nil {
 		return fmt.Errorf("fixed repository is not configured")
 	}
@@ -84,9 +87,10 @@ func (repository *FixedRepository) StageMember(ctx context.Context, definition i
 	if err != nil {
 		return err
 	}
-	if loadID == 0 || memberKey == "" || len(segments) == 0 {
+	if loadID == 0 || descriptor.MemberKey == "" || len(segments) == 0 {
 		return fmt.Errorf("load, member, and at least one source segment are required")
 	}
+	memberKey := descriptor.MemberKey
 	tx, err := repository.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin fixed member staging: %w", err)
@@ -133,8 +137,8 @@ func (repository *FixedRepository) StageMember(ctx context.Context, definition i
 			values := []any{loadID, memberKey, ordinal, segment.Index, row.SourceRowNumber, row.SourceRowChecksum, segment.FileName}
 			values = append(values, loadRange.From, loadRange.To, segment.AsOfDate.String())
 			if specification.sourceLocation {
-				if row.SourceLocationID != memberKey {
-					return fmt.Errorf("source location %q does not match member %q", row.SourceLocationID, memberKey)
+				if descriptor.SourceLocationID == "" || row.SourceLocationID != descriptor.SourceLocationID {
+					return fmt.Errorf("source location %q does not match descriptor %q", row.SourceLocationID, descriptor.SourceLocationID)
 				}
 				values = append(values, row.SourceLocationID)
 			}

@@ -166,6 +166,14 @@ func TestTransportErrorsRedactSessionValues(t *testing.T) {
 	}
 }
 
+func TestResponseErrorPreservesSafeHTTPStatus(t *testing.T) {
+	var sourceError *Error
+	err := responseError("fetch detail", http.StatusTooManyRequests)
+	if !errors.As(err, &sourceError) || sourceError.HTTPStatus != http.StatusTooManyRequests || strings.Contains(err.Error(), "body") {
+		t.Fatalf("typed status error=%+v", sourceError)
+	}
+}
+
 func testConfig(baseURL string) Config {
 	return Config{BaseURL: baseURL, Username: "user", Password: "password", LocationID: "001", RoleID: "role", HTTPTimeout: time.Second}
 }
