@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -16,6 +18,7 @@ type RouterDependencies struct {
 	AllowRegistration     bool
 	Authentication        *browserauth.HTTP
 	RegisterAuthenticated func(chi.Router)
+	Ready                 func(context.Context) error
 	Errors                *render.ErrorResponder
 }
 
@@ -30,6 +33,19 @@ func NewRouter(dependencies RouterDependencies) http.Handler {
 		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte("{\"status\":\"ok\"}\n"))
+	})
+	router.Get("/ready", func(writer http.ResponseWriter, request *http.Request) {
+		ctx, cancel := context.WithTimeout(request.Context(), 5*time.Second)
+		defer cancel()
+		if dependencies.Ready == nil || dependencies.Ready(ctx) != nil {
+			writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = writer.Write([]byte("{\"status\":\"not ready\"}\n"))
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte("{\"status\":\"ready\"}\n"))
 	})
 
 	router.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(dependencies.StaticFiles))))

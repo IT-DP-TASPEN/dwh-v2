@@ -45,12 +45,27 @@ func TestRouterOwnsInfrastructureOnly(t *testing.T) {
 	if health.Code != http.StatusOK || service.resolved != 0 || health.Header().Get("Cache-Control") != "" || health.Header().Get("X-Frame-Options") != "DENY" {
 		t.Fatalf("health status=%d resolved=%d headers=%v", health.Code, service.resolved, health.Header())
 	}
+	ready := httptest.NewRecorder()
+	router.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if ready.Code != http.StatusOK || service.resolved != 0 || ready.Body.String() != "{\"status\":\"ready\"}\n" {
+		t.Fatalf("ready status=%d body=%q resolved=%d", ready.Code, ready.Body.String(), service.resolved)
+	}
 	missing := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/users", nil)
 	request.AddCookie(&http.Cookie{Name: "session", Value: token})
 	router.ServeHTTP(missing, request)
 	if missing.Code != http.StatusNotFound || missing.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("global feature route still exists: status=%d headers=%v", missing.Code, missing.Header())
+	}
+}
+
+func TestReadinessFailureIsGeneric(t *testing.T) {
+	service := &fakeAuthentication{}
+	router, _ := testRouterWithReadiness(t, service, nil, func(context.Context) error { return context.DeadlineExceeded })
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "{\"status\":\"not ready\"}\n" || service.resolved != 0 {
+		t.Fatalf("status=%d body=%q resolved=%d", response.Code, response.Body.String(), service.resolved)
 	}
 }
 
@@ -90,6 +105,10 @@ func TestStaticAndCrossOriginBoundaries(t *testing.T) {
 }
 
 func testRouter(t *testing.T, service *fakeAuthentication, register func(chi.Router)) (http.Handler, string) {
+	return testRouterWithReadiness(t, service, register, func(context.Context) error { return nil })
+}
+
+func testRouterWithReadiness(t *testing.T, service *fakeAuthentication, register func(chi.Router), ready func(context.Context) error) (http.Handler, string) {
 	t.Helper()
 	renderer, err := render.New(webfiles.Files, false)
 	if err != nil {
@@ -107,5 +126,5 @@ func testRouter(t *testing.T, service *fakeAuthentication, register func(chi.Rou
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewRouter(RouterDependencies{StaticFiles: staticFiles, Authentication: authentication, RegisterAuthenticated: register, Errors: errors}), token
+	return NewRouter(RouterDependencies{StaticFiles: staticFiles, Authentication: authentication, RegisterAuthenticated: register, Ready: ready, Errors: errors}), token
 }

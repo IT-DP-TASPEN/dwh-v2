@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -16,7 +17,9 @@ const (
 	defaultAppName                 = "Go Admin"
 	defaultAppEnvironment          = "development"
 	defaultAppURL                  = "http://localhost:8080"
+	defaultAppBindHost             = "127.0.0.1"
 	defaultAppPort                 = 8080
+	defaultAppShutdownTimeout      = 45 * time.Second
 	defaultDatabaseHost            = "127.0.0.1"
 	defaultDatabasePort            = 3306
 	defaultSessionCookieName       = "admin_session"
@@ -53,12 +56,14 @@ type AppConfig struct {
 	Name              string
 	Environment       string
 	URL               string
+	BindHost          string
 	Port              int
+	ShutdownTimeout   time.Duration
 	AllowRegistration bool
 }
 
 func (c AppConfig) Address() string {
-	return ":" + strconv.Itoa(c.Port)
+	return net.JoinHostPort(c.BindHost, strconv.Itoa(c.Port))
 }
 
 func (c AppConfig) IsDevelopment() bool {
@@ -200,13 +205,19 @@ func parse(lookup lookupEnv) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	shutdownTimeout, err := parseDuration("APP_SHUTDOWN_TIMEOUT", value("APP_SHUTDOWN_TIMEOUT", defaultAppShutdownTimeout.String()))
+	if err != nil {
+		return Config{}, err
+	}
 
 	config := Config{
 		App: AppConfig{
 			Name:              strings.TrimSpace(value("APP_NAME", defaultAppName)),
 			Environment:       strings.TrimSpace(value("APP_ENV", defaultAppEnvironment)),
 			URL:               strings.TrimSpace(value("APP_URL", defaultAppURL)),
+			BindHost:          strings.TrimSpace(value("APP_BIND_HOST", defaultAppBindHost)),
 			Port:              appPort,
+			ShutdownTimeout:   shutdownTimeout,
 			AllowRegistration: allowRegistration,
 		},
 		Database: DatabaseConfig{
@@ -238,6 +249,7 @@ func validate(config Config) error {
 	}{
 		{"APP_NAME", config.App.Name},
 		{"APP_ENV", config.App.Environment},
+		{"APP_BIND_HOST", config.App.BindHost},
 		{"DB_HOST", config.Database.Host},
 		{"DB_NAME", config.Database.Name},
 		{"DB_USER", config.Database.User},
@@ -258,6 +270,24 @@ func validate(config Config) error {
 	appURL, err := url.Parse(config.App.URL)
 	if err != nil || appURL.Host == "" || (appURL.Scheme != "http" && appURL.Scheme != "https") {
 		return fmt.Errorf("APP_URL must be an absolute http or https URL")
+	}
+	if config.App.Environment == "production" {
+		bindIP := net.ParseIP(config.App.BindHost)
+		if bindIP == nil || !bindIP.IsLoopback() {
+			return fmt.Errorf("APP_BIND_HOST must be a loopback IP in production")
+		}
+		if appURL.Scheme != "https" {
+			return fmt.Errorf("APP_URL must use https in production")
+		}
+		if config.App.AllowRegistration {
+			return fmt.Errorf("ALLOW_REGISTRATION must be false in production")
+		}
+		if !config.Session.Secure {
+			return fmt.Errorf("SESSION_SECURE must be true in production")
+		}
+		if config.Database.Password == "" {
+			return fmt.Errorf("DB_PASSWORD must not be empty in production")
+		}
 	}
 
 	return nil

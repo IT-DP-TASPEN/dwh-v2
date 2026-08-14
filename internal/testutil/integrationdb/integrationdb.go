@@ -26,7 +26,7 @@ import (
 func Open(t *testing.T) *sqlx.DB {
 	t.Helper()
 	root := Root(t)
-	databaseConfig := testConfig(t, root)
+	databaseConfig := Config(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	db, err := database.OpenMigrations(ctx, databaseConfig)
@@ -56,6 +56,11 @@ func Open(t *testing.T) *sqlx.DB {
 		t.Fatalf("apply integration migrations: %v", err)
 	}
 	return db
+}
+
+func Config(t *testing.T) config.DatabaseConfig {
+	t.Helper()
+	return testConfig(t, Root(t))
 }
 
 func Reset(t *testing.T, db *sqlx.DB, definitions []access.PermissionDefinition) {
@@ -167,21 +172,24 @@ func testConfig(t *testing.T, root string) config.DatabaseConfig {
 	if values["TEST_DB_NAME"] == "dwh2" || values["TEST_DB_NAME"] == "dwh3" {
 		t.Fatalf("TEST_DB_NAME %q is reserved; refusing destructive integration tests", values["TEST_DB_NAME"])
 	}
-	normalName := os.Getenv("DB_NAME")
-	if normalName == "" {
-		if environment, err := godotenv.Read(filepath.Join(root, ".env")); err == nil {
-			normalName = environment["DB_NAME"]
-		}
-	}
-	if normalName != "" && values["TEST_DB_NAME"] == normalName {
-		t.Fatalf("TEST_DB_NAME %q matches DB_NAME; refusing to mutate normal database", values["TEST_DB_NAME"])
-	}
 	port, err := strconv.Atoi(values["TEST_DB_PORT"])
 	if err != nil || port < 1 || port > 65535 {
 		t.Fatal("TEST_DB_PORT must be an integer between 1 and 65535")
 	}
 	if values["TEST_DB_HOST"] == "" || values["TEST_DB_USER"] == "" {
 		t.Fatal("TEST_DB_HOST and TEST_DB_USER must not be empty")
+	}
+	runtime := map[string]string{}
+	if environment, err := godotenv.Read(filepath.Join(root, ".env")); err == nil {
+		runtime = environment
+	}
+	for _, key := range []string{"DB_HOST", "DB_PORT", "DB_NAME"} {
+		if value, ok := os.LookupEnv(key); ok {
+			runtime[key] = value
+		}
+	}
+	if values["TEST_DB_HOST"] == runtime["DB_HOST"] && values["TEST_DB_PORT"] == runtime["DB_PORT"] && values["TEST_DB_NAME"] == runtime["DB_NAME"] {
+		t.Fatalf("TEST_DB connection matches the normal runtime database; refusing destructive integration tests")
 	}
 	return config.DatabaseConfig{Host: values["TEST_DB_HOST"], Port: port, Name: values["TEST_DB_NAME"], User: values["TEST_DB_USER"], Password: values["TEST_DB_PASSWORD"]}
 }

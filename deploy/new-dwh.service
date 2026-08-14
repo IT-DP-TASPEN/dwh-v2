@@ -1,0 +1,27 @@
+[Unit]
+Description=New DWH application
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=new-dwh
+Group=new-dwh
+WorkingDirectory=/opt/new-dwh
+EnvironmentFile=/etc/new-dwh/new-dwh.env
+ExecStart=/opt/new-dwh/bin/app serve
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictSUIDSGID=true
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/pressly/goose/v3"
 
 	"github.com/ibldzn/go-admin/internal/dwhschema"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
@@ -17,6 +18,7 @@ import (
 func TestControlledBootstrapMatchesDWH2Topology(t *testing.T) {
 	db := integrationdb.Open(t)
 	ctx := context.Background()
+	t.Cleanup(func() { resetToCanonicalTopology(t, db) })
 	resetToLegacyTopology(t, db)
 	var databaseName string
 	if err := db.Get(&databaseName, "SELECT DATABASE()"); err != nil {
@@ -96,6 +98,43 @@ func TestControlledBootstrapMatchesDWH2Topology(t *testing.T) {
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ingestion_runs'
 		AND INDEX_NAME IN ('idx_ingestion_runs_admin_job','idx_ingestion_runs_admin_status','idx_ingestion_runs_admin_trigger')`); err != nil || adminIndexes != 3 {
 		t.Fatalf("ingestion admin indexes=%d error=%v", adminIndexes, err)
+	}
+}
+
+func resetToCanonicalTopology(t *testing.T, db *sqlx.DB) {
+	t.Helper()
+	ctx := context.Background()
+	connection, err := db.Connx(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS=0`); err != nil {
+		t.Error(err)
+		return
+	}
+	var tables []string
+	if err := connection.SelectContext(ctx, &tables, `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()`); err != nil {
+		t.Error(err)
+		return
+	}
+	for _, table := range tables {
+		if _, err := connection.ExecContext(ctx, "DROP TABLE `"+table+"`"); err != nil {
+			t.Error(err)
+			return
+		}
+	}
+	if _, err := connection.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS=1`); err != nil {
+		t.Error(err)
+		return
+	}
+	if err := goose.SetDialect("mysql"); err != nil {
+		t.Error(err)
+		return
+	}
+	if err := goose.UpContext(ctx, db.DB, filepath.Join(integrationdb.Root(t), "migrations")); err != nil {
+		t.Errorf("restore canonical integration topology: %v", err)
 	}
 }
 

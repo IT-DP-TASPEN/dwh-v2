@@ -45,7 +45,7 @@ Open <http://localhost:8080> after creating the initial administrator.
 | Command | Purpose |
 | --- | --- |
 | `make dev` | Run Air, Tailwind, and esbuild watchers. |
-| `make build` | Build production frontend assets and `bin/app`. |
+| `make build` | Build production frontend assets plus `bin/app` and `bin/migrate`. |
 | `make test` | Run the normal database-free test suite. |
 | `make test-integration` | Run tagged tests against an explicit disposable MySQL database. |
 | `make fmt` | Format Go packages. |
@@ -61,22 +61,15 @@ Open <http://localhost:8080> after creating the initial administrator.
 
 Frontend source under `web/src/` is authoritative. Generated `web/static/css/app.css` and `web/static/js/app.js` are committed; do not edit them manually.
 
-## Existing `dwh2` adoption
+## Database lineage
 
-`dwh2` has legacy 14-digit Goose history above the current 12-digit authentication bootstrap versions. Do not run ordinary `make migrate` on that database until the one-time adoption succeeds.
-
-After a verified backup and explicit shutdown of every database writer:
-
-```sh
-go run ./cmd/adopt-dwh2 preflight
-go run ./cmd/adopt-dwh2 apply --confirm <fingerprint-from-preflight>
-```
-
-The command is hard-restricted to exact database `dwh2`. It recomputes the schema/data fingerprint before writing, replaces approved legacy authentication, applies only the seven allowlisted lower bootstrap migrations out of order, and then executes Phase 3 migrations normally. It never runs from web startup, tests, or `cmd/migrate`. Recreate the first target administrator explicitly after adoption.
+Production starts from a clean application database and applies the canonical migrations from zero. `dwh2` is legacy/reference-only and the migration command refuses to mutate it. Migrations never run from web startup.
 
 ## Configuration
 
-`APP_ENV` accepts `development`, `production`, or `test`. `APP_NAME` controls runtime branding and is independent of the Go module name.
+`APP_ENV` accepts `development`, `production`, or `test`. `APP_NAME` controls runtime branding and is independent of the Go module name. `APP_BIND_HOST` defaults to `127.0.0.1`; production requires a loopback IP. `APP_SHUTDOWN_TIMEOUT` defaults to 45 seconds.
+
+Production also requires an HTTPS `APP_URL`, `SESSION_SECURE=true`, `ALLOW_REGISTRATION=false`, and a nonempty database password.
 
 `ALLOW_REGISTRATION=false` removes both registration routes. When enabled, public registration always creates an active user with the protected `user` role; submitted role fields are ignored because no role choice exists.
 
@@ -97,7 +90,7 @@ The web runtime also requires Fincloud source configuration: `FINCLOUD_BASE_URL`
 
 ## Permissions and management
 
-The 13 canonical permission keys are aggregated from features and synchronized additively at server and CLI bootstrap. Unknown database permissions and assignments are preserved. Migrations never run automatically at application startup. `audit.view` may be assigned to user or custom roles; administrators receive it through the normal superuser bypass.
+The 25 canonical permission keys are aggregated from features and synchronized additively at server and CLI bootstrap. Unknown database permissions and assignments are preserved. Migrations never run automatically at application startup. `audit.view` may be assigned to user or custom roles; administrators receive it through the normal superuser bypass.
 
 Each user has exactly one role. The `admin` role is an immutable superuser; non-admin roles use current database permission assignments. Permissions are loaded for every authenticated request, so changes apply on the next request without cache invalidation.
 
@@ -145,17 +138,11 @@ HTMX is progressive enhancement: ordinary links/forms and server-rendered POST/r
 
 ```sh
 make build
-./bin/app
+./bin/migrate up --confirm-database dwh
+./bin/app serve
 ```
 
-Or build the non-root container:
-
-```sh
-docker build -t go-admin .
-docker run --rm --env-file .env -p 8080:8080 go-admin
-```
-
-Production operators should:
+See [Production operation](docs/PRODUCTION.md) and [Production ingestion validation](docs/PRODUCTION_VALIDATION.md). Production operators should:
 
 - terminate HTTPS correctly and set `SESSION_SECURE=true`;
 - configure HSTS at the trusted TLS edge when appropriate;
@@ -182,7 +169,7 @@ set -a; . ./.env.test.local; set +a
 make test-integration
 ```
 
-All five `TEST_DB_*` variables must be explicitly present. The password may be empty. `TEST_DB_NAME` must name an existing disposable database, must differ from the normal `DB_NAME`, and may never be `dwh2` or `dwh3`; tests apply real migrations and truncate application tables there. They never fall back to normal runtime configuration or create/drop a database.
+All five `TEST_DB_*` variables must be explicitly present. The password may be empty. The complete test host/port/database selection must not match the normal runtime connection, and the database may never be `dwh2` or `dwh3`. A disposable database may legitimately be named `dwh` when it is isolated from the runtime connection. Tests apply real migrations and truncate application tables there; they never fall back to runtime credentials.
 
 Integration coverage also exercises the real Goose adoption topology, snapshot transactions, member-complete fixed-report promotion, runtime additive DDL, schema-lock races, and physical disposal of a connection with uncertain named-lock release.
 

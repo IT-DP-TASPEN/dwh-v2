@@ -28,33 +28,21 @@ func NewHTTPServer(address string, handler http.Handler, logger *slog.Logger) *H
 	}
 }
 
-func (s *HTTPServer) Run(ctx context.Context) error {
-	errorsCh := make(chan error, 1)
-	go func() {
-		s.logger.Info("http server listening", "address", s.server.Addr)
-		errorsCh <- s.server.ListenAndServe()
-	}()
-
-	select {
-	case err := <-errorsCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
+func (s *HTTPServer) Serve() error {
+	s.logger.Info("http server listening", "address", s.server.Addr)
+	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve http: %w", err)
-	case <-ctx.Done():
 	}
+	return nil
+}
 
+func (s *HTTPServer) Shutdown(ctx context.Context) error {
 	s.logger.Info("http server shutting down")
-	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := s.server.Shutdown(shutdownContext); err != nil {
-		_ = s.server.Close()
+	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("shutdown http server: %w", err)
-	}
-
-	if err := <-errorsCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve http during shutdown: %w", err)
 	}
 	s.logger.Info("http server stopped")
 	return nil
 }
+
+func (s *HTTPServer) Close() error { return s.server.Close() }

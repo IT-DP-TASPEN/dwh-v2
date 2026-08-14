@@ -16,7 +16,7 @@ func TestParseDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if config.App.Name != "Go Admin" || config.App.Port != 8080 || !config.App.IsDevelopment() {
+	if config.App.Name != "Go Admin" || config.App.BindHost != "127.0.0.1" || config.App.Port != 8080 || config.App.ShutdownTimeout != 45*time.Second || !config.App.IsDevelopment() {
 		t.Fatalf("unexpected app defaults: %+v", config.App)
 	}
 	if config.Database.Host != "127.0.0.1" || config.Database.Port != 3306 {
@@ -43,6 +43,7 @@ func TestParseValidation(t *testing.T) {
 		{"invalid secure flag", baseValues("SESSION_SECURE", "sometimes"), "SESSION_SECURE"},
 		{"invalid session lifetime", baseValues("SESSION_LIFETIME", "0s"), "SESSION_LIFETIME"},
 		{"invalid remember lifetime", baseValues("SESSION_REMEMBER_LIFETIME", "later"), "SESSION_REMEMBER_LIFETIME"},
+		{"invalid shutdown timeout", baseValues("APP_SHUTDOWN_TIMEOUT", "0s"), "APP_SHUTDOWN_TIMEOUT"},
 	}
 
 	for _, test := range tests {
@@ -58,12 +59,51 @@ func TestParseValidation(t *testing.T) {
 func TestParseSupportedEnvironments(t *testing.T) {
 	for _, environment := range []string{"development", "production", "test"} {
 		t.Run(environment, func(t *testing.T) {
-			config, err := parse(mapLookup(baseValues("APP_ENV", environment)))
+			values := baseValues("APP_ENV", environment)
+			if environment == "production" {
+				productionValues(values)
+			}
+			config, err := parse(mapLookup(values))
 			if err != nil {
 				t.Fatal(err)
 			}
 			if config.App.Environment != environment {
 				t.Fatalf("expected %q, got %q", environment, config.App.Environment)
+			}
+		})
+	}
+}
+
+func TestProductionValidation(t *testing.T) {
+	valid := baseValues("APP_ENV", "production")
+	productionValues(valid)
+	if _, err := parse(mapLookup(valid)); err != nil {
+		t.Fatalf("valid production configuration: %v", err)
+	}
+	for _, host := range []string{"127.0.0.1", "::1", "127.42.0.7"} {
+		values := cloneValues(valid)
+		values["APP_BIND_HOST"] = host
+		if _, err := parse(mapLookup(values)); err != nil {
+			t.Fatalf("loopback %q rejected: %v", host, err)
+		}
+	}
+	tests := []struct {
+		name, key, value, want string
+	}{
+		{"http URL", "APP_URL", "http://dwh.example.test", "https"},
+		{"non-loopback bind", "APP_BIND_HOST", "0.0.0.0", "loopback"},
+		{"hostname bind", "APP_BIND_HOST", "localhost", "loopback"},
+		{"registration", "ALLOW_REGISTRATION", "true", "ALLOW_REGISTRATION"},
+		{"insecure session", "SESSION_SECURE", "false", "SESSION_SECURE"},
+		{"missing database password", "DB_PASSWORD", "", "DB_PASSWORD"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := cloneValues(valid)
+			values[test.key] = test.value
+			_, err := parse(mapLookup(values))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v want %q", err, test.want)
 			}
 		})
 	}
@@ -148,6 +188,22 @@ func runtimeValues() map[string]string {
 	values["FINCLOUD_LOCATION_ID"] = "001"
 	values["FINCLOUD_ROLE_ID"] = "role-1"
 	return values
+}
+
+func productionValues(values map[string]string) {
+	values["APP_URL"] = "https://dwh.example.test"
+	values["APP_BIND_HOST"] = "127.0.0.1"
+	values["ALLOW_REGISTRATION"] = "false"
+	values["SESSION_SECURE"] = "true"
+	values["DB_PASSWORD"] = "secret"
+}
+
+func cloneValues(values map[string]string) map[string]string {
+	clone := make(map[string]string, len(values))
+	for key, value := range values {
+		clone[key] = value
+	}
+	return clone
 }
 
 func mapLookup(values map[string]string) lookupEnv {
