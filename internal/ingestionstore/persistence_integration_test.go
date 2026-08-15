@@ -155,6 +155,56 @@ func TestDetailSnapshotsAndDecimalGuard(t *testing.T) {
 	}
 }
 
+func TestGroupedDetailDecimalsPersistExactly(t *testing.T) {
+	db := integrationdb.Open(t)
+	date, _ := ingestion.ParseCalendarDate("2026-08-14")
+	fetched := time.Date(2026, 8, 14, 1, 2, 3, 456000000, time.UTC)
+	type sample struct {
+		domain  ingestion.DetailDomain
+		payload string
+		save    func(context.Context, ingestion.DetailRecord) error
+	}
+	repository := NewDetailRepository(db)
+	samples := []sample{
+		{ingestion.DetailSaving, `{"norekening":"GROUPED-S","nocif":"SAFE","saldoawal":"1.25","saldoakhir":"2.50","mutasidebit":"1,234.56","mutasikredit":"2,345.67"}`, repository.SaveSavingSnapshot},
+		{ingestion.DetailTimeDeposit, `{"id":"GROUPED-T","nocif":"SAFE","nominal":"1,234,567.89","accrueinterest":"12,345.67","produk_sukubunga":"5.25","mutasideposito":[{"nominal":"98,765.43","sukubunga":"5.25"}]}`, repository.SaveTimeDepositSnapshot},
+		{ingestion.DetailLoan, `{"id":"GROUPED-L","nocif":"SAFE","outstandingpinjaman":"1,234,567.89","tunggakanpokok":"12,345.67","tunggakanbunga":"2,345.67","dendatunggakan":"1.25","produk_sukubunga":"5.50"}`, repository.SaveLoanSnapshot},
+	}
+	for _, sample := range samples {
+		record, err := ingestion.MapDetailPayload(context.Background(), sample.domain, []byte(sample.payload), date, fetched)
+		if err != nil {
+			t.Fatalf("map %s: %v", sample.domain, err)
+		}
+		if err := sample.save(context.Background(), record); err != nil {
+			t.Fatalf("save %s: %v", sample.domain, err)
+		}
+	}
+	assertDecimal := func(query, want string, arguments ...any) {
+		t.Helper()
+		var got string
+		if err := db.Get(&got, query, arguments...); err != nil || !decimal.RequireFromString(got).Equal(decimal.RequireFromString(want)) {
+			t.Fatalf("decimal=%q want=%s error=%v", got, want, err)
+		}
+	}
+	assertDecimal(`SELECT CAST(debit_mutation AS CHAR) FROM fincloud_saving_details WHERE as_of_date=? AND account_no='GROUPED-S'`, "1234.56", date.String())
+	assertDecimal(`SELECT CAST(credit_mutation AS CHAR) FROM fincloud_saving_details WHERE as_of_date=? AND account_no='GROUPED-S'`, "2345.67", date.String())
+	assertDecimal(`SELECT CAST(nominal AS CHAR) FROM fincloud_time_deposit_details WHERE as_of_date=? AND account_no='GROUPED-T'`, "1234567.89", date.String())
+	assertDecimal(`SELECT CAST(accrued_interest AS CHAR) FROM fincloud_time_deposit_details WHERE as_of_date=? AND account_no='GROUPED-T'`, "12345.67", date.String())
+	assertDecimal(`SELECT CAST(nominal AS CHAR) FROM fincloud_time_deposit_mutations WHERE as_of_date=? AND account_no='GROUPED-T' AND item_index=0`, "98765.43", date.String())
+	assertDecimal(`SELECT CAST(outstanding_principal AS CHAR) FROM fincloud_loan_details WHERE as_of_date=? AND account_no='GROUPED-L'`, "1234567.89", date.String())
+	assertDecimal(`SELECT CAST(principal_arrears AS CHAR) FROM fincloud_loan_details WHERE as_of_date=? AND account_no='GROUPED-L'`, "12345.67", date.String())
+	assertDecimal(`SELECT CAST(interest_arrears AS CHAR) FROM fincloud_loan_details WHERE as_of_date=? AND account_no='GROUPED-L'`, "2345.67", date.String())
+	var checksums int
+	if err := db.Get(&checksums, `SELECT COUNT(*) FROM (
+		SELECT raw_checksum FROM fincloud_saving_details WHERE as_of_date=? AND account_no='GROUPED-S' AND raw_checksum<>''
+		UNION ALL SELECT raw_checksum FROM fincloud_time_deposit_details WHERE as_of_date=? AND account_no='GROUPED-T' AND raw_checksum<>''
+		UNION ALL SELECT raw_checksum FROM fincloud_loan_details WHERE as_of_date=? AND account_no='GROUPED-L' AND raw_checksum<>''
+		UNION ALL SELECT raw_item_checksum FROM fincloud_time_deposit_mutations WHERE as_of_date=? AND account_no='GROUPED-T' AND raw_item_checksum<>''
+	) AS checksums`, date.String(), date.String(), date.String(), date.String()); err != nil || checksums != 4 {
+		t.Fatalf("checksum rows=%d error=%v", checksums, err)
+	}
+}
+
 func TestMaintenanceDynamicAdditiveRetry(t *testing.T) {
 	db := integrationdb.Open(t)
 	definition := findMaintenance(t, "cbr_customer")

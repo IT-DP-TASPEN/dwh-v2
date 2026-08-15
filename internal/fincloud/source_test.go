@@ -113,6 +113,28 @@ func TestSourceEnumerationReportProtocolAndTypedDetail(t *testing.T) {
 	}
 }
 
+func TestScalarDecimalAcceptsOnlyStrictCommaGrouping(t *testing.T) {
+	valid := map[string]string{
+		"0": "0", "1234.56": "1234.56", "-0.01": "-0.01",
+		"1,234.56": "1234.56", "+12,345.67": "12345.67",
+		"-1,234,567.89": "-1234567.89", "1,234,567": "1234567",
+	}
+	for input, want := range valid {
+		value, err := Scalar(input).Decimal()
+		if err != nil || value.String() != want {
+			t.Fatalf("Decimal(%q)=%s error=%v want=%s", input, value, err, want)
+		}
+	}
+	for _, input := range []string{
+		"", " ", "1,234", "12,34.56", "1,,234.56", "1,234.",
+		"1.234,56", "1234,56", "1 234.56", "Rp1,234.56", "garbage",
+	} {
+		if _, err := Scalar(input).Decimal(); err == nil {
+			t.Fatalf("Decimal(%q) unexpectedly succeeded", input)
+		}
+	}
+}
+
 func TestSecureTLSDefaultAndExplicitOptIn(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/admin/access/login" {

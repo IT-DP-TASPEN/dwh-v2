@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/ibldzn/go-admin/internal/fincloud"
-	"github.com/shopspring/decimal"
 )
 
 type DetailDomain string
@@ -365,7 +364,7 @@ func convertDetailValue(value any, valueType detailValueType) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return decimal.NewFromString(text)
+		return fincloud.Scalar(text).Decimal()
 	case detailInteger:
 		text, err := scalar()
 		if err != nil {

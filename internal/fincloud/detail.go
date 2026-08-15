@@ -42,7 +42,71 @@ func (scalar *Scalar) UnmarshalJSON(data []byte) error {
 func (scalar Scalar) String() string { return string(scalar) }
 
 func (scalar Scalar) Decimal() (decimal.Decimal, error) {
-	return decimal.NewFromString(strings.TrimSpace(string(scalar)))
+	text := strings.TrimSpace(string(scalar))
+	if value, err := decimal.NewFromString(text); err == nil {
+		return value, nil
+	}
+	normalized, err := normalizeGroupedDecimal(text)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	return decimal.NewFromString(normalized)
+}
+
+// normalizeGroupedDecimal accepts Fincloud's observed comma-grouped numbers
+// only after validating every thousands group. A lone separator followed by
+// three digits is rejected because it is ambiguous with a decimal separator.
+func normalizeGroupedDecimal(value string) (string, error) {
+	original := value
+	if value == "" {
+		return "", fmt.Errorf("decimal value is required")
+	}
+	sign := ""
+	if value[0] == '+' || value[0] == '-' {
+		sign, value = value[:1], value[1:]
+		if value == "" {
+			return "", fmt.Errorf("invalid grouped decimal %q", original)
+		}
+	}
+	if strings.Count(value, ".") > 1 {
+		return "", fmt.Errorf("invalid grouped decimal %q", original)
+	}
+	integer, fraction, hasFraction := value, "", false
+	if dot := strings.IndexByte(value, '.'); dot >= 0 {
+		integer, fraction, hasFraction = value[:dot], value[dot+1:], true
+		if fraction == "" || !asciiDigits(fraction) {
+			return "", fmt.Errorf("invalid grouped decimal %q", original)
+		}
+	}
+	groups := strings.Split(integer, ",")
+	if len(groups) < 2 || len(groups[0]) < 1 || len(groups[0]) > 3 || !asciiDigits(groups[0]) {
+		return "", fmt.Errorf("invalid grouped decimal %q", original)
+	}
+	for _, group := range groups[1:] {
+		if len(group) != 3 || !asciiDigits(group) {
+			return "", fmt.Errorf("invalid grouped decimal %q", original)
+		}
+	}
+	if !hasFraction && len(groups) == 2 {
+		return "", fmt.Errorf("ambiguous grouped decimal %q", original)
+	}
+	normalized := sign + strings.Join(groups, "")
+	if hasFraction {
+		normalized += "." + fraction
+	}
+	return normalized, nil
+}
+
+func asciiDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, digit := range []byte(value) {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 type WrappedDateTime struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -262,6 +263,58 @@ func TestDetailMapperPreservesRawPayloadSnapshotAndChildren(t *testing.T) {
 	decimalValue, err := scalar.Decimal()
 	if err != nil || decimalValue.String() != "1234567890.123456" {
 		t.Fatalf("decimal=%s error=%v", decimalValue, err)
+	}
+}
+
+func TestDetailMapperUsesStrictGroupedDecimalsForAllDomains(t *testing.T) {
+	date, _ := ParseCalendarDate("2026-08-12")
+	fetched := time.Date(2026, 8, 12, 8, 9, 10, 123456000, time.UTC)
+	tests := []struct {
+		name     string
+		domain   DetailDomain
+		payload  string
+		fields   map[string]string
+		children map[string]map[string]string
+	}{
+		{name: "saving", domain: DetailSaving,
+			payload: `{"norekening":"S-1","nocif":"C-1","saldoawal":"1.25","saldoakhir":"2.50","mutasidebit":"1,234.56","mutasikredit":"2,345.67"}`,
+			fields:  map[string]string{"beginning_balance": "1.25", "balance": "2.5", "debit_mutation": "1234.56", "credit_mutation": "2345.67"}},
+		{name: "time deposit", domain: DetailTimeDeposit,
+			payload:  `{"id":"T-1","nocif":"C-1","nominal":"1,234,567.89","accrueinterest":"12,345.67","produk_sukubunga":"5.25","mutasideposito":[{"nominal":"98,765.43","sukubunga":"5.25"}]}`,
+			fields:   map[string]string{"nominal": "1234567.89", "accrued_interest": "12345.67", "product_interest_rate": "5.25"},
+			children: map[string]map[string]string{"mutasideposito": {"nominal": "98765.43", "interest_rate": "5.25"}}},
+		{name: "loan", domain: DetailLoan,
+			payload: `{"id":"L-1","nocif":"C-1","outstandingpinjaman":"1,234,567.89","tunggakanpokok":"12,345.67","tunggakanbunga":"2,345.67","dendatunggakan":"1.25","produk_sukubunga":"5.50"}`,
+			fields:  map[string]string{"outstanding_principal": "1234567.89", "principal_arrears": "12345.67", "interest_arrears": "2345.67", "penalty_arrears": "1.25", "product_interest_rate": "5.5"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			record, err := MapDetailPayload(context.Background(), test.domain, json.RawMessage(test.payload), date, fetched)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for field, want := range test.fields {
+				got, ok := record.Fields[field].(decimal.Decimal)
+				if !ok || !got.Equal(decimal.RequireFromString(want)) {
+					t.Fatalf("%s=%v want=%s", field, record.Fields[field], want)
+				}
+			}
+			for child, fields := range test.children {
+				for field, want := range fields {
+					got, ok := record.Children[child][0].Fields[field].(decimal.Decimal)
+					if !ok || !got.Equal(decimal.RequireFromString(want)) {
+						t.Fatalf("%s.%s=%v want=%s", child, field, record.Children[child][0].Fields[field], want)
+					}
+				}
+			}
+		})
+	}
+
+	_, err := MapDetailPayload(context.Background(), DetailSaving,
+		json.RawMessage(`{"norekening":"S-2","nocif":"C-2","saldoawal":"1","saldoakhir":"2","mutasidebit":"1,234"}`), date, fetched)
+	var mapper *MapperError
+	if !errors.As(err, &mapper) || mapper.Metadata().Field() != "debit_mutation" || mapper.Metadata().Category() != "decimal" || mapper.Metadata().Reason() != "invalid_value" {
+		t.Fatalf("unsafe or missing mapper metadata: %#v error=%v", mapper, err)
 	}
 }
 
