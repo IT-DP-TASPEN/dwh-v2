@@ -90,12 +90,12 @@ func TestDetailFatalFailuresStopPoolAndKeepLayer(t *testing.T) {
 	if outcome.fatalLayer != detailLayerFetch || calls >= 100 {
 		t.Fatalf("fatal source did not stop pool: layer=%d calls=%d", outcome.fatalLayer, calls)
 	}
-	result := detailFatalFailure(outcome.fatalLayer, outcome.fatal)
+	result := detailFatalFailure(context.Background(), outcome.fatalLayer, outcome.fatal)
 	if result.Error.Class != "source" || result.Error.Step != "fetch_detail" {
 		t.Fatalf("source result=%+v", result)
 	}
 
-	result = detailFatalFailure(detailLayerPersist, errors.New("database rejected snapshot"))
+	result = detailFatalFailure(context.Background(), detailLayerPersist, errors.New("database rejected snapshot"))
 	if result.Error.Class != "persistence" || result.Error.Step != "persist_detail" {
 		t.Fatalf("business persistence result=%+v", result)
 	}
@@ -104,7 +104,7 @@ func TestDetailFatalFailuresStopPoolAndKeepLayer(t *testing.T) {
 	}, func(ingestionrun.Progress, *ingestionrun.MapperDiagnostics) error {
 		return errors.New("run progress unavailable")
 	})
-	result = detailFatalFailure(outcome.fatalLayer, outcome.fatal)
+	result = detailFatalFailure(context.Background(), outcome.fatalLayer, outcome.fatal)
 	if result.Error.Class != "persistence" || result.Error.Step != "persist_run_progress" {
 		t.Fatalf("run-state persistence result=%+v", result)
 	}
@@ -115,9 +115,72 @@ func TestFetchAndSaveDetailMarksBusinessPersistenceFailure(t *testing.T) {
 	if item.err == nil || item.layer != detailLayerPersist {
 		t.Fatalf("business persistence failure=%+v", item)
 	}
-	result := detailFatalFailure(item.layer, item.err)
+	result := detailFatalFailure(context.Background(), item.layer, item.err)
 	if result.Error.Class != "persistence" || result.Error.Step != "persist_detail" {
 		t.Fatalf("business persistence result=%+v", result)
+	}
+}
+
+func TestFixedFailureLayersAndCancellationCause(t *testing.T) {
+	for _, test := range []struct {
+		result fixedMemberResult
+		class  string
+		step   string
+	}{
+		{fixedMemberResult{layer: fixedLayerSource, step: "download_report", err: context.DeadlineExceeded}, "source", "download_report"},
+		{fixedMemberResult{layer: fixedLayerSourceContract, step: "parse_fixed_csv", err: errors.New("bad header")}, "source_contract", "parse_fixed_csv"},
+		{fixedMemberResult{layer: fixedLayerPersistence, step: "stage_fixed_member", err: errors.New("database unavailable")}, "persistence", "stage_fixed_member"},
+	} {
+		got := fixedFailure(context.Background(), test.result)
+		if got.Error.Class != test.class || got.Error.Step != test.step {
+			t.Fatalf("result=%+v", got)
+		}
+	}
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(ingestionrun.ErrCancellationRequested)
+	got := fixedFailure(ctx, fixedMemberResult{layer: fixedLayerSource, step: "download_report", err: errors.New("generic context canceled")})
+	if got.Status != ingestionrun.StatusCancelled || !errors.Is(got.Cause, ingestionrun.ErrCancellationRequested) {
+		t.Fatalf("explicit cancellation=%+v", got)
+	}
+
+	ctx, cancel = context.WithCancelCause(context.Background())
+	cancel(ingestionrun.ErrCoordinatorShutdown)
+	got = sourceFailure(ctx, context.Canceled, "download_report")
+	if got.Status != ingestionrun.StatusCancelled || got.Error.Message != "application shutdown cancelled the run" {
+		t.Fatalf("shutdown=%+v", got)
+	}
+}
+
+func TestFixedPoolPreservesPrimaryErrorAndJoinsWorkers(t *testing.T) {
+	descriptors := []ingestion.RequestDescriptor{{MemberKey: "primary"}, {MemberKey: "sibling"}}
+	started := make(chan struct{}, len(descriptors))
+	release := make(chan struct{})
+	done := make(chan struct{})
+	var results []fixedMemberResult
+	go func() {
+		runFixedPool(context.Background(), descriptors, 2, func(ctx context.Context, descriptor ingestion.RequestDescriptor) fixedMemberResult {
+			started <- struct{}{}
+			if descriptor.MemberKey == "primary" {
+				<-release
+				return fixedMemberResult{layer: fixedLayerSource, step: "download_report", err: errors.New("primary source failure")}
+			}
+			<-ctx.Done()
+			return fixedMemberResult{layer: fixedLayerSource, step: "download_report", err: ctx.Err()}
+		}, func(result fixedMemberResult) { results = append(results, result) })
+		close(done)
+	}()
+	<-started
+	<-started
+	select {
+	case <-done:
+		t.Fatal("pool returned before active workers exited")
+	default:
+	}
+	close(release)
+	<-done
+	if len(results) != 2 || results[0].err == nil || results[0].err.Error() != "primary source failure" {
+		t.Fatalf("results=%+v", results)
 	}
 }
 

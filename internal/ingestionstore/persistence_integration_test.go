@@ -6,7 +6,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -117,6 +119,77 @@ func TestFixedFirstPublicationRaceUsesMonotonicLoadID(t *testing.T) {
 	}
 }
 
+func TestFixedConcurrentStagingJoinsBeforeAtomicPromotion(t *testing.T) {
+	db := integrationdb.Open(t)
+	resetFixed(t, db.DB)
+	definition := ingestion.FixedDefinitions()[2]
+	date, _ := ingestion.ParseCalendarDate("2026-08-15")
+	locations, _ := ingestion.FreezeLocations([]string{"000", "001", "002", "003"})
+	plan, err := ingestion.BuildFixedSnapshotPlan(definition, ingestion.FixedSnapshotDateParams{Date: date}, locations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := NewFixedRepository(db)
+	loadID, err := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errorsFound := make(chan error, len(plan.Members))
+	for _, member := range plan.Members {
+		rows := fixedRows(t, definition, member.SourceLocationID)
+		go func(member ingestion.RequestDescriptor) {
+			<-start
+			errorsFound <- repository.StageMember(context.Background(), definition, loadID, member,
+				[]FixedSegment{{Index: 0, AsOfDate: date, SourceRows: rows}})
+		}(member)
+	}
+	close(start)
+	for range plan.Members {
+		if err := <-errorsFound; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repository.Promote(context.Background(), definition, loadID); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var active uint64
+	var rows int
+	if err := db.Get(&status, `SELECT status FROM fixed_report_loads WHERE id=?`, loadID); err != nil || status != fixedLoadPublished {
+		t.Fatalf("status=%q error=%v", status, err)
+	}
+	if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, date.String(), date.String()); err != nil || active != loadID {
+		t.Fatalf("active=%d want=%d error=%v", active, loadID, err)
+	}
+	if err := db.Get(&rows, `SELECT COUNT(*) FROM fincloud_balance_sheet_reports WHERE load_id=?`, loadID); err != nil || rows != len(plan.Members) {
+		t.Fatalf("published rows=%d want=%d error=%v", rows, len(plan.Members), err)
+	}
+
+	for _, mode := range []string{"cancelled", "failed"} {
+		candidate, beginErr := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if mode == "cancelled" {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err = repository.StageMember(ctx, definition, candidate, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}})
+		} else {
+			err = repository.StageMember(context.Background(), definition, candidate, plan.Members[0], []FixedSegment{{Index: -1, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}})
+		}
+		if err == nil || repository.Promote(context.Background(), definition, candidate) == nil {
+			t.Fatalf("%s staging was publishable", mode)
+		}
+		if err := db.Get(&status, `SELECT status FROM fixed_report_loads WHERE id=?`, candidate); err != nil || status != fixedLoadPending {
+			t.Fatalf("%s status=%q error=%v", mode, status, err)
+		}
+		if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, date.String(), date.String()); err != nil || active != loadID {
+			t.Fatalf("%s changed publication to %d error=%v", mode, active, err)
+		}
+	}
+}
+
 func TestDetailSnapshotsAndDecimalGuard(t *testing.T) {
 	db := integrationdb.Open(t)
 	for _, table := range []string{"fincloud_loan_disbursement_fees", "fincloud_loan_repayment_schedule", "fincloud_loan_payment_history", "fincloud_loan_details"} {
@@ -202,6 +275,139 @@ func TestGroupedDetailDecimalsPersistExactly(t *testing.T) {
 		UNION ALL SELECT raw_item_checksum FROM fincloud_time_deposit_mutations WHERE as_of_date=? AND account_no='GROUPED-T' AND raw_item_checksum<>''
 	) AS checksums`, date.String(), date.String(), date.String(), date.String()); err != nil || checksums != 4 {
 		t.Fatalf("checksum rows=%d error=%v", checksums, err)
+	}
+}
+
+func TestDetailConcurrentReplacementKeepsCanonicalFamilies(t *testing.T) {
+	db := integrationdb.Open(t)
+	date, _ := ingestion.ParseCalendarDate("2026-08-16")
+	repository := NewDetailRepository(db)
+	for _, table := range []string{"fincloud_time_deposit_details", "fincloud_loan_details"} {
+		if _, err := db.Exec("DELETE FROM `"+table+"` WHERE as_of_date=? AND account_no IN ('TD-CONCURRENT','LOAN-CONCURRENT')", date.String()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("time deposit concurrency 3", func(t *testing.T) {
+		savers := make([]func() error, 0, 3)
+		for _, version := range []int{101, 202, 303} {
+			payload := fmt.Sprintf(`{"id":"TD-CONCURRENT","nocif":"SAFE","nominal":"%d","mutasideposito":[{"nominal":"%d","referensi":"td-%d-a"},{"nominal":"%d","referensi":"td-%d-b"}]}`, version, version, version, version+1, version)
+			record, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailTimeDeposit, []byte(payload), date, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			savers = append(savers, func() error { return repository.SaveTimeDepositSnapshot(context.Background(), record) })
+		}
+		runConcurrentSaves(t, savers)
+		var version int
+		var references string
+		if err := db.Get(&version, `SELECT CAST(nominal AS UNSIGNED) FROM fincloud_time_deposit_details WHERE as_of_date=? AND account_no='TD-CONCURRENT'`, date.String()); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Get(&references, `SELECT GROUP_CONCAT(reference ORDER BY item_index SEPARATOR ',') FROM fincloud_time_deposit_mutations WHERE as_of_date=? AND account_no='TD-CONCURRENT'`, date.String()); err != nil || references != fmt.Sprintf("td-%d-a,td-%d-b", version, version) {
+			t.Fatalf("version=%d references=%q error=%v", version, references, err)
+		}
+	})
+
+	t.Run("loan concurrency 3", func(t *testing.T) {
+		savers := make([]func() error, 0, 3)
+		for _, version := range []int{11, 22, 33} {
+			payload := fmt.Sprintf(`{"id":"LOAN-CONCURRENT","nocif":"SAFE","outstandingpinjaman":"%d","biayapencairan":[{"namabiaya":"fee-%d-a"},{"namabiaya":"fee-%d-b"}],"jadwalangsuran":[{"angsuranke":%d},{"angsuranke":%d}],"historybayar":[{"angsuranke":1,"nojurnal":"history-%d-a"},{"angsuranke":2,"nojurnal":"history-%d-b"}]}`, version, version, version, version*10+1, version*10+2, version, version)
+			record, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailLoan, []byte(payload), date, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			savers = append(savers, func() error { return repository.SaveLoanSnapshot(context.Background(), record) })
+		}
+		runConcurrentSaves(t, savers)
+		var version int
+		if err := db.Get(&version, `SELECT CAST(outstanding_principal AS UNSIGNED) FROM fincloud_loan_details WHERE as_of_date=? AND account_no='LOAN-CONCURRENT'`, date.String()); err != nil {
+			t.Fatal(err)
+		}
+		assertFamily := func(table, column, want string) {
+			t.Helper()
+			var got string
+			query := fmt.Sprintf("SELECT GROUP_CONCAT(`%s` ORDER BY item_index SEPARATOR ',') FROM `%s` WHERE as_of_date=? AND account_no='LOAN-CONCURRENT'", column, table)
+			if err := db.Get(&got, query, date.String()); err != nil || got != want {
+				t.Fatalf("%s=%q want=%q error=%v", table, got, want, err)
+			}
+		}
+		assertFamily("fincloud_loan_disbursement_fees", "fee_name", fmt.Sprintf("fee-%d-a,fee-%d-b", version, version))
+		assertFamily("fincloud_loan_repayment_schedule", "installment_no", fmt.Sprintf("%d,%d", version*10+1, version*10+2))
+		assertFamily("fincloud_loan_payment_history", "journal_no", fmt.Sprintf("history-%d-a,history-%d-b", version, version))
+	})
+}
+
+func TestRetryTransactionRecoversFromRealMySQLDeadlock(t *testing.T) {
+	db := integrationdb.Open(t)
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ingestion_deadlock_probe (id INT PRIMARY KEY, value INT NOT NULL) ENGINE=InnoDB`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DROP TABLE ingestion_deadlock_probe`) })
+	if _, err := db.Exec(`INSERT INTO ingestion_deadlock_probe VALUES (1,0),(2,0) ON DUPLICATE KEY UPDATE value=0`); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	errorsFound := make(chan error, 2)
+	var attempts [2]atomic.Int32
+	for index := range 2 {
+		go func(index int) {
+			first, second := index+1, 2-index
+			errorsFound <- retryTransaction(context.Background(), "deadlock_probe", func() error {
+				attempt := attempts[index].Add(1)
+				tx, err := db.BeginTxx(context.Background(), nil)
+				if err != nil {
+					return err
+				}
+				committed := false
+				defer rollbackUnlessCommitted(tx, &committed)
+				if _, err := tx.Exec(`UPDATE ingestion_deadlock_probe SET value=value+1 WHERE id=?`, first); err != nil {
+					return err
+				}
+				if attempt == 1 {
+					ready <- struct{}{}
+					<-release
+				}
+				if _, err := tx.Exec(`UPDATE ingestion_deadlock_probe SET value=value+1 WHERE id=?`, second); err != nil {
+					return err
+				}
+				if err := tx.Commit(); err != nil {
+					return err
+				}
+				committed = true
+				return nil
+			})
+		}(index)
+	}
+	<-ready
+	<-ready
+	close(release)
+	for range 2 {
+		if err := <-errorsFound; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if total := attempts[0].Load() + attempts[1].Load(); total != 3 {
+		t.Fatalf("transaction attempts=%d want=3 (%d,%d)", total, attempts[0].Load(), attempts[1].Load())
+	}
+}
+
+func runConcurrentSaves(t *testing.T, saves []func() error) {
+	t.Helper()
+	start := make(chan struct{})
+	errorsFound := make(chan error, len(saves))
+	for _, save := range saves {
+		go func() {
+			<-start
+			errorsFound <- save()
+		}()
+	}
+	close(start)
+	for range saves {
+		if err := <-errorsFound; err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

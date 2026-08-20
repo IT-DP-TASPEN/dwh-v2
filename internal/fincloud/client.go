@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -262,4 +263,41 @@ func sanitizeTransportError(err error) error {
 
 func responseError(operation string, status int) error {
 	return &Error{Kind: ErrorUpstream, Operation: operation, Message: fmt.Sprintf("Fincloud returned HTTP %d", status), HTTPStatus: status}
+}
+
+func SafeCauseClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context_canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "unexpected_eof"
+	}
+	if errors.Is(err, io.EOF) {
+		return "eof"
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return "network_timeout"
+	}
+	var urlError *url.Error
+	if errors.As(err, &urlError) {
+		return "url_error"
+	}
+	if networkError != nil {
+		return "network_error"
+	}
+	var sourceError *Error
+	if errors.As(err, &sourceError) && sourceError.Cause != nil {
+		if sourceError.Operation == "download report" || sourceError.Operation == "download maintenance report" {
+			return "response_body_read_error"
+		}
+		return "fincloud_error"
+	}
+	return ""
 }

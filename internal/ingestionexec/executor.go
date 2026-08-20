@@ -35,6 +35,23 @@ type Result struct {
 	BusinessComplete bool
 }
 
+type fixedLayer uint8
+
+const (
+	fixedLayerNone fixedLayer = iota
+	fixedLayerContract
+	fixedLayerSource
+	fixedLayerSourceContract
+	fixedLayerPersistence
+)
+
+type fixedMemberResult struct {
+	rows  uint64
+	layer fixedLayer
+	step  string
+	err   error
+}
+
 func New(client *fincloud.Client, fixed *ingestionstore.FixedRepository, detail *ingestionstore.DetailRepository, maintenance *ingestionstore.MaintenanceRepository, runs *ingestionrun.Repository, catalog ingestion.Catalog, fixedConcurrency, detailConcurrency int) (*Executor, error) {
 	if client == nil || fixed == nil || detail == nil || maintenance == nil || runs == nil || fixedConcurrency < 1 || detailConcurrency < 1 {
 		return nil, fmt.Errorf("complete ingestion executor dependencies are required")
@@ -71,7 +88,7 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	if definition.LocationStrategy == ingestion.PerLocation {
 		rows, fetchErr := executor.client.FetchAccessibleLocations(ctx)
 		if fetchErr != nil {
-			return sourceFailure(fetchErr, "enumerate_locations")
+			return sourceFailure(ctx, fetchErr, "enumerate_locations")
 		}
 		values := make([]string, len(rows))
 		for index := range rows {
@@ -85,7 +102,7 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	if definition.AccountCodeStrategy == ingestion.AllAccountCodes {
 		rows, fetchErr := executor.client.FetchAccountCodes(ctx)
 		if fetchErr != nil {
-			return sourceFailure(fetchErr, "enumerate_account_codes")
+			return sourceFailure(ctx, fetchErr, "enumerate_account_codes")
 		}
 		values := make([]string, len(rows))
 		for index := range rows {
@@ -115,29 +132,97 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	}
 	loadID, err := executor.fixed.BeginLoad(ctx, run.ID, definition, plan)
 	if err != nil {
-		return failed("persistence", "could not begin fixed report load", "stage", err)
+		if result, cancelled := cancellationFailure(ctx, "begin_fixed_load", err); cancelled {
+			return result
+		}
+		return failed("persistence", "could not begin fixed report load", "begin_fixed_load", err)
 	}
 	progress := ingestionrun.Progress{Total: uint64(len(plan.Members)), Step: "fetch_members"}
 	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+	var first *fixedMemberResult
+	runFixedPool(ctx, plan.Members, executor.fixedConcurrency,
+		func(workCtx context.Context, descriptor ingestion.RequestDescriptor) fixedMemberResult {
+			return executor.fetchAndStageFixedMember(workCtx, definition, loadID, descriptor)
+		}, func(result fixedMemberResult) {
+			progress.Started++
+			if result.err != nil {
+				progress.Failed++
+				if first == nil {
+					copy := result
+					first = &copy
+				}
+			} else {
+				progress.Succeeded++
+				progress.Rows += result.rows
+			}
+			_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+		})
+	if ctx.Err() != nil {
+		if result, cancelled := cancellationFailure(ctx, "fetch_members", ctx.Err()); cancelled {
+			return result
+		}
+		return sourceFailure(ctx, ctx.Err(), "fetch_members")
+	}
+	if first != nil {
+		return fixedFailure(ctx, *first)
+	}
+	progress.Step = "promote"
+	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+	if err := executor.fixed.Promote(ctx, definition, loadID); err != nil {
+		if result, cancelled := cancellationFailure(ctx, "promote_fixed_load", err); cancelled {
+			return result
+		}
+		return failed("persistence", "fixed report promotion failed", "promote_fixed_load", err)
+	}
+	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
+}
 
+func (executor *Executor) fetchAndStageFixedMember(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor) fixedMemberResult {
+	chunks, err := ingestion.ChunkDateRange(descriptor.RequestedFrom, descriptor.RequestedTo, definition.MaxChunkDays)
+	if err != nil {
+		return fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: err}
+	}
+	segments := make([]ingestionstore.FixedSegment, 0, len(chunks))
+	var rows uint64
+	for index, chunk := range chunks {
+		request, err := ingestion.BuildFixedRequestDescriptor(definition, ingestion.FixedDateRangeParams{From: chunk.From, To: chunk.To}, descriptor.SourceLocationID, descriptor.AccountCode, descriptor.MemberKey)
+		if err != nil {
+			return fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: err}
+		}
+		content, err := executor.client.DownloadReport(ctx, request.ReportName, request.Parameters...)
+		if err != nil {
+			return fixedMemberResult{layer: fixedLayerSource, step: "download_report", err: err}
+		}
+		parsed, err := ingestion.ParseFixedCSV(ctx, definition, descriptor.SourceLocationID, content)
+		if err != nil {
+			return fixedMemberResult{layer: fixedLayerSourceContract, step: "parse_fixed_csv", err: err}
+		}
+		rows += uint64(len(parsed))
+		segments = append(segments, ingestionstore.FixedSegment{Index: index, AsOfDate: chunk.To, SourceRows: parsed})
+	}
+	if err := executor.fixed.StageMember(ctx, definition, loadID, descriptor, segments); err != nil {
+		return fixedMemberResult{layer: fixedLayerPersistence, step: "stage_fixed_member", err: err}
+	}
+	return fixedMemberResult{rows: rows}
+}
+
+func runFixedPool(ctx context.Context, descriptors []ingestion.RequestDescriptor, concurrency int,
+	work func(context.Context, ingestion.RequestDescriptor) fixedMemberResult, consume func(fixedMemberResult),
+) {
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	type memberResult struct {
-		rows uint64
-		err  error
-	}
 	jobs := make(chan ingestion.RequestDescriptor)
-	results := make(chan memberResult, executor.fixedConcurrency)
-	workers := min(executor.fixedConcurrency, len(plan.Members))
+	results := make(chan fixedMemberResult, concurrency)
+	workers := min(concurrency, len(descriptors))
 	var wait sync.WaitGroup
 	for range workers {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
 			for descriptor := range jobs {
-				rows, err := executor.fetchAndStageFixedMember(workCtx, definition, loadID, descriptor)
-				results <- memberResult{rows: rows, err: err}
-				if err != nil {
+				result := work(workCtx, descriptor)
+				results <- result
+				if result.err != nil {
 					cancel()
 				}
 			}
@@ -145,7 +230,7 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	}
 	go func() {
 		defer close(jobs)
-		for _, descriptor := range plan.Members {
+		for _, descriptor := range descriptors {
 			select {
 			case jobs <- descriptor:
 			case <-workCtx.Done():
@@ -154,61 +239,27 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 		}
 	}()
 	go func() { wait.Wait(); close(results) }()
-	var first error
 	for result := range results {
-		progress.Started++
-		if result.err != nil {
-			progress.Failed++
-			if first == nil {
-				first = result.err
-			}
-		} else {
-			progress.Succeeded++
-			progress.Rows += result.rows
-		}
-		_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+		consume(result)
 	}
-	if ctx.Err() != nil {
-		return cancelled("fixed execution cancelled", "fetch_members", ctx.Err())
-	}
-	if first != nil {
-		return failed("source_or_persistence", "fixed report member failed", "fetch_members", first)
-	}
-	progress.Step = "promote"
-	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
-	if err := executor.fixed.Promote(ctx, definition, loadID); err != nil {
-		if ctx.Err() != nil {
-			return cancelled("fixed promotion cancelled", "promote", err)
-		}
-		return failed("persistence", "fixed report promotion failed", "promote", err)
-	}
-	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
 }
 
-func (executor *Executor) fetchAndStageFixedMember(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor) (uint64, error) {
-	chunks, err := ingestion.ChunkDateRange(descriptor.RequestedFrom, descriptor.RequestedTo, definition.MaxChunkDays)
-	if err != nil {
-		return 0, err
+func fixedFailure(ctx context.Context, result fixedMemberResult) Result {
+	if cancelledResult, cancelled := cancellationFailure(ctx, result.step, result.err); cancelled {
+		return cancelledResult
 	}
-	segments := make([]ingestionstore.FixedSegment, 0, len(chunks))
-	var rows uint64
-	for index, chunk := range chunks {
-		request, err := ingestion.BuildFixedRequestDescriptor(definition, ingestion.FixedDateRangeParams{From: chunk.From, To: chunk.To}, descriptor.SourceLocationID, descriptor.AccountCode, descriptor.MemberKey)
-		if err != nil {
-			return 0, err
-		}
-		content, err := executor.client.DownloadReport(ctx, request.ReportName, request.Parameters...)
-		if err != nil {
-			return 0, err
-		}
-		parsed, err := ingestion.ParseFixedCSV(ctx, definition, descriptor.SourceLocationID, content)
-		if err != nil {
-			return 0, err
-		}
-		rows += uint64(len(parsed))
-		segments = append(segments, ingestionstore.FixedSegment{Index: index, AsOfDate: chunk.To, SourceRows: parsed})
+	switch result.layer {
+	case fixedLayerContract:
+		return failed("contract", "invalid fixed member plan", result.step, result.err)
+	case fixedLayerSource:
+		return sourceFailure(ctx, result.err, result.step)
+	case fixedLayerSourceContract:
+		return failed("source_contract", "fixed report CSV parsing failed", result.step, result.err)
+	case fixedLayerPersistence:
+		return failed("persistence", "fixed report staging failed", result.step, result.err)
+	default:
+		return failed("contract", "unknown fixed failure layer", "fetch_members", result.err)
 	}
-	return rows, executor.fixed.StageMember(ctx, definition, loadID, descriptor, segments)
 }
 
 func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
@@ -218,7 +269,7 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 	}
 	identifiers, err := executor.enumerateDetails(ctx, job.Key, snapshotDate)
 	if err != nil {
-		return sourceFailure(err, "enumerate_identifiers")
+		return sourceFailure(ctx, err, "enumerate_identifiers")
 	}
 	progress := ingestionrun.Progress{Total: uint64(len(identifiers)), Step: "fetch_details"}
 	if err := executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil); err != nil {
@@ -233,10 +284,13 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 		},
 	)
 	if outcome.progress.Started < outcome.progress.Total && ctx.Err() != nil {
-		return cancelled("detail execution cancelled", "fetch_detail", ctx.Err())
+		if result, cancelled := cancellationFailure(ctx, "fetch_detail", ctx.Err()); cancelled {
+			return result
+		}
+		return sourceFailure(ctx, ctx.Err(), "fetch_detail")
 	}
 	if outcome.fatal != nil {
-		return detailFatalFailure(outcome.fatalLayer, outcome.fatal)
+		return detailFatalFailure(ctx, outcome.fatalLayer, outcome.fatal)
 	}
 	if outcome.firstLocal != nil {
 		return failed("item_data", "one or more detail identifiers failed", "map_detail", outcome.firstLocal)
@@ -346,16 +400,28 @@ func runDetailPool(ctx context.Context, identifiers []string, concurrency int, w
 	return outcome
 }
 
-func detailFatalFailure(layer detailLayer, err error) Result {
+func detailFatalFailure(ctx context.Context, layer detailLayer, err error) Result {
+	step := "detail"
 	switch layer {
 	case detailLayerFetch:
-		return sourceFailure(err, "fetch_detail")
+		step = "fetch_detail"
 	case detailLayerPersist:
-		return failed("persistence", "detail snapshot persistence failed", "persist_detail", err)
+		step = "persist_detail"
 	case detailLayerRunProgress:
-		return failed("persistence", "could not persist detail run progress", "persist_run_progress", err)
+		step = "persist_run_progress"
+	}
+	if result, cancelled := cancellationFailure(ctx, step, err); cancelled {
+		return result
+	}
+	switch layer {
+	case detailLayerFetch:
+		return sourceFailure(ctx, err, step)
+	case detailLayerPersist:
+		return failed("persistence", "detail snapshot persistence failed", step, err)
+	case detailLayerRunProgress:
+		return failed("persistence", "could not persist detail run progress", step, err)
 	default:
-		return failed("contract", "unknown detail failure layer", "detail", err)
+		return failed("contract", "unknown detail failure layer", step, err)
 	}
 }
 
@@ -441,13 +507,16 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 	var first error
 	for _, requested := range series.Dates {
 		if err := ctx.Err(); err != nil {
-			return cancelled("maintenance execution cancelled", "maintenance_dates", err)
+			if result, cancelled := cancellationFailure(ctx, "maintenance_dates", err); cancelled {
+				return result
+			}
+			return sourceFailure(ctx, err, "maintenance_dates")
 		}
 		progress.Started++
 		rows, err := executor.fetchAndSaveMaintenance(ctx, *job.Maintenance, requested, series.LookbackDays)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return cancelled("maintenance execution cancelled", "maintenance_dates", err)
+				return sourceFailure(ctx, err, "maintenance_dates")
 			}
 			progress.Failed++
 			if first == nil {
@@ -455,7 +524,7 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 			}
 			if sourceWide(err) {
 				_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
-				return sourceFailure(err, "maintenance_dates")
+				return sourceFailure(ctx, err, "maintenance_dates")
 			}
 		} else {
 			progress.Succeeded++
@@ -520,11 +589,23 @@ func jakartaSnapshotDate(now time.Time) ingestion.CalendarDate {
 	return ingestion.CalendarDateFromTime(now.In(time.FixedZone("Asia/Jakarta", 7*60*60)))
 }
 
-func sourceFailure(err error, step string) Result {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return cancelled("source operation cancelled", step, err)
+func sourceFailure(ctx context.Context, err error, step string) Result {
+	if result, cancelled := cancellationFailure(ctx, step, err); cancelled {
+		return result
 	}
 	return failed("source", "Fincloud source operation failed", step, err)
+}
+
+func cancellationFailure(ctx context.Context, step string, primary error) (Result, bool) {
+	cause := context.Cause(ctx)
+	switch {
+	case errors.Is(cause, ingestionrun.ErrCancellationRequested):
+		return cancelled("run cancellation requested", step, errors.Join(primary, cause)), true
+	case errors.Is(cause, ingestionrun.ErrCoordinatorShutdown):
+		return cancelled("application shutdown cancelled the run", step, errors.Join(primary, cause)), true
+	default:
+		return Result{}, false
+	}
 }
 
 func failed(class, message, step string, cause error) Result {

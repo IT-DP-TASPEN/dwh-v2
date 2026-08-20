@@ -49,6 +49,16 @@ func (repository *FixedRepository) BeginLoad(ctx context.Context, ingestionRunID
 	if err != nil {
 		return 0, err
 	}
+	var loadID uint64
+	err = retryTransaction(ctx, "begin_fixed_load", func() error {
+		var transactionErr error
+		loadID, transactionErr = repository.beginLoadTransaction(ctx, ingestionRunID, plan, manifest)
+		return transactionErr
+	})
+	return loadID, err
+}
+
+func (repository *FixedRepository) beginLoadTransaction(ctx context.Context, ingestionRunID uint64, plan ingestion.FixedPlan, manifest [32]byte) (uint64, error) {
 	tx, err := repository.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin fixed load: %w", err)
@@ -90,6 +100,12 @@ func (repository *FixedRepository) StageMember(ctx context.Context, definition i
 	if loadID == 0 || descriptor.MemberKey == "" || len(segments) == 0 {
 		return fmt.Errorf("load, member, and at least one source segment are required")
 	}
+	return retryTransaction(ctx, "stage_fixed_member", func() error {
+		return repository.stageMemberTransaction(ctx, specification, definition, loadID, descriptor, segments)
+	})
+}
+
+func (repository *FixedRepository) stageMemberTransaction(ctx context.Context, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segments []FixedSegment) error {
 	memberKey := descriptor.MemberKey
 	tx, err := repository.db.BeginTxx(ctx, nil)
 	if err != nil {
@@ -109,8 +125,11 @@ func (repository *FixedRepository) StageMember(ctx context.Context, definition i
 		To     string `db:"period_to"`
 		Status string `db:"status"`
 	}
+	// Promote is the only parent transition, and the executor joins every
+	// StageMember call before invoking it. This consistent read therefore cannot
+	// overlap a parent status change for the same load.
 	if err := tx.GetContext(ctx, &loadRange, `SELECT job_key, DATE_FORMAT(period_from, '%Y-%m-%d') period_from,
-		DATE_FORMAT(period_to, '%Y-%m-%d') period_to, status FROM fixed_report_loads WHERE id = ? FOR UPDATE`, loadID); err != nil {
+		DATE_FORMAT(period_to, '%Y-%m-%d') period_to, status FROM fixed_report_loads WHERE id = ?`, loadID); err != nil {
 		return fmt.Errorf("read fixed load range: %w", err)
 	}
 	if loadRange.JobKey != definition.Key || loadRange.Status != fixedLoadPending {
@@ -173,6 +192,12 @@ func (repository *FixedRepository) Promote(ctx context.Context, definition inges
 	if err != nil {
 		return err
 	}
+	return retryTransaction(ctx, "promote_fixed_load", func() error {
+		return repository.promoteTransaction(ctx, specification, definition, loadID)
+	})
+}
+
+func (repository *FixedRepository) promoteTransaction(ctx context.Context, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64) error {
 	tx, err := repository.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin fixed promotion: %w", err)
@@ -180,25 +205,32 @@ func (repository *FixedRepository) Promote(ctx context.Context, definition inges
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
 	var load struct {
-		JobKey                string `db:"job_key"`
-		From                  string `db:"period_from"`
-		To                    string `db:"period_to"`
-		Status                string `db:"status"`
-		ExpectedMemberCount   int    `db:"expected_member_count"`
-		SuccessfulMemberCount int    `db:"successful_member_count"`
-		Manifest              []byte `db:"manifest_checksum"`
+		JobKey              string `db:"job_key"`
+		From                string `db:"period_from"`
+		To                  string `db:"period_to"`
+		Status              string `db:"status"`
+		ExpectedMemberCount int    `db:"expected_member_count"`
+		Manifest            []byte `db:"manifest_checksum"`
 	}
 	if err := tx.GetContext(ctx, &load, `SELECT l.job_key,
 		DATE_FORMAT(l.period_from, '%Y-%m-%d') period_from,
 		DATE_FORMAT(l.period_to, '%Y-%m-%d') period_to,
-		l.status, l.expected_member_count, l.manifest_checksum,
-		SUM(m.status = 'success') successful_member_count
-		FROM fixed_report_loads l JOIN fixed_report_load_members m ON m.load_id = l.id
-		WHERE l.id = ? GROUP BY l.id FOR UPDATE`, loadID); err != nil {
+		l.status, l.expected_member_count, l.manifest_checksum
+		FROM fixed_report_loads l WHERE l.id = ? FOR UPDATE`, loadID); err != nil {
 		return fmt.Errorf("lock fixed load: %w", err)
 	}
-	if load.JobKey != definition.Key || load.ExpectedMemberCount != load.SuccessfulMemberCount {
+	members := []fixedLoadMember{}
+	if err := tx.SelectContext(ctx, &members, `SELECT member_key,status,row_count,member_checksum
+		FROM fixed_report_load_members WHERE load_id = ? ORDER BY member_key FOR UPDATE`, loadID); err != nil {
+		return fmt.Errorf("lock fixed load members: %w", err)
+	}
+	if load.JobKey != definition.Key || load.ExpectedMemberCount != len(members) {
 		return fmt.Errorf("fixed load is incomplete or belongs to another job")
+	}
+	for _, member := range members {
+		if member.Status != fixedMemberSuccess {
+			return fmt.Errorf("fixed load is incomplete or belongs to another job")
+		}
 	}
 	if load.Status != fixedLoadPending && load.Status != fixedLoadPublished {
 		return fmt.Errorf("fixed load status %q cannot publish", load.Status)
@@ -227,9 +259,9 @@ func (repository *FixedRepository) Promote(ctx context.Context, definition inges
 			return fmt.Errorf("fixed load %d is stale behind published load %d", loadID, activeLoadID)
 		}
 	}
-	memberKeys := []string{}
-	if err := tx.SelectContext(ctx, &memberKeys, `SELECT member_key FROM fixed_report_load_members WHERE load_id = ? ORDER BY member_key`, loadID); err != nil {
-		return err
+	memberKeys := make([]string, len(members))
+	for index := range members {
+		memberKeys[index] = members[index].Key
 	}
 	plan := ingestion.FixedPlan{JobKey: load.JobKey, Range: ingestion.FixedDateRangeParams{From: mustDate(load.From), To: mustDate(load.To)}, RequireAllMembers: true}
 	for _, memberKey := range memberKeys {
@@ -239,7 +271,7 @@ func (repository *FixedRepository) Promote(ctx context.Context, definition inges
 	if err != nil || !bytes.Equal(manifest[:], load.Manifest) {
 		return fmt.Errorf("fixed load manifest does not match frozen members")
 	}
-	if err := validateStagedMembers(ctx, tx, specification.stagingTable, loadID, memberKeys); err != nil {
+	if err := validateStagedMembers(ctx, tx, specification.stagingTable, loadID, members); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM `"+specification.finalTable+"` WHERE period_from = ? AND period_to = ?", load.From, load.To); err != nil {
@@ -276,36 +308,24 @@ type stagedMember struct {
 	Checksum []byte `db:"member_checksum"`
 }
 
+type fixedLoadMember struct {
+	Key      string `db:"member_key"`
+	Status   string `db:"status"`
+	Count    uint64 `db:"row_count"`
+	Checksum []byte `db:"member_checksum"`
+}
+
 type stagedAggregate struct {
 	count uint64
 	hash  hash.Hash
 }
 
-func validateStagedMembers(ctx context.Context, tx *sqlx.Tx, stagingTable string, loadID uint64, memberKeys []string) error {
-	expected := map[string]stagedMember{}
-	rows, err := tx.QueryxContext(ctx, `SELECT member_key, row_count, member_checksum FROM fixed_report_load_members
-		WHERE load_id = ? AND status = 'success' ORDER BY member_key`, loadID)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var key string
-		var member stagedMember
-		if err := rows.Scan(&key, &member.Count, &member.Checksum); err != nil {
-			rows.Close()
-			return err
-		}
-		expected[key] = member
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if len(expected) != len(memberKeys) {
-		return fmt.Errorf("successful fixed member count changed during promotion")
-	}
-	aggregates := make(map[string]*stagedAggregate, len(memberKeys))
-	for _, key := range memberKeys {
-		aggregates[key] = &stagedAggregate{hash: sha256.New()}
+func validateStagedMembers(ctx context.Context, tx *sqlx.Tx, stagingTable string, loadID uint64, members []fixedLoadMember) error {
+	expected := make(map[string]stagedMember, len(members))
+	aggregates := make(map[string]*stagedAggregate, len(members))
+	for _, member := range members {
+		expected[member.Key] = stagedMember{Count: member.Count, Checksum: member.Checksum}
+		aggregates[member.Key] = &stagedAggregate{hash: sha256.New()}
 	}
 	queryRows, err := tx.QueryxContext(ctx, "SELECT member_key, source_row_checksum FROM `"+stagingTable+"` WHERE load_id = ? ORDER BY member_key, row_ordinal", loadID)
 	if err != nil {

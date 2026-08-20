@@ -193,6 +193,33 @@ func TestFixedCSVStrictHeaderBOMZeroRowsAndProvenance(t *testing.T) {
 	}
 }
 
+func TestFixedCSVTrimsOnlyHeaderEdges(t *testing.T) {
+	definition := FixedDefinitions()[0]
+	for _, variant := range []string{"Customer Status", "Customer Status ", " Customer Status", "\tCustomer Status", "Customer Status\t"} {
+		headers := append([]string(nil), definition.RequiredHeaders...)
+		values := make([]string, len(headers))
+		for index := range headers {
+			if headers[index] == "Customer Status" {
+				headers[index] = variant
+				values[index] = " ABC "
+			}
+		}
+		rows, err := ParseFixedCSV(context.Background(), definition, "", strings.Join(headers, "|")+"\n"+strings.Join(values, "|")+"\n")
+		if err != nil || len(rows) != 1 || rows[0].Values["Customer Status"] != " ABC " {
+			t.Fatalf("header %q rows=%v error=%v", variant, rows, err)
+		}
+	}
+
+	internal := strings.Replace(strings.Join(definition.RequiredHeaders, "|"), "Customer Status", "Customer  Status", 1) + "\n"
+	if _, err := ParseFixedCSV(context.Background(), definition, "", internal); err == nil {
+		t.Fatal("internal header whitespace was normalized")
+	}
+	duplicate := strings.Join(append(append([]string(nil), definition.RequiredHeaders...), "Customer Status "), "|") + "\n"
+	if _, err := ParseFixedCSV(context.Background(), definition, "", duplicate); err == nil || !strings.Contains(err.Error(), "duplicate CSV header") {
+		t.Fatalf("duplicate-after-normalization error=%v", err)
+	}
+}
+
 func TestInclusiveThirtyDayChunking(t *testing.T) {
 	from, _ := ParseCalendarDate("2026-01-01")
 	to, _ := ParseCalendarDate("2026-02-01")

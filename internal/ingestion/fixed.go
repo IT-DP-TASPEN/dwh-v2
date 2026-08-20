@@ -296,6 +296,9 @@ func ParseFixedCSV(ctx context.Context, definition FixedDefinition, sourceLocati
 	if err != nil {
 		return nil, fmt.Errorf("%s: read header: %w", definition.Key, err)
 	}
+	for index := range headers {
+		headers[index] = strings.TrimSpace(headers[index])
+	}
 	if err := validateFixedHeaders(definition, headers); err != nil {
 		return nil, err
 	}

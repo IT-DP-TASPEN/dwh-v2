@@ -39,9 +39,11 @@ const (
 )
 
 var (
-	ErrJobBusy        = errors.New("job already queued or running")
-	ErrSourceDisabled = errors.New("source is disabled")
-	ErrTransition     = errors.New("run state transition rejected")
+	ErrJobBusy               = errors.New("job already queued or running")
+	ErrSourceDisabled        = errors.New("source is disabled")
+	ErrTransition            = errors.New("run state transition rejected")
+	ErrCancellationRequested = errors.New("durable run cancellation requested")
+	ErrCoordinatorShutdown   = errors.New("ingestion coordinator shutting down")
 )
 
 type Run struct {

@@ -174,6 +174,42 @@ func TestResponseErrorPreservesSafeHTTPStatus(t *testing.T) {
 	}
 }
 
+func TestDownloadReportPreservesSafeBodyReadCause(t *testing.T) {
+	for _, test := range []struct {
+		name, class string
+		err         error
+	}{
+		{"deadline", "deadline_exceeded", context.DeadlineExceeded},
+		{"unexpected EOF", "unexpected_eof", io.ErrUnexpectedEOF},
+		{"generic", "response_body_read_error", errors.New("read failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := &failingBody{err: test.err}
+			transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path == "/admin/access/login" {
+					return jsonResponse(`{"status":"ok","data":{"result":{"sessionid":"session"}}}`), nil
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}, nil
+			})
+			client, err := newClient(testConfig("https://fincloud.test"), &http.Client{Transport: transport})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.DownloadReport(context.Background(), "report")
+			if err == nil || SafeCauseClass(err) != test.class || body.closed != 1 {
+				t.Fatalf("class=%q closed=%d error=%v", SafeCauseClass(err), body.closed, err)
+			}
+		})
+	}
+}
+
+func TestSafeCauseClassRecognizesWrappedNetworkTimeout(t *testing.T) {
+	err := &url.Error{Op: "Get", URL: "https://fincloud.test", Err: timeoutError{}}
+	if got := SafeCauseClass(err); got != "network_timeout" {
+		t.Fatalf("class=%q", got)
+	}
+}
+
 func testConfig(baseURL string) Config {
 	return Config{BaseURL: baseURL, Username: "user", Password: "password", LocationID: "001", RoleID: "role", HTTPTimeout: time.Second}
 }
@@ -187,3 +223,17 @@ func (function roundTripperFunc) RoundTrip(request *http.Request) (*http.Respons
 func jsonResponse(body string) *http.Response {
 	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 }
+
+type failingBody struct {
+	err    error
+	closed int
+}
+
+func (body *failingBody) Read([]byte) (int, error) { return 0, body.err }
+func (body *failingBody) Close() error             { body.closed++; return nil }
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }

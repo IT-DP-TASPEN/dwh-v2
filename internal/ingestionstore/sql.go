@@ -3,10 +3,15 @@ package ingestionstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log/slog"
+	"math/rand/v2"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/shopspring/decimal"
 )
@@ -127,4 +132,38 @@ func lockRow(ctx context.Context, tx *sqlx.Tx, query string, args ...any) error 
 		return err
 	}
 	return nil
+}
+
+func retryTransaction(ctx context.Context, operation string, transaction func() error) error {
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := transaction()
+		if err == nil {
+			if attempt > 1 {
+				slog.InfoContext(ctx, "database transaction recovered", "operation", operation, "attempts", attempt)
+			}
+			return nil
+		}
+		if !isMySQLDeadlock(err) || attempt == maxAttempts {
+			return err
+		}
+		slog.WarnContext(ctx, "retrying database transaction", "operation", operation, "attempt", attempt, "mysql_error", 1213)
+		delay := time.Duration(attempt*25+rand.IntN(26)) * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	panic("unreachable")
+}
+
+func isMySQLDeadlock(err error) bool {
+	var mysqlError *mysql.MySQLError
+	return errors.As(err, &mysqlError) && mysqlError.Number == 1213
 }

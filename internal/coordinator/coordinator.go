@@ -26,7 +26,7 @@ type Coordinator struct {
 	logger   *slog.Logger
 
 	mu    sync.Mutex
-	local map[uint64]context.CancelFunc
+	local map[uint64]context.CancelCauseFunc
 }
 
 func New(ctx context.Context, db *sqlx.DB, client *fincloud.Client, logger *slog.Logger) (*Coordinator, error) {
@@ -54,7 +54,7 @@ func New(ctx context.Context, db *sqlx.DB, client *fincloud.Client, logger *slog
 	if err != nil {
 		return nil, err
 	}
-	return &Coordinator{runs: runs, executor: executor, ownerID: ownerID, workers: settings.MaxRunningJobs, logger: logger, local: map[uint64]context.CancelFunc{}}, nil
+	return &Coordinator{runs: runs, executor: executor, ownerID: ownerID, workers: settings.MaxRunningJobs, logger: logger, local: map[uint64]context.CancelCauseFunc{}}, nil
 }
 
 func (coordinator *Coordinator) OwnerID() string { return coordinator.ownerID }
@@ -80,20 +80,22 @@ func (coordinator *Coordinator) RecoverAbandoned(ctx context.Context, runID uint
 }
 
 func (coordinator *Coordinator) Run(ctx context.Context) {
+	executionCtx, stopExecution := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer stopExecution(ingestionrun.ErrCoordinatorShutdown)
 	var wait sync.WaitGroup
 	for range coordinator.workers {
 		wait.Add(1)
-		go func() { defer wait.Done(); coordinator.worker(ctx) }()
+		go func() { defer wait.Done(); coordinator.worker(ctx, executionCtx) }()
 	}
 	wait.Add(2)
 	go func() { defer wait.Done(); coordinator.supervise(ctx) }()
 	go func() { defer wait.Done(); coordinator.reconcile(ctx) }()
 	<-ctx.Done()
-	coordinator.cancelAll()
+	stopExecution(ingestionrun.ErrCoordinatorShutdown)
 	wait.Wait()
 }
 
-func (coordinator *Coordinator) worker(ctx context.Context) {
+func (coordinator *Coordinator) worker(ctx, executionCtx context.Context) {
 	for ctx.Err() == nil {
 		run, err := coordinator.runs.Claim(ctx, coordinator.ownerID)
 		if err != nil {
@@ -107,7 +109,7 @@ func (coordinator *Coordinator) worker(ctx context.Context) {
 			wait(ctx, 250*time.Millisecond)
 			continue
 		}
-		runCtx, cancel := context.WithCancel(ctx)
+		runCtx, cancel := context.WithCancelCause(executionCtx)
 		coordinator.mu.Lock()
 		coordinator.local[run.ID] = cancel
 		coordinator.mu.Unlock()
@@ -115,7 +117,7 @@ func (coordinator *Coordinator) worker(ctx context.Context) {
 		coordinator.mu.Lock()
 		delete(coordinator.local, run.ID)
 		coordinator.mu.Unlock()
-		cancel()
+		cancel(nil)
 		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		err = coordinator.runs.Finish(finishCtx, run.ID, coordinator.ownerID, result.Status, result.Error)
 		finishCancel()
@@ -123,7 +125,11 @@ func (coordinator *Coordinator) worker(ctx context.Context) {
 			coordinator.logger.Error("finish ingestion run", "run_id", run.ID, "job_key", run.JobKey, "error", err)
 		}
 		if result.Cause != nil {
-			coordinator.logger.Warn("ingestion run completed with error", "run_id", run.ID, "job_key", run.JobKey, "class", result.Error.Class, "error", result.Cause)
+			attributes := []any{"run_id", run.ID, "job_key", run.JobKey, "class", result.Error.Class, "error", result.Cause}
+			if causeType := fincloud.SafeCauseClass(result.Cause); causeType != "" {
+				attributes = append(attributes, "cause_type", causeType)
+			}
+			coordinator.logger.Warn("ingestion run completed with error", attributes...)
 		}
 	}
 }
@@ -144,7 +150,7 @@ func (coordinator *Coordinator) supervise(ctx context.Context) {
 			coordinator.mu.Lock()
 			for _, id := range ids {
 				if cancel := coordinator.local[id]; cancel != nil {
-					cancel()
+					cancel(ingestionrun.ErrCancellationRequested)
 				}
 			}
 			coordinator.mu.Unlock()
@@ -171,14 +177,6 @@ func (coordinator *Coordinator) reconcile(ctx context.Context) {
 				}
 			}
 		}
-	}
-}
-
-func (coordinator *Coordinator) cancelAll() {
-	coordinator.mu.Lock()
-	defer coordinator.mu.Unlock()
-	for _, cancel := range coordinator.local {
-		cancel()
 	}
 }
 

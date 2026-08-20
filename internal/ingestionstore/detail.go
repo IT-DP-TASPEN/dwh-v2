@@ -103,6 +103,12 @@ func (repository *DetailRepository) save(ctx context.Context, record ingestion.D
 	if repository == nil || repository.db == nil || record.AsOfDate.IsZero() || record.Identifier == "" || record.LastFetchedAt.IsZero() || len(record.RawPayload) == 0 || record.RawChecksum == "" {
 		return fmt.Errorf("complete detail snapshot is required")
 	}
+	return retryTransaction(ctx, "persist_detail", func() error {
+		return repository.saveTransaction(ctx, record, specification)
+	})
+}
+
+func (repository *DetailRepository) saveTransaction(ctx context.Context, record ingestion.DetailRecord, specification detailSpec) error {
 	tx, err := repository.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin detail snapshot: %w", err)
