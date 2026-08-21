@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -186,6 +187,173 @@ func TestFixedConcurrentStagingJoinsBeforeAtomicPromotion(t *testing.T) {
 		}
 		if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, date.String(), date.String()); err != nil || active != loadID {
 			t.Fatalf("%s changed publication to %d error=%v", mode, active, err)
+		}
+	}
+}
+
+func TestCoAConcurrentStagingUsesPendingMemberInvariant(t *testing.T) {
+	db := integrationdb.Open(t)
+	resetFixed(t, db.DB)
+	definition := ingestion.FixedDefinitions()[4]
+	from, _ := ingestion.ParseCalendarDate("2026-08-19")
+	to, _ := ingestion.ParseCalendarDate("2026-08-20")
+	accountCodes := make([]string, 64)
+	for index := range accountCodes {
+		accountCodes[index] = fmt.Sprintf("synthetic-account-%04d", index)
+	}
+	accounts, err := ingestion.FreezeAccountCodes(accountCodes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: from, To: to}, ingestion.FrozenLocations{}, accounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := NewFixedRepository(db)
+	for iteration := range 3 {
+		loadID, err := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rowsByMember := make([][]ingestion.FixedCSVRow, len(plan.Members))
+		wantRows := 0
+		for index := range plan.Members {
+			count := 5 + index%7
+			if index == 0 {
+				count = 256
+			} else if index < 8 {
+				count = 0
+			}
+			rowsByMember[index] = fixedRowsN(t, definition, count, fmt.Sprintf("iteration-%d-member-%d", iteration, index))
+			wantRows += count
+		}
+		for index := range 8 {
+			if err := repository.StageMember(context.Background(), definition, loadID, plan.Members[index], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: rowsByMember[index]}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stageFixedConcurrently(t, repository, definition, loadID, to, plan.Members[8:], rowsByMember[8:], 4)
+
+		var successfulMembers, stagedRows int
+		if err := db.Get(&successfulMembers, `SELECT COUNT(*) FROM fixed_report_load_members WHERE load_id=? AND status=?`, loadID, fixedMemberSuccess); err != nil || successfulMembers != len(plan.Members) {
+			t.Fatalf("successful members=%d want=%d error=%v", successfulMembers, len(plan.Members), err)
+		}
+		if err := db.Get(&stagedRows, `SELECT COUNT(*) FROM stg_fincloud_coa_movement_reports WHERE load_id=?`, loadID); err != nil || stagedRows != wantRows {
+			t.Fatalf("staged rows=%d want=%d error=%v", stagedRows, wantRows, err)
+		}
+		if err := repository.Promote(context.Background(), definition, loadID); err != nil {
+			t.Fatal(err)
+		}
+		var active uint64
+		if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, from.String(), to.String()); err != nil || active != loadID {
+			t.Fatalf("active load=%d want=%d error=%v", active, loadID, err)
+		}
+		if err := db.Get(&stagedRows, `SELECT COUNT(*) FROM fincloud_coa_movement_reports WHERE load_id=?`, loadID); err != nil || stagedRows != wantRows {
+			t.Fatalf("published rows=%d want=%d error=%v", stagedRows, wantRows, err)
+		}
+	}
+}
+
+func TestCoAMemberReplacementAndSerialization(t *testing.T) {
+	db := integrationdb.Open(t)
+	resetFixed(t, db.DB)
+	definition := ingestion.FixedDefinitions()[4]
+	from, _ := ingestion.ParseCalendarDate("2026-08-19")
+	to, _ := ingestion.ParseCalendarDate("2026-08-20")
+	accounts, _ := ingestion.FreezeAccountCodes([]string{"synthetic-account"})
+	plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: from, To: to}, ingestion.FrozenLocations{}, accounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := NewFixedRepository(db)
+	loadID, err := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := func(rows []ingestion.FixedCSVRow) error {
+		return repository.StageMember(context.Background(), definition, loadID, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: rows}})
+	}
+	if err := stage(fixedRowsN(t, definition, 7, "first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := stage(fixedRowsN(t, definition, 5, "replacement")); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, rows := range [][]ingestion.FixedCSVRow{fixedRowsN(t, definition, 5, "concurrent-a"), fixedRowsN(t, definition, 9, "concurrent-b")} {
+		go func(rows []ingestion.FixedCSVRow) {
+			<-start
+			results <- stage(rows)
+		}(rows)
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var memberRows, stagedRows int
+	if err := db.Get(&memberRows, `SELECT row_count FROM fixed_report_load_members WHERE load_id=? AND member_key=?`, loadID, plan.Members[0].MemberKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&stagedRows, `SELECT COUNT(*) FROM stg_fincloud_coa_movement_reports WHERE load_id=? AND member_key=?`, loadID, plan.Members[0].MemberKey); err != nil || stagedRows != memberRows || (stagedRows != 5 && stagedRows != 9) {
+		t.Fatalf("staged rows=%d member rows=%d error=%v", stagedRows, memberRows, err)
+	}
+	if err := repository.Promote(context.Background(), definition, loadID); err != nil {
+		t.Fatal(err)
+	}
+
+	failedLoadID, err := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateRows := fixedRowsN(t, definition, 2, "duplicate")
+	duplicateRows[1].SourceRowNumber = duplicateRows[0].SourceRowNumber
+	if err := repository.StageMember(context.Background(), definition, failedLoadID, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: duplicateRows}}); err == nil {
+		t.Fatal("duplicate source rows staged")
+	}
+	var status string
+	if err := db.Get(&status, `SELECT status FROM fixed_report_load_members WHERE load_id=? AND member_key=?`, failedLoadID, plan.Members[0].MemberKey); err != nil || status != fixedMemberPending {
+		t.Fatalf("failed member status=%q error=%v", status, err)
+	}
+	if err := db.Get(&stagedRows, `SELECT COUNT(*) FROM stg_fincloud_coa_movement_reports WHERE load_id=?`, failedLoadID); err != nil || stagedRows != 0 {
+		t.Fatalf("failed member committed rows=%d error=%v", stagedRows, err)
+	}
+	if _, err := db.Exec(`UPDATE fixed_report_load_members SET status='unexpected' WHERE load_id=? AND member_key=?`, failedLoadID, plan.Members[0].MemberKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.StageMember(context.Background(), definition, failedLoadID, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: fixedRowsN(t, definition, 1, "unexpected")}}); err == nil || !strings.Contains(err.Error(), "cannot stage") {
+		t.Fatalf("unexpected member status error=%v", err)
+	}
+}
+
+func stageFixedConcurrently(t *testing.T, repository *FixedRepository, definition ingestion.FixedDefinition, loadID uint64, asOfDate ingestion.CalendarDate, members []ingestion.RequestDescriptor, rows [][]ingestion.FixedCSVRow, concurrency int) {
+	t.Helper()
+	type item struct{ index int }
+	jobs := make(chan item)
+	results := make(chan error, len(members))
+	var workers sync.WaitGroup
+	for range concurrency {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for job := range jobs {
+				results <- repository.StageMember(context.Background(), definition, loadID, members[job.index], []FixedSegment{{Index: 0, AsOfDate: asOfDate, SourceRows: rows[job.index]}})
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for index := range members {
+			jobs <- item{index: index}
+		}
+	}()
+	workers.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 }
@@ -534,6 +702,24 @@ func fixedRows(t *testing.T, definition ingestion.FixedDefinition, location stri
 	values := make([]string, len(definition.RequiredHeaders))
 	content := strings.Join(definition.RequiredHeaders, "|") + "\n" + strings.Join(values, "|") + "\n"
 	rows, err := ingestion.ParseFixedCSV(context.Background(), definition, location, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+func fixedRowsN(t *testing.T, definition ingestion.FixedDefinition, count int, marker string) []ingestion.FixedCSVRow {
+	t.Helper()
+	var content strings.Builder
+	content.WriteString(strings.Join(definition.RequiredHeaders, "|"))
+	content.WriteByte('\n')
+	values := make([]string, len(definition.RequiredHeaders))
+	for index := range count {
+		values[0] = fmt.Sprintf("%s-%d", marker, index)
+		content.WriteString(strings.Join(values, "|"))
+		content.WriteByte('\n')
+	}
+	rows, err := ingestion.ParseFixedCSV(context.Background(), definition, "", content.String())
 	if err != nil {
 		t.Fatal(err)
 	}

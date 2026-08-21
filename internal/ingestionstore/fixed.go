@@ -113,11 +113,21 @@ func (repository *FixedRepository) stageMemberTransaction(ctx context.Context, s
 	}
 	committed := false
 	defer rollbackUnlessCommitted(tx, &committed)
-	if err := lockRow(ctx, tx, `SELECT 1 FROM fixed_report_load_members WHERE load_id = ? AND member_key = ? FOR UPDATE`, loadID, memberKey); err != nil {
+	var memberStatus string
+	if err := tx.GetContext(ctx, &memberStatus, `SELECT status FROM fixed_report_load_members WHERE load_id = ? AND member_key = ? FOR UPDATE`, loadID, memberKey); err != nil {
 		return fmt.Errorf("lock fixed member: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM `"+specification.stagingTable+"` WHERE load_id = ? AND member_key = ?", loadID, memberKey); err != nil {
-		return fmt.Errorf("clear fixed member staging: %w", err)
+	switch memberStatus {
+	case fixedMemberPending:
+		// BeginLoad creates pending members without staging rows, and staging plus
+		// the success transition commit atomically. Avoid an empty range DELETE:
+		// under REPEATABLE READ it gap-locks concurrent members' insert range.
+	case fixedMemberSuccess:
+		if _, err := tx.ExecContext(ctx, "DELETE FROM `"+specification.stagingTable+"` WHERE load_id = ? AND member_key = ?", loadID, memberKey); err != nil {
+			return fmt.Errorf("clear fixed member staging: %w", err)
+		}
+	default:
+		return fmt.Errorf("fixed member status %q cannot stage", memberStatus)
 	}
 	var loadRange struct {
 		JobKey string `db:"job_key"`
