@@ -93,7 +93,11 @@ func (c *Client) FetchCIFNumbers(ctx context.Context, throughDate string) ([]str
 		if err != nil || column >= len(row) {
 			return nil, &Error{Kind: ErrorMalformed, Operation: "fetch CIF numbers", Message: "Fincloud CIF listing was malformed", Cause: err}
 		}
-		values = append(values, row[column])
+		var cif string
+		if err := json.Unmarshal([]byte(row[column]), &cif); err != nil {
+			return nil, &Error{Kind: ErrorMalformed, Operation: "fetch CIF numbers", Message: "Invalid CIF number format", Cause: err}
+		}
+		values = append(values, cif)
 	}
 	return normalizeIdentifiers(values), nil
 }
