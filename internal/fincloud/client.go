@@ -1,21 +1,28 @@
 package fincloud
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:142.0) Gecko/20100101 Firefox/142.0"
+
+const MaxErrorBodyCapture = 64 << 10
 
 type Config struct {
 	BaseURL            string
@@ -42,6 +49,7 @@ type Error struct {
 	Message    string
 	HTTPStatus int
 	Cause      error
+	diagnostic *DiagnosticPayload
 }
 
 func (e *Error) Error() string {
@@ -52,6 +60,84 @@ func (e *Error) Error() string {
 }
 
 func (e *Error) Unwrap() error { return e.Cause }
+
+func (e *Error) Format(state fmt.State, verb rune) {
+	if verb == 'q' {
+		_, _ = fmt.Fprintf(state, "%q", e.Error())
+		return
+	}
+	_, _ = io.WriteString(state, e.Error())
+}
+
+func (e *Error) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("kind", string(e.Kind)), slog.String("operation", e.Operation),
+		slog.String("message", e.Message), slog.Int("http_status", e.HTTPStatus), slog.String("cause_type", fmt.Sprintf("%T", e.Cause)))
+}
+
+func (e *Error) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Kind, Operation, Message, CauseType string
+		HTTPStatus                          int
+	}{string(e.Kind), e.Operation, e.Message, fmt.Sprintf("%T", e.Cause), e.HTTPStatus})
+}
+
+type RequestDiagnostic struct {
+	Method  string              `json:"method,omitempty"`
+	Path    string              `json:"path,omitempty"`
+	Query   map[string][]string `json:"query,omitempty"`
+	Headers map[string][]string `json:"headers,omitempty"`
+}
+
+type BodyDiagnostic struct {
+	DeclaredContentLength *int64 `json:"declared_content_length,omitempty"`
+	BytesRead             int64  `json:"bytes_read"`
+	BytesCaptured         int    `json:"bytes_captured"`
+	CaptureLimit          int    `json:"capture_limit"`
+	Truncated             bool   `json:"truncated"`
+	Encoding              string `json:"body_encoding,omitempty"`
+	Body                  string `json:"body,omitempty"`
+	Redacted              bool   `json:"body_redacted,omitempty"`
+	ReadError             string `json:"body_read_error,omitempty"`
+}
+
+type ResponseDiagnostic struct {
+	StatusCode      int                 `json:"status_code,omitempty"`
+	Status          string              `json:"status,omitempty"`
+	ContentType     string              `json:"content_type,omitempty"`
+	ContentEncoding string              `json:"content_encoding,omitempty"`
+	DurationMS      int64               `json:"duration_ms"`
+	Headers         map[string][]string `json:"headers,omitempty"`
+	Body            BodyDiagnostic      `json:"body"`
+}
+
+type ApplicationDiagnostic struct {
+	Status  string `json:"status,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type DiagnosticPayload struct {
+	FailureKind string                `json:"failure_kind,omitempty"`
+	DurationMS  int64                 `json:"duration_ms"`
+	Request     RequestDiagnostic     `json:"request"`
+	Response    *ResponseDiagnostic   `json:"response,omitempty"`
+	Application ApplicationDiagnostic `json:"application,omitempty"`
+	DecodeStage string                `json:"decode_stage,omitempty"`
+}
+
+func TechnicalDiagnostic(err error) (DiagnosticPayload, bool) {
+	var sourceError *Error
+	if !errors.As(err, &sourceError) || sourceError.diagnostic == nil {
+		return DiagnosticPayload{}, false
+	}
+	data, _ := json.Marshal(sourceError.diagnostic)
+	var copy DiagnosticPayload
+	_ = json.Unmarshal(data, &copy)
+	return copy, true
+}
+
+type requestStartedKey struct{}
+
+var secretTextPattern = regexp.MustCompile(`(?i)(authorization|cookie|session(?:id)?|token|password|pwd|secret|api[_-]?key)(["']?\s*[=:]\s*["']?)[^\s,;\"'}]+`)
 
 type session struct {
 	id         string
@@ -127,8 +213,8 @@ func (c *Client) do(ctx context.Context, operation string, build func(sessionID 
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		resp.Body.Close()
-		return nil, &Error{Kind: ErrorUnauthorized, Operation: operation, Message: "Fincloud rejected the request after reauthentication", HTTPStatus: http.StatusUnauthorized}
+		defer resp.Body.Close()
+		return nil, c.responseFailure(ErrorUnauthorized, operation, "Fincloud rejected the request after reauthentication", resp)
 	}
 	return resp, nil
 }
@@ -136,11 +222,16 @@ func (c *Client) do(ctx context.Context, operation string, build func(sessionID 
 func (c *Client) send(ctx context.Context, operation, sessionID string, build func(string) (*http.Request, error)) (*http.Response, error) {
 	req, err := build(sessionID)
 	if err != nil {
-		return nil, &Error{Kind: ErrorUpstream, Operation: operation, Message: "could not construct Fincloud request", Cause: err}
+		return nil, &Error{Kind: ErrorUpstream, Operation: operation, Message: "could not construct Fincloud request", Cause: err,
+			diagnostic: &DiagnosticPayload{FailureKind: "request_build"}}
 	}
-	resp, err := c.httpClient.Do(req.WithContext(ctx))
+	started := time.Now()
+	req = req.WithContext(context.WithValue(ctx, requestStartedKey{}, started))
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, &Error{Kind: ErrorUpstream, Operation: operation, Message: "Fincloud request failed", Cause: sanitizeTransportError(err)}
+		cause := c.sanitizeTransportError(err)
+		return nil, &Error{Kind: ErrorUpstream, Operation: operation, Message: "Fincloud request failed", Cause: cause,
+			diagnostic: &DiagnosticPayload{FailureKind: "network", DurationMS: time.Since(started).Milliseconds(), Request: c.sanitizeRequest(req)}}
 	}
 	return resp, nil
 }
@@ -200,13 +291,22 @@ func (c *Client) loginRequest(ctx context.Context) (string, error) {
 		return "", &Error{Kind: ErrorAuthentication, Operation: "authenticate", Message: "could not construct login request", Cause: err}
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	started := time.Now()
+	req = req.WithContext(context.WithValue(req.Context(), requestStartedKey{}, started))
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", &Error{Kind: ErrorAuthentication, Operation: "authenticate", Message: "Fincloud login failed", Cause: sanitizeTransportError(err)}
+		return "", &Error{Kind: ErrorAuthentication, Operation: "authenticate", Message: "Fincloud login failed", Cause: c.sanitizeTransportError(err),
+			diagnostic: &DiagnosticPayload{FailureKind: "network", DurationMS: time.Since(started).Milliseconds(), Request: c.sanitizeRequest(req)}}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", &Error{Kind: ErrorAuthentication, Operation: "authenticate", Message: "Fincloud rejected the configured login", HTTPStatus: resp.StatusCode}
+		return "", c.responseFailure(ErrorAuthentication, "authenticate", "Fincloud rejected the configured login", resp)
+	}
+	data, body, readErr := c.readResponseBody(resp, true, "authenticate")
+	diagnostic := c.responseDiagnostic(resp, body)
+	if readErr != nil {
+		diagnostic.FailureKind = "body_read"
+		return "", &Error{Kind: ErrorAuthentication, Operation: "authenticate", Message: "could not read Fincloud login response", Cause: readErr, diagnostic: diagnostic}
 	}
 	var payload struct {
 		Status string `json:"status"`
@@ -216,11 +316,14 @@ func (c *Client) loginRequest(ctx context.Context) (string, error) {
 			} `json:"result"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", &Error{Kind: ErrorMalformed, Operation: "authenticate", Message: "Fincloud login response was malformed", Cause: err}
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&payload); err != nil {
+		diagnostic.FailureKind, diagnostic.DecodeStage = decodeFailureKind(err), "authentication_envelope"
+		return "", &Error{Kind: ErrorMalformed, Operation: "authenticate", Message: "Fincloud login response was malformed", Cause: err, diagnostic: diagnostic}
 	}
 	if payload.Status != "ok" || strings.TrimSpace(payload.Data.Result.SessionID) == "" {
-		return "", &Error{Kind: ErrorAuthentication, Operation: "authenticate", Message: "Fincloud rejected the configured login"}
+		diagnostic.FailureKind = "application"
+		diagnostic.Application.Status = payload.Status
+		return "", &Error{Kind: ErrorAuthentication, Operation: "authenticate", Message: "Fincloud rejected the configured login", diagnostic: diagnostic}
 	}
 	return payload.Data.Result.SessionID, nil
 }
@@ -240,7 +343,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 	return req, nil
 }
 
-func sanitizeTransportError(err error) error {
+func (c *Client) sanitizeTransportError(err error) error {
 	var urlError *url.Error
 	if !errors.As(err, &urlError) {
 		return err
@@ -252,6 +355,10 @@ func sanitizeTransportError(err error) error {
 			normalized := strings.ToLower(key)
 			if strings.Contains(normalized, "session") || strings.Contains(normalized, "token") || strings.Contains(normalized, "auth") || strings.Contains(normalized, "password") {
 				query.Set(key, "REDACTED")
+			} else {
+				for index, value := range query[key] {
+					query[key][index] = c.redactSecretLiterals(value)
+				}
 			}
 		}
 		parsed.RawQuery = query.Encode()
@@ -261,8 +368,196 @@ func sanitizeTransportError(err error) error {
 	return &redacted
 }
 
+func (c *Client) responseFailure(kind ErrorKind, operation, message string, response *http.Response) error {
+	_, body, readErr := c.readResponseBody(response, false, operation)
+	diagnostic := c.responseDiagnostic(response, body)
+	diagnostic.Application = applicationFromBody(body)
+	diagnostic.FailureKind = "http"
+	if readErr != nil {
+		diagnostic.FailureKind = "body_read"
+	}
+	return &Error{Kind: kind, Operation: operation, Message: message, HTTPStatus: response.StatusCode, Cause: readErr, diagnostic: diagnostic}
+}
+
+func (c *Client) upstreamResponseFailure(operation string, response *http.Response) error {
+	return c.responseFailure(ErrorUpstream, operation, fmt.Sprintf("Fincloud returned HTTP %d", response.StatusCode), response)
+}
+
+// responseError remains the compact status-only constructor for callers/tests
+// without an HTTP response body. Runtime paths use upstreamResponseFailure.
 func responseError(operation string, status int) error {
 	return &Error{Kind: ErrorUpstream, Operation: operation, Message: fmt.Sprintf("Fincloud returned HTTP %d", status), HTTPStatus: status}
+}
+
+func (c *Client) sanitizeRequest(request *http.Request) RequestDiagnostic {
+	result := RequestDiagnostic{Method: request.Method, Path: request.URL.Path, Query: map[string][]string{}, Headers: map[string][]string{}}
+	for key, values := range request.URL.Query() {
+		copy := append([]string(nil), values...)
+		if secretKey(key) {
+			for index := range copy {
+				copy[index] = "REDACTED"
+			}
+		} else {
+			for index := range copy {
+				copy[index] = c.redactSecretLiterals(copy[index])
+			}
+		}
+		result.Query[key] = copy
+	}
+	for _, key := range []string{"Content-Type", "Accept", "User-Agent"} {
+		if values := request.Header.Values(key); len(values) > 0 {
+			result.Headers[key] = append([]string(nil), values...)
+		}
+	}
+	return result
+}
+
+func (c *Client) redactSecretLiterals(value string) string {
+	c.mu.Lock()
+	sessionID := c.session.id
+	c.mu.Unlock()
+	for _, secret := range []string{c.config.Username, c.config.Password, sessionID} {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "REDACTED")
+		}
+	}
+	return value
+}
+
+func secretKey(key string) bool {
+	key = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", ""), "_", ""))
+	for _, candidate := range []string{"authorization", "cookie", "session", "token", "password", "pwd", "secret", "apikey"} {
+		if strings.Contains(key, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) responseDiagnostic(response *http.Response, body BodyDiagnostic) *DiagnosticPayload {
+	duration := int64(0)
+	request := RequestDiagnostic{}
+	if response.Request != nil {
+		request = c.sanitizeRequest(response.Request)
+		if started, ok := response.Request.Context().Value(requestStartedKey{}).(time.Time); ok {
+			duration = time.Since(started).Milliseconds()
+		}
+	}
+	headers := map[string][]string{}
+	for _, key := range []string{"Content-Type", "Content-Length", "Content-Encoding", "Retry-After", "X-Request-ID", "X-Correlation-ID", "Request-ID", "Correlation-ID"} {
+		if values := response.Header.Values(key); len(values) > 0 {
+			headers[key] = append([]string(nil), values...)
+		}
+	}
+	return &DiagnosticPayload{Request: request, Response: &ResponseDiagnostic{StatusCode: response.StatusCode,
+		Status: response.Status, ContentType: response.Header.Get("Content-Type"), ContentEncoding: response.Header.Get("Content-Encoding"),
+		DurationMS: duration, Headers: headers, Body: body}}
+}
+
+func (c *Client) readResponseBody(response *http.Response, keepAll bool, operation string) ([]byte, BodyDiagnostic, error) {
+	body := BodyDiagnostic{CaptureLimit: MaxErrorBodyCapture}
+	if response.ContentLength >= 0 {
+		declared := response.ContentLength
+		body.DeclaredContentLength = &declared
+	}
+	var all, captured bytes.Buffer
+	buffer := make([]byte, 32<<10)
+	var readErr error
+	for {
+		count, err := response.Body.Read(buffer)
+		if count > 0 {
+			body.BytesRead += int64(count)
+			if keepAll {
+				_, _ = all.Write(buffer[:count])
+			}
+			remaining := MaxErrorBodyCapture - captured.Len()
+			if remaining > 0 {
+				_, _ = captured.Write(buffer[:min(count, remaining)])
+			}
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				readErr = err
+			}
+			break
+		}
+	}
+	body.BytesCaptured = captured.Len()
+	body.Truncated = body.BytesRead > int64(MaxErrorBodyCapture)
+	if readErr != nil {
+		safe, _ := c.sanitizeBody(operation, []byte(readErr.Error()))
+		body.ReadError = string(safe)
+	}
+	sanitized, redacted := c.sanitizeBody(operation, captured.Bytes())
+	body.Redacted = redacted
+	if utf8.Valid(sanitized) {
+		body.Encoding, body.Body = "utf8", string(sanitized)
+	} else {
+		body.Encoding, body.Body = "base64", base64.StdEncoding.EncodeToString(sanitized)
+	}
+	if keepAll {
+		return all.Bytes(), body, readErr
+	}
+	return nil, body, readErr
+}
+
+func (c *Client) sanitizeBody(operation string, value []byte) ([]byte, bool) {
+	if operation == "authenticate" {
+		return []byte("[REDACTED authentication response]"), true
+	}
+	result := append([]byte(nil), value...)
+	redacted := false
+	c.mu.Lock()
+	sessionID := c.session.id
+	c.mu.Unlock()
+	for _, secret := range []string{c.config.Username, c.config.Password, sessionID} {
+		if secret != "" && bytes.Contains(result, []byte(secret)) {
+			result = bytes.ReplaceAll(result, []byte(secret), []byte("REDACTED"))
+			redacted = true
+		}
+	}
+	replacedBytes := secretTextPattern.ReplaceAll(result, []byte("$1$2REDACTED"))
+	redacted = redacted || !bytes.Equal(replacedBytes, result)
+	result = replacedBytes
+	if utf8.Valid(result) {
+		var decoded any
+		if json.Unmarshal(result, &decoded) == nil {
+			if redactJSON(decoded) {
+				redacted = true
+				result, _ = json.Marshal(decoded)
+			}
+		}
+	}
+	return result, redacted
+}
+
+func redactJSON(value any) bool {
+	redacted := false
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			if secretKey(key) {
+				typed[key], redacted = "REDACTED", true
+			} else if redactJSON(nested) {
+				redacted = true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if redactJSON(nested) {
+				redacted = true
+			}
+		}
+	}
+	return redacted
+}
+
+func decodeFailureKind(err error) string {
+	var typeError *json.UnmarshalTypeError
+	if errors.As(err, &typeError) {
+		return "dto_decode"
+	}
+	return "malformed_json"
 }
 
 func SafeCauseClass(err error) string {

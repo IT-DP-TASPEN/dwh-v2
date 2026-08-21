@@ -143,6 +143,20 @@ Alpine.data("confirmationDialog", () => ({
   },
 }));
 
+Alpine.data("copyDiagnostic", () => ({
+  copied: false,
+  async copy() {
+    const text = this.$el.querySelector("[data-diagnostic-copy]")?.innerText || "";
+    try {
+      await navigator.clipboard.writeText(text);
+      this.copied = true;
+      setTimeout(() => (this.copied = false), 1600);
+    } catch {
+      this.copied = false;
+    }
+  },
+}));
+
 document.addEventListener("submit", (event) => {
   const form = event.target;
   if (!(form instanceof HTMLFormElement) || !form.matches("[data-confirm]") || form.dataset.confirmed === "true") return;

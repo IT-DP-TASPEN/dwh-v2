@@ -50,7 +50,7 @@ func New(ctx context.Context, db *sqlx.DB, client *fincloud.Client, logger *slog
 		return nil, err
 	}
 	executor, err := ingestionexec.New(client, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db),
-		ingestionstore.NewMaintenanceRepository(db), runs, catalog, settings.FixedMemberConcurrency, settings.DetailConcurrency)
+		ingestionstore.NewMaintenanceRepository(db), runs, catalog, settings.FixedMemberConcurrency, settings.DetailConcurrency, logger)
 	if err != nil {
 		return nil, err
 	}

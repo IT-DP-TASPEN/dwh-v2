@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/ibldzn/go-admin/internal/ingestion"
+	"github.com/ibldzn/go-admin/internal/ingestiondiag"
+	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 	"github.com/shopspring/decimal"
 )
@@ -519,10 +521,18 @@ func TestRetryTransactionRecoversFromRealMySQLDeadlock(t *testing.T) {
 	release := make(chan struct{})
 	errorsFound := make(chan error, 2)
 	var attempts [2]atomic.Int32
+	var diagnosticLock sync.Mutex
+	var diagnostics []ingestionrun.TechnicalEvent
 	for index := range 2 {
 		go func(index int) {
 			first, second := index+1, 2-index
-			errorsFound <- retryTransaction(context.Background(), "deadlock_probe", func() error {
+			ctx := ingestiondiag.WithRecorder(context.Background(), func(_ context.Context, event ingestionrun.TechnicalEvent, _ bool) {
+				diagnosticLock.Lock()
+				diagnostics = append(diagnostics, event)
+				diagnosticLock.Unlock()
+			}, 1, "deadlock_probe")
+			ctx = ingestiondiag.WithScope(ctx, ingestiondiag.Scope{Class: "persistence", Step: "deadlock_probe", Operation: "deadlock_probe"})
+			errorsFound <- retryTransaction(ctx, "deadlock_probe", func() error {
 				attempt := attempts[index].Add(1)
 				tx, err := db.BeginTxx(context.Background(), nil)
 				if err != nil {
@@ -558,6 +568,9 @@ func TestRetryTransactionRecoversFromRealMySQLDeadlock(t *testing.T) {
 	}
 	if total := attempts[0].Load() + attempts[1].Load(); total != 3 {
 		t.Fatalf("transaction attempts=%d want=3 (%d,%d)", total, attempts[0].Load(), attempts[1].Load())
+	}
+	if len(diagnostics) != 2 || diagnostics[0].EventKind != "retry" || diagnostics[1].EventKind != "recovery" || diagnostics[1].Recovered == nil || !*diagnostics[1].Recovered {
+		t.Fatalf("deadlock diagnostics=%+v", diagnostics)
 	}
 }
 

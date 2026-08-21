@@ -46,6 +46,7 @@ type runRow struct {
 	ErrorClass          sql.NullString `db:"error_class"`
 	ErrorMessage        sql.NullString `db:"error_message"`
 	ErrorStep           sql.NullString `db:"error_step"`
+	MapperDiagnostics   []byte         `db:"mapper_diagnostics"`
 	CreatedAt           time.Time      `db:"created_at"`
 	StartedAt           sql.NullTime   `db:"started_at"`
 	FinishedAt          sql.NullTime   `db:"finished_at"`
@@ -125,8 +126,26 @@ type RunDetail struct {
 	Run                   RunView
 	Children              []RunView
 	Scheduler             *SchedulerProvenance
+	TechnicalErrors       []TechnicalEventView
+	MapperDiagnostics     *ingestionrun.MapperDiagnostics
 	CanCancel, CanRecover bool
 	Polling               bool
+}
+
+type TechnicalEventView struct {
+	ID, AffectedItems, OmittedExamples uint64
+	OccurredAt, LastOccurredAt         string
+	Severity, EventKind, RecoveryState string
+	Terminal                           bool
+	Recovered                          *bool
+	Class, Step, Operation, JobKey     string
+	ItemIdentifier, MemberKey          string
+	Attempt                            uint16
+	ErrorType, ErrorMessage            string
+	AggregationScope                   string
+	CapturedExamples                   int
+	Samples                            []ingestionrun.TechnicalSample
+	Details, Body, BodyEncoding        string
 }
 
 type RunOverview struct {

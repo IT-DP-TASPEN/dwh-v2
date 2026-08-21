@@ -248,7 +248,14 @@ func fetchDetail[T any](ctx context.Context, client *Client, operation, endpoint
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, responseError(operation, resp.StatusCode)
+		return nil, client.upstreamResponseFailure(operation, resp)
+	}
+	data, body, readErr := client.readResponseBody(resp, true, operation)
+	diagnostic := client.responseDiagnostic(resp, body)
+	diagnostic.Application = applicationFromBody(body)
+	if readErr != nil {
+		diagnostic.FailureKind = "body_read"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "could not read Fincloud detail response", Cause: readErr, diagnostic: diagnostic}
 	}
 	var envelope struct {
 		Status string `json:"status"`
@@ -256,19 +263,26 @@ func fetchDetail[T any](ctx context.Context, client *Client, operation, endpoint
 			Result json.RawMessage `json:"result"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud detail response was malformed", Cause: err}
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&envelope); err != nil {
+		diagnostic.FailureKind, diagnostic.DecodeStage = decodeFailureKind(err), "detail_envelope"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud detail response was malformed", Cause: err, diagnostic: diagnostic}
 	}
-	if envelope.Status != "ok" || len(bytes.TrimSpace(envelope.Data.Result)) == 0 {
-		return nil, &Error{Kind: ErrorUpstream, Operation: operation, Message: "Fincloud reported a source failure"}
+	if envelope.Status != "ok" {
+		return nil, applicationFailure(operation, "Fincloud reported a source failure", diagnostic, envelope.Status, "")
+	}
+	if len(bytes.TrimSpace(envelope.Data.Result)) == 0 {
+		diagnostic.FailureKind = "missing_result"
+		return nil, &Error{Kind: ErrorUpstream, Operation: operation, Message: "Fincloud reported a source failure", diagnostic: diagnostic}
 	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, envelope.Data.Result); err != nil {
-		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud detail result was malformed", Cause: err}
+		diagnostic.FailureKind, diagnostic.DecodeStage = "malformed_json", "detail_result"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud detail result was malformed", Cause: err, diagnostic: diagnostic}
 	}
 	var result T
 	if err := json.Unmarshal(compact.Bytes(), &result); err != nil {
-		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud detail result could not be decoded", Cause: err}
+		diagnostic.FailureKind, diagnostic.DecodeStage = decodeFailureKind(err), "detail_dto"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud detail result could not be decoded", Cause: err, diagnostic: diagnostic}
 	}
 	attachRawPayload(any(&result), compact.Bytes())
 	return &result, nil

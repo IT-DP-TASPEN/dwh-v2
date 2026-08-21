@@ -3,6 +3,7 @@ package ingestion
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 
 type Service struct {
 	repository *Repository
+	runs       *ingestionrun.Repository
 	catalog    core.Catalog
 }
 
@@ -24,7 +26,11 @@ func NewService(repository *Repository) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{repository: repository, catalog: catalog}, nil
+	runs, err := ingestionrun.NewRepository(repository.db, catalog)
+	if err != nil {
+		return nil, err
+	}
+	return &Service{repository: repository, runs: runs, catalog: catalog}, nil
 }
 
 func (service *Service) ListRuns(ctx context.Context, filter RunFilter, page int) (RunPage, error) {
@@ -55,6 +61,15 @@ func (service *Service) FindRun(ctx context.Context, id uint64) (RunDetail, erro
 		return RunDetail{}, err
 	}
 	detail := RunDetail{Run: service.view(row)}
+	detail.MapperDiagnostics, err = ingestionrun.DecodeMapperDiagnostics(row.MapperDiagnostics)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	events, err := service.runs.TechnicalEvents(ctx, id)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	detail.TechnicalErrors = technicalEventViews(events)
 	if row.Kind == string(ingestionrun.KindRunAllParent) {
 		children, err := service.repository.Children(ctx, id)
 		if err != nil {
@@ -65,6 +80,64 @@ func (service *Service) FindRun(ctx context.Context, id uint64) (RunDetail, erro
 	detail.Scheduler, err = service.repository.SchedulerProvenance(ctx, id)
 	detail.Polling = !detail.Run.Terminal
 	return detail, err
+}
+
+func technicalEventViews(events []ingestionrun.TechnicalEvent) []TechnicalEventView {
+	result := make([]TechnicalEventView, len(events))
+	for index, event := range events {
+		view := TechnicalEventView{ID: event.ID, AffectedItems: event.OccurrenceCount, OccurredAt: formatTechnicalTime(event.OccurredAt),
+			LastOccurredAt: formatTechnicalTime(event.LastOccurredAt), Severity: event.Severity, EventKind: event.EventKind, Terminal: event.Terminal,
+			Recovered: event.Recovered, Class: event.Class, Step: event.Step, Operation: event.Operation, JobKey: event.JobKey,
+			ItemIdentifier: event.ItemIdentifier, MemberKey: event.MemberKey, Attempt: event.Attempt, ErrorType: event.ErrorType,
+			ErrorMessage: event.ErrorMessage, AggregationScope: event.AggregationScope, CapturedExamples: len(event.Samples), Samples: event.Samples}
+		if event.OccurrenceCount > uint64(len(event.Samples)) {
+			view.OmittedExamples = event.OccurrenceCount - uint64(len(event.Samples))
+		}
+		if event.Recovered != nil {
+			if *event.Recovered {
+				view.RecoveryState = "recovered"
+			} else {
+				view.RecoveryState = "not recovered"
+			}
+		}
+		var pretty []byte
+		if json.Valid(event.Details) {
+			var value any
+			_ = json.Unmarshal(event.Details, &value)
+			omitRenderedResponseBody(value)
+			pretty, _ = json.MarshalIndent(value, "", "  ")
+		}
+		view.Details = string(pretty)
+		var body struct {
+			Source struct {
+				Response *struct {
+					Body struct {
+						Encoding string `json:"body_encoding"`
+						Body     string `json:"body"`
+					} `json:"body"`
+				} `json:"response"`
+			} `json:"source"`
+		}
+		if json.Unmarshal(event.Details, &body) == nil && body.Source.Response != nil {
+			view.BodyEncoding, view.Body = body.Source.Response.Body.Encoding, body.Source.Response.Body.Body
+		}
+		result[index] = view
+	}
+	return result
+}
+
+func omitRenderedResponseBody(value any) {
+	root, _ := value.(map[string]any)
+	source, _ := root["source"].(map[string]any)
+	response, _ := source["response"].(map[string]any)
+	body, _ := response["body"].(map[string]any)
+	if text, _ := body["body"].(string); text != "" {
+		body["body"] = "[shown separately below]"
+	}
+}
+
+func formatTechnicalTime(value time.Time) string {
+	return value.UTC().Format("02 Jan 2006 15:04:05.000000 UTC")
 }
 
 func (service *Service) OverviewRuns(ctx context.Context) (RunOverview, error) {

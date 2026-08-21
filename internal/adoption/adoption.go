@@ -575,7 +575,7 @@ func (engine *Engine) verifyFinal(ctx context.Context) error {
 	if len(settings) < 36 {
 		return fmt.Errorf("source settings postcondition failed")
 	}
-	for _, table := range []string{"roles", "permissions", "role_permissions", "users", "sessions", "audit_logs", "ingestion_runtime_settings", "ingestion_runs", "fixed_report_loads", "fincloud_cifs", "dynamic_csv_sources", "schedules", "schedule_occurrences", "schedule_attempts"} {
+	for _, table := range []string{"roles", "permissions", "role_permissions", "users", "sessions", "audit_logs", "ingestion_runtime_settings", "ingestion_runs", "ingestion_run_errors", "fixed_report_loads", "fincloud_cifs", "dynamic_csv_sources", "schedules", "schedule_occurrences", "schedule_attempts"} {
 		var count int
 		if err := engine.db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, table); err != nil || count != 1 {
 			return fmt.Errorf("adoption postcondition missing table %s", table)

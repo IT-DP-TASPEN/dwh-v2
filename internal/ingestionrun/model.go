@@ -148,6 +148,10 @@ func decodeMapperDiagnostics(data []byte) (*MapperDiagnostics, error) {
 	return &diagnostics, nil
 }
 
+func DecodeMapperDiagnostics(data []byte) (*MapperDiagnostics, error) {
+	return decodeMapperDiagnostics(data)
+}
+
 func (diagnostics *MapperDiagnostics) sort() {
 	sort.Slice(diagnostics.Groups, func(left, right int) bool {
 		a, b := diagnostics.Groups[left], diagnostics.Groups[right]

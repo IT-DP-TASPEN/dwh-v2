@@ -213,6 +213,11 @@ func TestFixedCSVTrimsOnlyHeaderEdges(t *testing.T) {
 	internal := strings.Replace(strings.Join(definition.RequiredHeaders, "|"), "Customer Status", "Customer  Status", 1) + "\n"
 	if _, err := ParseFixedCSV(context.Background(), definition, "", internal); err == nil {
 		t.Fatal("internal header whitespace was normalized")
+	} else {
+		var header *FixedHeaderError
+		if !errors.As(err, &header) || header.Expected != "Customer Status" || header.ReceivedRaw != "Customer  Status" || header.ReceivedNormalized != "Customer  Status" || header.Column < 1 {
+			t.Fatalf("typed header diagnostic=%+v error=%v", header, err)
+		}
 	}
 	duplicate := strings.Join(append(append([]string(nil), definition.RequiredHeaders...), "Customer Status "), "|") + "\n"
 	if _, err := ParseFixedCSV(context.Background(), definition, "", duplicate); err == nil || !strings.Contains(err.Error(), "duplicate CSV header") {

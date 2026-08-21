@@ -33,11 +33,12 @@ func (c *Client) FetchAccessibleLocations(ctx context.Context) ([]Location, erro
 			} `json:"result"`
 		} `json:"data"`
 	}
-	if err := c.getJSON(ctx, "fetch accessible locations", "/admin/access/listvalues", &payload); err != nil {
+	diagnostic, err := c.getJSON(ctx, "fetch accessible locations", "/admin/access/listvalues", &payload)
+	if err != nil {
 		return nil, err
 	}
 	if payload.Status != "ok" {
-		return nil, &Error{Kind: ErrorUpstream, Operation: "fetch accessible locations", Message: "Fincloud reported a source failure"}
+		return nil, applicationFailure("fetch accessible locations", "Fincloud reported a source failure", diagnostic, payload.Status, "")
 	}
 	return payload.Data.Result.Locations, nil
 }
@@ -51,11 +52,12 @@ func (c *Client) FetchAccountCodes(ctx context.Context) ([]AccountCode, error) {
 			} `json:"result"`
 		} `json:"data"`
 	}
-	if err := c.getJSON(ctx, "fetch account codes", "/bukuBesar/laporan/mutasiAkun//listvalues", &payload); err != nil {
+	diagnostic, err := c.getJSON(ctx, "fetch account codes", "/bukuBesar/laporan/mutasiAkun//listvalues", &payload)
+	if err != nil {
 		return nil, err
 	}
 	if payload.Status != "ok" {
-		return nil, &Error{Kind: ErrorUpstream, Operation: "fetch account codes", Message: "Fincloud reported a source failure"}
+		return nil, applicationFailure("fetch account codes", "Fincloud reported a source failure", diagnostic, payload.Status, "")
 	}
 	return payload.Data.Result.AccountCodes, nil
 }
@@ -137,11 +139,12 @@ func (c *Client) fetchAccountList(ctx context.Context, operation, endpoint strin
 			} `json:"result"`
 		} `json:"data"`
 	}
-	if err := c.getJSON(ctx, operation, endpoint+"?"+query.Encode(), &payload); err != nil {
+	diagnostic, err := c.getJSON(ctx, operation, endpoint+"?"+query.Encode(), &payload)
+	if err != nil {
 		return nil, err
 	}
 	if payload.Status != "ok" {
-		return nil, &Error{Kind: ErrorUpstream, Operation: operation, Message: "Fincloud reported a source failure"}
+		return nil, applicationFailure(operation, "Fincloud reported a source failure", diagnostic, payload.Status, "")
 	}
 	values := make([]string, len(payload.Data.Result))
 	for index, row := range payload.Data.Result {
@@ -185,11 +188,13 @@ func (c *Client) DownloadReport(ctx context.Context, name string, parameters ...
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", responseError("download report", resp.StatusCode)
+		return "", c.upstreamResponseFailure("download report", resp)
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, body, err := c.readResponseBody(resp, true, "download report")
 	if err != nil {
-		return "", &Error{Kind: ErrorUpstream, Operation: "download report", Message: "could not read Fincloud response", Cause: err}
+		diagnostic := c.responseDiagnostic(resp, body)
+		diagnostic.FailureKind = "body_read"
+		return "", &Error{Kind: ErrorUpstream, Operation: "download report", Message: "could not read Fincloud response", Cause: err, diagnostic: diagnostic}
 	}
 	return string(bytes.TrimPrefix(data, []byte("\uFEFF"))), nil
 }
@@ -212,11 +217,13 @@ func (c *Client) DownloadMaintenanceReport(ctx context.Context, file, directory 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", responseError("download maintenance report", resp.StatusCode)
+		return "", c.upstreamResponseFailure("download maintenance report", resp)
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, body, err := c.readResponseBody(resp, true, "download maintenance report")
 	if err != nil {
-		return "", &Error{Kind: ErrorUpstream, Operation: "download maintenance report", Message: "could not read Fincloud response", Cause: err}
+		diagnostic := c.responseDiagnostic(resp, body)
+		diagnostic.FailureKind = "body_read"
+		return "", &Error{Kind: ErrorUpstream, Operation: "download maintenance report", Message: "could not read Fincloud response", Cause: err, diagnostic: diagnostic}
 	}
 	return string(bytes.TrimPrefix(data, []byte("\uFEFF"))), nil
 }
@@ -239,11 +246,12 @@ func (c *Client) listMaintenanceDirectory(ctx context.Context, file, directory s
 			} `json:"result"`
 		} `json:"data"`
 	}
-	if err := c.getJSON(ctx, "list maintenance reports", "/system/downloaderlaporan/pembuatan/loadorDownload?"+query.Encode(), &payload); err != nil {
+	diagnostic, err := c.getJSON(ctx, "list maintenance reports", "/system/downloaderlaporan/pembuatan/loadorDownload?"+query.Encode(), &payload)
+	if err != nil {
 		return nil, err
 	}
 	if payload.Status != "ok" {
-		return nil, &Error{Kind: ErrorUpstream, Operation: "list maintenance reports", Message: "Fincloud reported a source failure"}
+		return nil, applicationFailure("list maintenance reports", "Fincloud reported a source failure", diagnostic, payload.Status, "")
 	}
 	var files []string
 	for _, item := range payload.Data.Result.List {
@@ -264,19 +272,62 @@ func (c *Client) listMaintenanceDirectory(ctx context.Context, file, directory s
 	return files, nil
 }
 
-func (c *Client) getJSON(ctx context.Context, operation, requestPath string, target any) error {
+func (c *Client) getJSON(ctx context.Context, operation, requestPath string, target any) (*DiagnosticPayload, error) {
 	resp, err := c.do(ctx, operation, func(sessionID string) (*http.Request, error) {
 		return c.newRequest(ctx, http.MethodGet, requestPath, nil, sessionID)
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return responseError(operation, resp.StatusCode)
+		return nil, c.upstreamResponseFailure(operation, resp)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
-		return &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud response was malformed", Cause: err}
+	data, body, readErr := c.readResponseBody(resp, true, operation)
+	diagnostic := c.responseDiagnostic(resp, body)
+	diagnostic.Application = applicationFromBody(body)
+	if readErr != nil {
+		diagnostic.FailureKind = "body_read"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "could not read Fincloud response", Cause: readErr, diagnostic: diagnostic}
 	}
-	return nil
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(target); err != nil {
+		diagnostic.FailureKind, diagnostic.DecodeStage = decodeFailureKind(err), "response_dto"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud response was malformed", Cause: err, diagnostic: diagnostic}
+	}
+	return diagnostic, nil
+}
+
+func applicationFailure(operation, message string, diagnostic *DiagnosticPayload, status, applicationMessage string) error {
+	if diagnostic == nil {
+		diagnostic = &DiagnosticPayload{}
+	}
+	diagnostic.FailureKind = "application"
+	if diagnostic.Application.Status == "" {
+		diagnostic.Application.Status = status
+	}
+	if diagnostic.Application.Message == "" {
+		diagnostic.Application.Message = applicationMessage
+	}
+	return &Error{Kind: ErrorUpstream, Operation: operation, Message: message, diagnostic: diagnostic}
+}
+
+func applicationFromBody(body BodyDiagnostic) ApplicationDiagnostic {
+	if body.Encoding != "utf8" {
+		return ApplicationDiagnostic{}
+	}
+	var envelope struct {
+		Status  any    `json:"status"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(body.Body), &envelope) != nil {
+		return ApplicationDiagnostic{}
+	}
+	status := ""
+	switch value := envelope.Status.(type) {
+	case string:
+		status = value
+	case float64:
+		status = fmt.Sprint(value)
+	}
+	return ApplicationDiagnostic{Status: status, Message: envelope.Message}
 }

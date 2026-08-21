@@ -2,11 +2,14 @@ package ingestionstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/ibldzn/go-admin/internal/ingestiondiag"
+	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/shopspring/decimal"
 )
 
@@ -108,5 +111,34 @@ func TestRetryTransactionStopsOnCancellation(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) || attempts.Load() != 1 {
 		t.Fatalf("attempts=%d error=%v", attempts.Load(), err)
+	}
+}
+
+func TestRetryDiagnosticsPreserveMySQLMetadataAndRecovery(t *testing.T) {
+	var events []ingestionrun.TechnicalEvent
+	ctx := ingestiondiag.WithRecorder(context.Background(), func(_ context.Context, event ingestionrun.TechnicalEvent, aggregate bool) {
+		if !aggregate {
+			t.Error("retry event was not aggregated")
+		}
+		events = append(events, event)
+	}, 9, "saving_detail")
+	ctx = ingestiondiag.WithScope(ctx, ingestiondiag.Scope{Class: "persistence", Step: "persist_detail", Operation: "replace_saving_snapshot", ItemIdentifier: "safe-item"})
+	var attempts int
+	err := retryTransaction(ctx, "replace_saving_snapshot", func() error {
+		attempts++
+		if attempts == 1 {
+			mysqlError := &mysql.MySQLError{Number: 1213, SQLState: [5]byte{'4', '0', '0', '0', '1'}, Message: "Deadlock found when trying to get lock; try restarting transaction"}
+			return &DatabaseError{Operation: "insert_child_rows", QueryName: "replace_saving_mutations", Table: "fincloud_saving_mutations", BatchStart: 1, BatchEnd: 61, Cause: mysqlError}
+		}
+		return nil
+	})
+	if err != nil || attempts != 2 || len(events) != 2 || events[0].EventKind != "retry" || events[1].EventKind != "recovery" || events[1].Recovered == nil || !*events[1].Recovered {
+		t.Fatalf("attempts=%d events=%+v error=%v", attempts, events, err)
+	}
+	var details struct {
+		Database DatabaseDiagnostic `json:"database"`
+	}
+	if err := json.Unmarshal(events[0].Details, &details); err != nil || details.Database.MySQLNumber != 1213 || details.Database.SQLState != "40001" || details.Database.Table != "fincloud_saving_mutations" || details.Database.TxAttempt != 1 {
+		t.Fatalf("details=%+v error=%v", details, err)
 	}
 }

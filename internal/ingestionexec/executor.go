@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/fincloud"
 	"github.com/ibldzn/go-admin/internal/ingestion"
+	"github.com/ibldzn/go-admin/internal/ingestiondiag"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/ingestionstore"
 )
@@ -26,6 +28,7 @@ type Executor struct {
 	fixedConcurrency  int
 	detailConcurrency int
 	now               func() time.Time
+	logger            *slog.Logger
 }
 
 type Result struct {
@@ -46,38 +49,47 @@ const (
 )
 
 type fixedMemberResult struct {
-	rows  uint64
-	layer fixedLayer
-	step  string
-	err   error
+	rows            uint64
+	layer           fixedLayer
+	step, memberKey string
+	err             error
 }
 
-func New(client *fincloud.Client, fixed *ingestionstore.FixedRepository, detail *ingestionstore.DetailRepository, maintenance *ingestionstore.MaintenanceRepository, runs *ingestionrun.Repository, catalog ingestion.Catalog, fixedConcurrency, detailConcurrency int) (*Executor, error) {
-	if client == nil || fixed == nil || detail == nil || maintenance == nil || runs == nil || fixedConcurrency < 1 || detailConcurrency < 1 {
+func New(client *fincloud.Client, fixed *ingestionstore.FixedRepository, detail *ingestionstore.DetailRepository, maintenance *ingestionstore.MaintenanceRepository, runs *ingestionrun.Repository, catalog ingestion.Catalog, fixedConcurrency, detailConcurrency int, logger *slog.Logger) (*Executor, error) {
+	if client == nil || fixed == nil || detail == nil || maintenance == nil || runs == nil || fixedConcurrency < 1 || detailConcurrency < 1 || logger == nil {
 		return nil, fmt.Errorf("complete ingestion executor dependencies are required")
 	}
 	return &Executor{client: client, fixed: fixed, detail: detail, maintenance: maintenance, runs: runs, catalog: catalog,
-		fixedConcurrency: fixedConcurrency, detailConcurrency: detailConcurrency, now: time.Now}, nil
+		fixedConcurrency: fixedConcurrency, detailConcurrency: detailConcurrency, now: time.Now, logger: logger}, nil
 }
 
 func (executor *Executor) Execute(ctx context.Context, run ingestionrun.Run, ownerID string) Result {
+	recorder := newRunDiagnosticRecorder(executor.runs, executor.logger, run.ID, run.JobKey)
+	ctx = ingestiondiag.WithRecorder(ctx, recorder.record, run.ID, run.JobKey)
 	job, found := executor.catalog.Find(run.JobKey)
 	if !found || run.Status != ingestionrun.StatusRunning || run.OwnerID != ownerID {
-		return failed("contract", "invalid executable run", "start", fmt.Errorf("invalid run contract"))
+		result := failed("contract", "invalid executable run", "start", fmt.Errorf("invalid run contract"))
+		recordTerminalFallback(ctx, recorder, result)
+		return result
 	}
 	if err := run.Parameters.Validate(job); err != nil {
-		return failed("contract", "invalid executable parameters", "start", err)
+		result := failed("contract", "invalid executable parameters", "start", err)
+		recordTerminalFallback(ctx, recorder, result)
+		return result
 	}
+	var result Result
 	switch job.Category {
 	case ingestion.CategoryFixed:
-		return executor.executeFixed(ctx, run, job)
+		result = executor.executeFixed(ctx, run, job)
 	case ingestion.CategoryDetail:
-		return executor.executeDetail(ctx, run, job)
+		result = executor.executeDetail(ctx, run, job)
 	case ingestion.CategoryEOD, ingestion.CategoryCBR:
-		return executor.executeMaintenance(ctx, run, job)
+		result = executor.executeMaintenance(ctx, run, job)
 	default:
-		return failed("contract", "unsupported job category", "start", fmt.Errorf("unsupported category %s", job.Category))
+		result = failed("contract", "unsupported job category", "start", fmt.Errorf("unsupported category %s", job.Category))
 	}
+	recordTerminalFallback(ctx, recorder, result)
+	return result
 }
 
 func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
@@ -130,7 +142,7 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	if err != nil {
 		return failed("contract", "could not build fixed execution plan", "plan", err)
 	}
-	loadID, err := executor.fixed.BeginLoad(ctx, run.ID, definition, plan)
+	loadID, err := executor.fixed.BeginLoad(diagnosticScope(ctx, "persistence", "begin_fixed_load", "begin_fixed_load", "", ""), run.ID, definition, plan)
 	if err != nil {
 		if result, cancelled := cancellationFailure(ctx, "begin_fixed_load", err); cancelled {
 			return result
@@ -142,12 +154,20 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	var first *fixedMemberResult
 	runFixedPool(ctx, plan.Members, executor.fixedConcurrency,
 		func(workCtx context.Context, descriptor ingestion.RequestDescriptor) fixedMemberResult {
-			return executor.fetchAndStageFixedMember(workCtx, definition, loadID, descriptor)
+			result := executor.fetchAndStageFixedMember(workCtx, definition, loadID, descriptor)
+			result.memberKey = descriptor.MemberKey
+			return result
 		}, func(result fixedMemberResult) {
 			progress.Started++
 			if result.err != nil {
+				if suppressCleanupCancellation(ctx, result.err) {
+					_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+					return
+				}
+				firstFailure := first == nil
+				recordFixedMemberDiagnostic(ctx, result, firstFailure)
 				progress.Failed++
-				if first == nil {
+				if firstFailure {
 					copy := result
 					first = &copy
 				}
@@ -168,7 +188,7 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	}
 	progress.Step = "promote"
 	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
-	if err := executor.fixed.Promote(ctx, definition, loadID); err != nil {
+	if err := executor.fixed.Promote(diagnosticScope(ctx, "persistence", "promote_fixed_load", "promote_fixed_load", "", ""), definition, loadID); err != nil {
 		if result, cancelled := cancellationFailure(ctx, "promote_fixed_load", err); cancelled {
 			return result
 		}
@@ -189,18 +209,21 @@ func (executor *Executor) fetchAndStageFixedMember(ctx context.Context, definiti
 		if err != nil {
 			return fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: err}
 		}
-		content, err := executor.client.DownloadReport(ctx, request.ReportName, request.Parameters...)
+		sourceCtx := diagnosticScope(ctx, "source", "download_report", "download_report", "", descriptor.MemberKey)
+		content, err := executor.client.DownloadReport(sourceCtx, request.ReportName, request.Parameters...)
 		if err != nil {
 			return fixedMemberResult{layer: fixedLayerSource, step: "download_report", err: err}
 		}
-		parsed, err := ingestion.ParseFixedCSV(ctx, definition, descriptor.SourceLocationID, content)
+		parserCtx := diagnosticScope(ctx, "source_contract", "parse_fixed_csv", "parse_fixed_csv", "", descriptor.MemberKey)
+		parsed, err := ingestion.ParseFixedCSV(parserCtx, definition, descriptor.SourceLocationID, content)
 		if err != nil {
 			return fixedMemberResult{layer: fixedLayerSourceContract, step: "parse_fixed_csv", err: err}
 		}
 		rows += uint64(len(parsed))
 		segments = append(segments, ingestionstore.FixedSegment{Index: index, AsOfDate: chunk.To, SourceRows: parsed})
 	}
-	if err := executor.fixed.StageMember(ctx, definition, loadID, descriptor, segments); err != nil {
+	persistCtx := diagnosticScope(ctx, "persistence", "stage_fixed_member", "stage_fixed_member", "", descriptor.MemberKey)
+	if err := executor.fixed.StageMember(persistCtx, definition, loadID, descriptor, segments); err != nil {
 		return fixedMemberResult{layer: fixedLayerPersistence, step: "stage_fixed_member", err: err}
 	}
 	return fixedMemberResult{rows: rows}
@@ -222,9 +245,6 @@ func runFixedPool(ctx context.Context, descriptors []ingestion.RequestDescriptor
 			for descriptor := range jobs {
 				result := work(workCtx, descriptor)
 				results <- result
-				if result.err != nil {
-					cancel()
-				}
 			}
 		}()
 	}
@@ -241,6 +261,9 @@ func runFixedPool(ctx context.Context, descriptors []ingestion.RequestDescriptor
 	go func() { wait.Wait(); close(results) }()
 	for result := range results {
 		consume(result)
+		if result.err != nil {
+			cancel()
+		}
 	}
 }
 
@@ -309,9 +332,10 @@ const (
 )
 
 type detailItemResult struct {
-	rows  uint64
-	layer detailLayer
-	err   error
+	rows       uint64
+	layer      detailLayer
+	identifier string
+	err        error
 }
 
 type detailPoolOutcome struct {
@@ -338,9 +362,7 @@ func runDetailPool(ctx context.Context, identifiers []string, concurrency int, w
 			defer wait.Done()
 			for identifier := range jobs {
 				result := work(workCtx, identifier)
-				if result.err != nil && result.layer != detailLayerMap {
-					cancel()
-				}
+				result.identifier = identifier
 				results <- result
 			}
 		}()
@@ -360,11 +382,13 @@ func runDetailPool(ctx context.Context, identifiers []string, concurrency int, w
 	for result := range results {
 		outcome.progress.Started++
 		if result.err != nil {
-			if errors.Is(result.err, context.Canceled) && ctx.Err() == nil {
+			if suppressCleanupCancellation(ctx, result.err) {
 				continue
 			}
 			outcome.progress.Failed++
 			if result.layer == detailLayerMap {
+				mapperCtx := diagnosticScope(ctx, "item_data", "map_detail", "map_detail", result.identifier, "")
+				recordMapperDiagnostic(mapperCtx, result.err, result.identifier, false)
 				if outcome.firstLocal == nil {
 					outcome.firstLocal = result.err
 				}
@@ -376,8 +400,13 @@ func runDetailPool(ctx context.Context, identifiers []string, concurrency int, w
 						cancel()
 					}
 				}
-			} else if outcome.fatal == nil {
-				outcome.fatal, outcome.fatalLayer = result.err, result.layer
+			} else {
+				primary := outcome.fatal == nil
+				if primary {
+					outcome.fatal, outcome.fatalLayer = result.err, result.layer
+				}
+				recordDetailFatalDiagnostic(ctx, result, primary)
+				cancel()
 			}
 		} else {
 			outcome.progress.Succeeded++
@@ -448,49 +477,52 @@ func (executor *Executor) fetchAndSaveDetail(ctx context.Context, jobKey, identi
 	case "cif_detail":
 		value, fetchErr := executor.client.FetchCIFDetail(ctx, identifier)
 		if fetchErr != nil {
-			return detailItemResult{layer: detailLayerFetch, err: fetchErr}
+			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
 		}
 		record, err = ingestion.MapCIFDetail(ctx, value, snapshotDate, fetchedAt)
 	case "saving_detail":
 		value, fetchErr := executor.client.FetchSavingDetail(ctx, identifier)
 		if fetchErr != nil {
-			return detailItemResult{layer: detailLayerFetch, err: fetchErr}
+			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
 		}
 		record, err = ingestion.MapSavingDetail(ctx, value, snapshotDate, fetchedAt)
 	case "time_deposit_detail":
 		value, fetchErr := executor.client.FetchTimeDepositDetail(ctx, identifier)
 		if fetchErr != nil {
-			return detailItemResult{layer: detailLayerFetch, err: fetchErr}
+			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
 		}
 		record, err = ingestion.MapTimeDepositDetail(ctx, value, snapshotDate, fetchedAt)
 	case "loan_detail":
 		value, fetchErr := executor.client.FetchLoanDetail(ctx, identifier)
 		if fetchErr != nil {
-			return detailItemResult{layer: detailLayerFetch, err: fetchErr}
+			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
 		}
 		record, err = ingestion.MapLoanDetail(ctx, value, snapshotDate, fetchedAt)
 	}
 	if err != nil {
-		return detailItemResult{layer: detailLayerMap, err: err}
+		return detailItemResult{layer: detailLayerMap, identifier: identifier, err: err}
 	}
+	persistCtx := diagnosticScope(ctx, "persistence", "persist_detail", "persist_"+jobKey, identifier, "")
 	switch jobKey {
 	case "cif_detail":
-		err = executor.detail.SaveCIFSnapshot(ctx, record)
+		err = executor.detail.SaveCIFSnapshot(persistCtx, record)
 	case "saving_detail":
-		err = executor.detail.SaveSavingSnapshot(ctx, record)
+		err = executor.detail.SaveSavingSnapshot(persistCtx, record)
 	case "time_deposit_detail":
-		err = executor.detail.SaveTimeDepositSnapshot(ctx, record)
+		err = executor.detail.SaveTimeDepositSnapshot(persistCtx, record)
 	case "loan_detail":
-		err = executor.detail.SaveLoanSnapshot(ctx, record)
+		err = executor.detail.SaveLoanSnapshot(persistCtx, record)
 	}
 	if err != nil {
-		return detailPersistenceFailure(err)
+		result := detailPersistenceFailure(err)
+		result.identifier = identifier
+		return result
 	}
 	rows := uint64(1)
 	for _, children := range record.Children {
 		rows += uint64(len(children))
 	}
-	return detailItemResult{rows: rows}
+	return detailItemResult{rows: rows, identifier: identifier}
 }
 
 func detailPersistenceFailure(err error) detailItemResult {
@@ -523,8 +555,17 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 				first = err
 			}
 			if sourceWide(err) {
+				sourceCtx := diagnosticScope(ctx, "source", "maintenance_dates", "maintenance_dates", requested.String(), "")
+				recordSourceDiagnostic(sourceCtx, err, true, false)
 				_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
 				return sourceFailure(ctx, err, "maintenance_dates")
+			}
+			if _, ok := fincloud.TechnicalDiagnostic(err); ok {
+				sourceCtx := diagnosticScope(ctx, "source", "maintenance_dates", "maintenance_dates", requested.String(), "")
+				recordSourceDiagnostic(sourceCtx, err, false, true)
+			} else if database := ingestionstore.TechnicalDiagnostic(err); database.Operation != "" || database.Table != "" || database.MySQLNumber != 0 {
+				persistCtx := diagnosticScope(ctx, "persistence", "persist_maintenance", "persist_maintenance", requested.String(), "")
+				recordPersistenceDiagnostic(persistCtx, err, false)
 			}
 		} else {
 			progress.Succeeded++
@@ -549,7 +590,8 @@ func (executor *Executor) fetchAndSaveMaintenance(ctx context.Context, definitio
 	}
 	for _, matched := range candidates {
 		folder := folderKind + "/" + strings.ReplaceAll(matched.String(), "-", "")
-		files, err := executor.client.ListMaintenanceReportFiles(ctx, folder)
+		sourceCtx := diagnosticScope(ctx, "source", "list_maintenance_reports", "list_maintenance_reports", requested.String(), "")
+		files, err := executor.client.ListMaintenanceReportFiles(sourceCtx, folder)
 		if err != nil {
 			return 0, err
 		}
@@ -558,15 +600,17 @@ func (executor *Executor) fetchAndSaveMaintenance(ctx context.Context, definitio
 			if disposition != ingestion.MaintenanceRegistered || candidate == nil || candidate.Key != definition.Key {
 				continue
 			}
-			content, err := executor.client.DownloadMaintenanceReport(ctx, path.Base(sourcePath), path.Dir(sourcePath))
+			downloadCtx := diagnosticScope(ctx, "source", "download_maintenance_report", "download_maintenance_report", requested.String(), "")
+			content, err := executor.client.DownloadMaintenanceReport(downloadCtx, path.Base(sourcePath), path.Dir(sourcePath))
 			if err != nil {
 				return 0, err
 			}
-			parsed, err := ingestion.ParseMaintenanceCSV(ctx, definition, matched, content)
+			parsed, err := ingestion.ParseMaintenanceCSV(diagnosticScope(ctx, "source_contract", "parse_maintenance_csv", "parse_maintenance_csv", requested.String(), ""), definition, matched, content)
 			if err != nil {
 				return 0, err
 			}
-			err = executor.maintenance.SaveSnapshot(ctx, ingestionstore.MaintenanceSnapshot{RequestedDate: requested, MatchedDate: matched, FileName: path.Base(sourcePath), Parsed: parsed})
+			persistCtx := diagnosticScope(ctx, "persistence", "persist_maintenance", "persist_maintenance", requested.String(), "")
+			err = executor.maintenance.SaveSnapshot(persistCtx, ingestionstore.MaintenanceSnapshot{RequestedDate: requested, MatchedDate: matched, FileName: path.Base(sourcePath), Parsed: parsed})
 			return uint64(len(parsed.Rows)), err
 		}
 	}
@@ -606,6 +650,14 @@ func cancellationFailure(ctx context.Context, step string, primary error) (Resul
 	default:
 		return Result{}, false
 	}
+}
+
+func suppressCleanupCancellation(ctx context.Context, err error) bool {
+	if !errors.Is(err, context.Canceled) {
+		return false
+	}
+	cause := context.Cause(ctx)
+	return ctx.Err() == nil || errors.Is(cause, ingestionrun.ErrCancellationRequested) || errors.Is(cause, ingestionrun.ErrCoordinatorShutdown)
 }
 
 func failed(class, message, step string, cause error) Result {

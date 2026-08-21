@@ -103,9 +103,11 @@ func (repository *DetailRepository) save(ctx context.Context, record ingestion.D
 	if repository == nil || repository.db == nil || record.AsOfDate.IsZero() || record.Identifier == "" || record.LastFetchedAt.IsZero() || len(record.RawPayload) == 0 || record.RawChecksum == "" {
 		return fmt.Errorf("complete detail snapshot is required")
 	}
-	return retryTransaction(ctx, "persist_detail", func() error {
-		return repository.saveTransaction(ctx, record, specification)
+	err := retryTransaction(ctx, "persist_detail", func() error {
+		return wrapDatabaseError(repository.saveTransaction(ctx, record, specification),
+			"persist_detail", "replace_detail_snapshot", specification.table, 0, 0)
 	})
+	return wrapDatabaseError(err, "persist_detail", "replace_detail_snapshot", specification.table, 0, 0)
 }
 
 func (repository *DetailRepository) saveTransaction(ctx context.Context, record ingestion.DetailRecord, specification detailSpec) error {
@@ -146,7 +148,7 @@ func (repository *DetailRepository) saveTransaction(ctx context.Context, record 
 	}
 	for _, childSpecification := range specification.children {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM `"+childSpecification.table+"` WHERE as_of_date = ? AND account_no = ?", record.AsOfDate.String(), record.Identifier); err != nil {
-			return fmt.Errorf("delete %s children: %w", childSpecification.table, err)
+			return wrapDatabaseError(fmt.Errorf("delete %s children: %w", childSpecification.table, err), "persist_detail", "delete_child_rows", childSpecification.table, 0, 0)
 		}
 		childColumns := []string{"as_of_date", "account_no", "item_index"}
 		for _, field := range childSpecification.fields {
@@ -208,7 +210,7 @@ func upsertDetailParent(ctx context.Context, tx *sqlx.Tx, table string, columns 
 	}
 	query := "INSERT INTO " + quotedTable + " (" + strings.Join(quoted, ",") + ") VALUES (" + strings.TrimSuffix(strings.Repeat("?,", len(columns)), ",") + ") ON DUPLICATE KEY UPDATE " + strings.Join(updates, ",")
 	if _, err := tx.ExecContext(ctx, query, values...); err != nil {
-		return fmt.Errorf("upsert %s: %w", table, err)
+		return wrapDatabaseError(fmt.Errorf("upsert %s: %w", table, err), "persist_detail", "upsert_detail_parent", table, 1, 1)
 	}
 	return nil
 }

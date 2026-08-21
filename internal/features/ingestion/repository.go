@@ -16,6 +16,8 @@ const runColumns = `r.id,r.kind,r.parent_run_id,r.child_position,r.job_key,r.sta
 	r.progress_total,r.progress_started,r.progress_succeeded,r.progress_failed,r.rows_processed,r.current_step,
 	r.error_class,r.error_message,r.error_step,r.created_at,r.started_at,r.finished_at`
 
+const runDetailColumns = runColumns + `,r.mapper_diagnostics`
+
 type Repository struct{ db *sqlx.DB }
 
 func NewRepository(db *sqlx.DB) *Repository { return &Repository{db: db} }
@@ -50,7 +52,7 @@ func runWhere(filter RunFilter) (string, []any) {
 
 func (repository *Repository) FindRun(ctx context.Context, id uint64) (runRow, error) {
 	var row runRow
-	err := repository.db.GetContext(ctx, &row, `SELECT `+runColumns+` FROM ingestion_runs r LEFT JOIN users u ON u.id=r.requested_by_user_id WHERE r.id=?`, id)
+	err := repository.db.GetContext(ctx, &row, `SELECT `+runDetailColumns+` FROM ingestion_runs r LEFT JOIN users u ON u.id=r.requested_by_user_id WHERE r.id=?`, id)
 	return row, err
 }
 

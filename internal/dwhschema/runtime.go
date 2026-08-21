@@ -13,10 +13,10 @@ var ApplicationVersions = []int64{
 	202608090005, 202608090006, 202608090007,
 	20260813033006, 20260813033031, 20260813033039, 20260813033045,
 	20260813033056, 20260813084201, 20260814025546, 20260814042806,
-	20260814161323,
+	20260814161323, 20260821120000,
 }
 
-const CurrentVersion int64 = 20260814161323
+const CurrentVersion int64 = 20260821120000
 
 type MigrationRecord struct {
 	Version int64 `db:"version_id"`
@@ -145,6 +145,16 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, table); err != nil || count != 1 {
 			return fmt.Errorf("required runtime table %s is missing", table)
 		}
+	}
+	var diagnosticsIndex int
+	if err := db.GetContext(ctx, &diagnosticsIndex, `SELECT COUNT(*) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ingestion_run_errors' AND INDEX_NAME='idx_ingestion_run_errors_run_time'`); err != nil || diagnosticsIndex == 0 {
+		return fmt.Errorf("required runtime diagnostic index ingestion_run_errors.idx_ingestion_run_errors_run_time is missing")
+	}
+	var diagnosticDeleteRule string
+	if err := db.GetContext(ctx, &diagnosticDeleteRule, `SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
+		WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='fk_ingestion_run_errors_run'`); err != nil || diagnosticDeleteRule != "CASCADE" {
+		return fmt.Errorf("required runtime diagnostic run cascade is missing")
 	}
 	return nil
 }

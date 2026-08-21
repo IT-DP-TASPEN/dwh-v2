@@ -33,6 +33,7 @@ var EmptyBeforeAdoption = []string{
 	"fixed_report_publications", "fixed_report_load_members", "fixed_report_loads",
 	"maintenance_csv_ingestions", "run_log_events", "ingestion_row_errors", "ingestion_run_steps",
 	"schedule_attempts", "schedule_occurrences", "schedule_executions", "ingestion_run_items", "ingestion_runs", "schedules",
+	"ingestion_run_errors",
 }
 
 type MigrationGroup struct {
@@ -41,6 +42,7 @@ type MigrationGroup struct {
 }
 
 var AdoptionMigrationGroups = []MigrationGroup{
+	{"create_ingestion_run_errors.sql", []string{"ingestion_run_errors"}},
 	{"create_ingestion_scheduler.sql", []string{"schedule_attempts", "schedule_occurrences", "schedule_executions", "schedules"}},
 	{"create_ingestion_execution_runtime.sql", []string{
 		"maintenance_csv_ingestions", "run_log_events", "ingestion_row_errors", "ingestion_run_steps",

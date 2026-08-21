@@ -3,9 +3,9 @@ package ingestionstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math/rand/v2"
 	"regexp"
 	"strings"
@@ -14,12 +14,98 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/shopspring/decimal"
+
+	"github.com/ibldzn/go-admin/internal/ingestiondiag"
+	"github.com/ibldzn/go-admin/internal/ingestionrun"
 )
 
 const maxInsertParameters = 60000
 const maxInsertBytes = 4 << 20
 
 var safeIdentifier = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+
+type DatabaseError struct {
+	Operation, QueryName, Table string
+	BatchStart, BatchEnd        int
+	Attempt, MaxAttempts        int
+	Cause                       error
+}
+
+func (err *DatabaseError) Error() string {
+	if err == nil || err.Cause == nil {
+		return "database operation failed"
+	}
+	return err.Cause.Error()
+}
+
+func (err *DatabaseError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Cause
+}
+
+type DatabaseDiagnostic struct {
+	Operation   string `json:"operation,omitempty"`
+	QueryName   string `json:"query_name,omitempty"`
+	Table       string `json:"table,omitempty"`
+	BatchStart  int    `json:"batch_start,omitempty"`
+	BatchEnd    int    `json:"batch_end,omitempty"`
+	TxAttempt   int    `json:"tx_attempt,omitempty"`
+	MaxAttempts int    `json:"max_attempts,omitempty"`
+	MySQLNumber uint16 `json:"mysql_number,omitempty"`
+	SQLState    string `json:"sqlstate,omitempty"`
+	Message     string `json:"message,omitempty"`
+}
+
+func TechnicalDiagnostic(err error) DatabaseDiagnostic {
+	var result DatabaseDiagnostic
+	var databaseError *DatabaseError
+	if errors.As(err, &databaseError) {
+		result = DatabaseDiagnostic{Operation: databaseError.Operation, QueryName: databaseError.QueryName, Table: databaseError.Table,
+			BatchStart: databaseError.BatchStart, BatchEnd: databaseError.BatchEnd, TxAttempt: databaseError.Attempt, MaxAttempts: databaseError.MaxAttempts}
+	}
+	var mysqlError *mysql.MySQLError
+	if errors.As(err, &mysqlError) {
+		result.MySQLNumber, result.Message = mysqlError.Number, mysqlError.Message
+		if mysqlError.SQLState != [5]byte{} {
+			result.SQLState = string(mysqlError.SQLState[:])
+		}
+	}
+	return result
+}
+
+func wrapDatabaseError(err error, operation, queryName, table string, start, end int) error {
+	if err == nil {
+		return nil
+	}
+	var existing *DatabaseError
+	if errors.As(err, &existing) {
+		copy := *existing
+		if copy.Operation == "" {
+			copy.Operation = operation
+		}
+		if copy.QueryName == "" {
+			copy.QueryName = queryName
+		}
+		if copy.Table == "" {
+			copy.Table = table
+		}
+		return &copy
+	}
+	return &DatabaseError{Operation: operation, QueryName: queryName, Table: table, BatchStart: start, BatchEnd: end, Cause: err}
+}
+
+func withDatabaseAttempt(err error, operation string, attempt, maximum int) error {
+	err = wrapDatabaseError(err, operation, operation, "", 0, 0)
+	var databaseError *DatabaseError
+	if !errors.As(err, &databaseError) {
+		return err
+	}
+	copy := *databaseError
+	copy.Attempt, copy.MaxAttempts = attempt, maximum
+	return &copy
+}
 
 func quoteIdentifier(value string) (string, error) {
 	if len(value) == 0 || len(value) > 64 || !safeIdentifier.MatchString(value) {
@@ -95,7 +181,7 @@ func insertRows(ctx context.Context, tx contextExecer, table string, columns []s
 		}
 		query := "INSERT INTO " + quotedTable + " (" + strings.Join(quotedColumns, ",") + ") VALUES " + strings.Join(placeholders, ",")
 		if _, err := tx.ExecContext(ctx, query, arguments...); err != nil {
-			return fmt.Errorf("insert %s rows %d-%d: %w", table, start+1, end, err)
+			return wrapDatabaseError(fmt.Errorf("insert %s rows %d-%d: %w", table, start+1, end, err), "", "insert_rows", table, start+1, end)
 		}
 		start = end
 	}
@@ -136,6 +222,7 @@ func lockRow(ctx context.Context, tx *sqlx.Tx, query string, args ...any) error 
 
 func retryTransaction(ctx context.Context, operation string, transaction func() error) error {
 	const maxAttempts = 3
+	var lastDeadlock error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -143,14 +230,16 @@ func retryTransaction(ctx context.Context, operation string, transaction func() 
 		err := transaction()
 		if err == nil {
 			if attempt > 1 {
-				slog.InfoContext(ctx, "database transaction recovered", "operation", operation, "attempts", attempt)
+				recordRetry(ctx, "info", "recovery", operation, withDatabaseAttempt(lastDeadlock, operation, attempt-1, maxAttempts), attempt, true)
 			}
 			return nil
 		}
+		err = withDatabaseAttempt(err, operation, attempt, maxAttempts)
 		if !isMySQLDeadlock(err) || attempt == maxAttempts {
 			return err
 		}
-		slog.WarnContext(ctx, "retrying database transaction", "operation", operation, "attempt", attempt, "mysql_error", 1213)
+		lastDeadlock = err
+		recordRetry(ctx, "warning", "retry", operation, err, attempt, false)
 		delay := time.Duration(attempt*25+rand.IntN(26)) * time.Millisecond
 		timer := time.NewTimer(delay)
 		select {
@@ -161,6 +250,27 @@ func retryTransaction(ctx context.Context, operation string, transaction func() 
 		}
 	}
 	panic("unreachable")
+}
+
+func recordRetry(ctx context.Context, severity, kind, operation string, err error, attempt int, recovered bool) {
+	diagnostic := TechnicalDiagnostic(err)
+	diagnostic.TxAttempt = attempt
+	details, _ := json.Marshal(map[string]any{"database": diagnostic})
+	event := ingestiondiag.Event(ctx)
+	event.Severity, event.EventKind, event.Class, event.Operation = severity, kind, "persistence", operation
+	if event.Step == "" {
+		event.Step = operation
+	}
+	event.Attempt = uint16(attempt)
+	event.ErrorType = fmt.Sprintf("%T", errors.Unwrap(err))
+	event.ErrorMessage = diagnostic.Message
+	event.AggregationScope = "persistence_retry"
+	event.AggregationKey = ingestionrun.TechnicalFingerprint(operation, diagnostic.Table, fmt.Sprint(diagnostic.MySQLNumber), diagnostic.SQLState, fmt.Sprint(attempt), kind, fmt.Sprint(recovered))
+	event.Details = details
+	if kind == "recovery" {
+		event.Recovered = &recovered
+	}
+	ingestiondiag.Record(ctx, event, true)
 }
 
 func isMySQLDeadlock(err error) bool {

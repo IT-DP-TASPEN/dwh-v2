@@ -286,6 +286,35 @@ type FixedCSVRow struct {
 	Values            map[string]string
 }
 
+type FixedHeaderError struct {
+	Report, Kind, Expected, ReceivedRaw, ReceivedNormalized string
+	Column                                                  int
+	cause                                                   error
+}
+
+func (err *FixedHeaderError) Error() string {
+	if err == nil {
+		return "fixed CSV header mismatch"
+	}
+	switch err.Kind {
+	case "missing":
+		return fmt.Sprintf("%s: missing required CSV header %q", err.Report, err.Expected)
+	case "duplicate":
+		return fmt.Sprintf("%s: duplicate CSV header %q", err.Report, err.ReceivedNormalized)
+	case "normalization_collision":
+		return fmt.Sprintf("%s: CSV header normalization collision at column %d", err.Report, err.Column)
+	default:
+		return fmt.Sprintf("%s: unexpected CSV header %q", err.Report, err.ReceivedNormalized)
+	}
+}
+
+func (err *FixedHeaderError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.cause
+}
+
 func ParseFixedCSV(ctx context.Context, definition FixedDefinition, sourceLocationID, content string) ([]FixedCSVRow, error) {
 	reader := csv.NewReader(strings.NewReader(strings.TrimPrefix(content, "\uFEFF")))
 	reader.Comma = '|'
@@ -296,10 +325,11 @@ func ParseFixedCSV(ctx context.Context, definition FixedDefinition, sourceLocati
 	if err != nil {
 		return nil, fmt.Errorf("%s: read header: %w", definition.Key, err)
 	}
+	rawHeaders := append([]string(nil), headers...)
 	for index := range headers {
-		headers[index] = strings.TrimSpace(headers[index])
+		headers[index] = strings.TrimSpace(rawHeaders[index])
 	}
-	if err := validateFixedHeaders(definition, headers); err != nil {
+	if err := validateFixedHeaders(definition, rawHeaders, headers); err != nil {
 		return nil, err
 	}
 	var rows []FixedCSVRow
@@ -336,29 +366,36 @@ func ParseFixedCSV(ctx context.Context, definition FixedDefinition, sourceLocati
 	return rows, nil
 }
 
-func validateFixedHeaders(definition FixedDefinition, headers []string) error {
+func validateFixedHeaders(definition FixedDefinition, rawHeaders, headers []string) error {
 	expected := make(map[string]struct{}, len(definition.RequiredHeaders))
 	for _, header := range definition.RequiredHeaders {
 		expected[header] = struct{}{}
 	}
 	seen, normalized := map[string]struct{}{}, map[string]string{}
-	for _, header := range headers {
+	for index, header := range headers {
+		expectedHeader := ""
+		if index < len(definition.RequiredHeaders) {
+			expectedHeader = definition.RequiredHeaders[index]
+		}
 		if _, duplicate := seen[header]; duplicate {
-			return fmt.Errorf("%s: duplicate CSV header %q", definition.Key, header)
+			return &FixedHeaderError{Report: definition.Key, Kind: "duplicate", Column: index + 1, Expected: expectedHeader,
+				ReceivedRaw: rawHeaders[index], ReceivedNormalized: header}
 		}
 		seen[header] = struct{}{}
 		column := toSnakeCase(header)
 		if previous, collision := normalized[column]; collision {
-			return fmt.Errorf("%s: CSV headers %q and %q normalize to duplicate column %q", definition.Key, previous, header, column)
+			return &FixedHeaderError{Report: definition.Key, Kind: "normalization_collision", Column: index + 1, Expected: previous,
+				ReceivedRaw: rawHeaders[index], ReceivedNormalized: header, cause: fmt.Errorf("normalized column %s", column)}
 		}
 		normalized[column] = header
 		if _, allowed := expected[header]; !allowed {
-			return fmt.Errorf("%s: unexpected CSV header %q", definition.Key, header)
+			return &FixedHeaderError{Report: definition.Key, Kind: "unexpected", Column: index + 1, Expected: expectedHeader,
+				ReceivedRaw: rawHeaders[index], ReceivedNormalized: header}
 		}
 	}
-	for _, header := range definition.RequiredHeaders {
+	for index, header := range definition.RequiredHeaders {
 		if _, found := seen[header]; !found {
-			return fmt.Errorf("%s: missing required CSV header %q", definition.Key, header)
+			return &FixedHeaderError{Report: definition.Key, Kind: "missing", Column: index + 1, Expected: header}
 		}
 	}
 	return nil

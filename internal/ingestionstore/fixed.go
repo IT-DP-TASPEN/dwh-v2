@@ -53,9 +53,9 @@ func (repository *FixedRepository) BeginLoad(ctx context.Context, ingestionRunID
 	err = retryTransaction(ctx, "begin_fixed_load", func() error {
 		var transactionErr error
 		loadID, transactionErr = repository.beginLoadTransaction(ctx, ingestionRunID, plan, manifest)
-		return transactionErr
+		return wrapDatabaseError(transactionErr, "begin_fixed_load", "create_fixed_load", "fixed_report_loads", 0, 0)
 	})
-	return loadID, err
+	return loadID, wrapDatabaseError(err, "begin_fixed_load", "create_fixed_load", "fixed_report_loads", 0, 0)
 }
 
 func (repository *FixedRepository) beginLoadTransaction(ctx context.Context, ingestionRunID uint64, plan ingestion.FixedPlan, manifest [32]byte) (uint64, error) {
@@ -100,9 +100,11 @@ func (repository *FixedRepository) StageMember(ctx context.Context, definition i
 	if loadID == 0 || descriptor.MemberKey == "" || len(segments) == 0 {
 		return fmt.Errorf("load, member, and at least one source segment are required")
 	}
-	return retryTransaction(ctx, "stage_fixed_member", func() error {
-		return repository.stageMemberTransaction(ctx, specification, definition, loadID, descriptor, segments)
+	err = retryTransaction(ctx, "stage_fixed_member", func() error {
+		return wrapDatabaseError(repository.stageMemberTransaction(ctx, specification, definition, loadID, descriptor, segments),
+			"stage_fixed_member", "insert_staging_rows", specification.stagingTable, 0, 0)
 	})
+	return wrapDatabaseError(err, "stage_fixed_member", "insert_staging_rows", specification.stagingTable, 0, 0)
 }
 
 func (repository *FixedRepository) stageMemberTransaction(ctx context.Context, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segments []FixedSegment) error {
@@ -202,9 +204,11 @@ func (repository *FixedRepository) Promote(ctx context.Context, definition inges
 	if err != nil {
 		return err
 	}
-	return retryTransaction(ctx, "promote_fixed_load", func() error {
-		return repository.promoteTransaction(ctx, specification, definition, loadID)
+	err = retryTransaction(ctx, "promote_fixed_load", func() error {
+		return wrapDatabaseError(repository.promoteTransaction(ctx, specification, definition, loadID),
+			"promote_fixed_load", "promote_fixed_load", specification.finalTable, 0, 0)
 	})
+	return wrapDatabaseError(err, "promote_fixed_load", "promote_fixed_load", specification.finalTable, 0, 0)
 }
 
 func (repository *FixedRepository) promoteTransaction(ctx context.Context, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64) error {

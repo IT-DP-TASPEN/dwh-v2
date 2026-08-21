@@ -39,6 +39,26 @@ func TestRunReadModelsPaginationAndPlans(t *testing.T) {
 		}
 	})
 	service, _ := NewService(NewRepository(db))
+	catalog, _ := core.NewCatalog()
+	runs, _ := ingestionrun.NewRepository(db, catalog)
+	technicalBase := time.Now().UTC().Add(-time.Minute)
+	for index, body := range []string{"first source response", "second source response"} {
+		details := fmt.Sprintf(`{"source":{"response":{"body":{"body_encoding":"utf8","body":%q}}}}`, body)
+		event := ingestionrun.TechnicalEvent{RunID: ids[0], OccurredAt: technicalBase.Add(time.Duration(index) * time.Millisecond), Severity: "error",
+			EventKind: "failure", Terminal: index == 1, Class: "source", Step: "download_report", Operation: "download_report",
+			JobKey: "cif_opening_report", ErrorType: "*fincloud.Error", ErrorMessage: body, Details: []byte(details)}
+		if err := runs.AppendTechnicalEvent(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	technicalDetail, err := service.FindRun(context.Background(), ids[0])
+	if err != nil || len(technicalDetail.TechnicalErrors) != 2 || technicalDetail.TechnicalErrors[0].Body != "first source response" || technicalDetail.TechnicalErrors[1].BodyEncoding != "utf8" {
+		t.Fatalf("technical detail=%+v error=%v", technicalDetail.TechnicalErrors, err)
+	}
+	oldDetail, err := service.FindRun(context.Background(), ids[1])
+	if err != nil || len(oldDetail.TechnicalErrors) != 0 {
+		t.Fatalf("old run diagnostics=%+v error=%v", oldDetail.TechnicalErrors, err)
+	}
 	page, err := service.ListRuns(context.Background(), RunFilter{Job: "cif_opening_report"}, 1)
 	if err != nil || len(page.Rows) != 50 || page.Pagination.Total < 60 || page.Rows[0].ID <= page.Rows[49].ID {
 		t.Fatalf("page=%+v rows=%d error=%v", page.Pagination, len(page.Rows), err)
@@ -55,8 +75,6 @@ func TestRunReadModelsPaginationAndPlans(t *testing.T) {
 	if err != nil || sources.Enabled+sources.Disabled != 36 {
 		t.Fatalf("canonical source overview=%+v error=%v", sources, err)
 	}
-	catalog, _ := core.NewCatalog()
-	runs, _ := ingestionrun.NewRepository(db, catalog)
 	parentID, err := runs.CreateRunAll(context.Background(), from, from, 3, ingestionrun.TriggerDirect, "phase6-read-run-all", nil)
 	if err != nil {
 		t.Fatal(err)
