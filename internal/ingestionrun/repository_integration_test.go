@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +115,80 @@ func TestMySQLCanonicalParametersAndAllRunAllChildren(t *testing.T) {
 	parent, err := repository.Get(context.Background(), parentID)
 	if err != nil || parent.Status != StatusCompleted {
 		t.Fatalf("Run All parent=%+v error=%v", parent, err)
+	}
+}
+
+func TestTransactionalSuccessfulFinishMatchesCanonicalFinish(t *testing.T) {
+	db := integrationdb.Open(t)
+	catalog, _ := ingestion.NewCatalog()
+	repository, err := NewRepository(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := strings.Repeat("f", 64)
+	heartbeat := time.Date(2026, 8, 22, 1, 2, 3, 456000000, time.UTC)
+	insert := func(job string) uint64 {
+		result, err := db.Exec(`INSERT INTO ingestion_runs
+			(kind,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,skip_reason,
+			 owner_id,claimed_at,heartbeat_at,snapshot_date,progress_total,progress_started,progress_succeeded,progress_failed,
+			 rows_processed,current_step,error_class,error_message,error_step,mapper_diagnostics,abandoned_previous_owner,
+			 abandoned_previous_heartbeat,started_at)
+			VALUES ('job',?,'running','detail_live_snapshot_v1',1,JSON_OBJECT(),UNHEX(REPEAT('00',32)),'direct','preserve-me',
+			 ?,?,?,?,5,5,5,0,9,'publish_detail','old','old','old',JSON_OBJECT('total_count',0,'overflow_count',0,'groups',JSON_ARRAY()),
+			 'previous-owner',?,?)`, job, owner, heartbeat, heartbeat, "2026-08-22", heartbeat, heartbeat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := result.LastInsertId()
+		t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, id) })
+		return uint64(id)
+	}
+	ordinaryID, transactionalID := insert("cif_detail"), insert("saving_detail")
+	if err := repository.Finish(context.Background(), ordinaryID, owner, StatusSucceeded, SafeError{}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTxx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FinishSucceededInTx(context.Background(), tx, transactionalID, owner); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Finish(context.Background(), transactionalID, owner, StatusSucceeded, SafeError{}); !errors.Is(err, ErrTransition) {
+		t.Fatalf("redundant Finish error=%v", err)
+	}
+	if err := repository.RecoverAbandoned(context.Background(), transactionalID, owner, heartbeat, "late recovery", securityctx.Requester{}); !errors.Is(err, ErrTransition) {
+		t.Fatalf("late recovery error=%v", err)
+	}
+	if err := repository.RequestCancellation(context.Background(), transactionalID, "late cancellation", securityctx.Requester{}); err != nil {
+		t.Fatal(err)
+	}
+	type terminalState struct {
+		Status, Owner, Snapshot, Step, SkipReason, PreviousOwner, Mapper string
+		Heartbeat, PreviousHeartbeat                                     time.Time
+		Total, Started, Succeeded, Failed, Rows                          uint64
+		ErrorsCleared, Finished, CancelRequested                         bool
+	}
+	read := func(id uint64) terminalState {
+		var state terminalState
+		if err := db.QueryRowx(`SELECT status,owner_id,heartbeat_at,DATE_FORMAT(snapshot_date,'%Y-%m-%d'),current_step,skip_reason,
+			abandoned_previous_owner,abandoned_previous_heartbeat,CAST(mapper_diagnostics AS CHAR),
+			progress_total,progress_started,progress_succeeded,progress_failed,rows_processed,
+			error_class IS NULL AND error_message IS NULL AND error_step IS NULL,finished_at IS NOT NULL,cancel_requested_at IS NOT NULL
+			FROM ingestion_runs WHERE id=?`, id).Scan(&state.Status, &state.Owner, &state.Heartbeat, &state.Snapshot, &state.Step,
+			&state.SkipReason, &state.PreviousOwner, &state.PreviousHeartbeat, &state.Mapper, &state.Total, &state.Started,
+			&state.Succeeded, &state.Failed, &state.Rows, &state.ErrorsCleared, &state.Finished, &state.CancelRequested); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	ordinary, transactional := read(ordinaryID), read(transactionalID)
+	if !reflect.DeepEqual(ordinary, transactional) || ordinary.Status != string(StatusSucceeded) || !ordinary.ErrorsCleared || !ordinary.Finished || ordinary.CancelRequested {
+		t.Fatalf("ordinary=%+v transactional=%+v", ordinary, transactional)
 	}
 }
 

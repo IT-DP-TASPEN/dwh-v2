@@ -17,6 +17,7 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
+	"github.com/ibldzn/go-admin/internal/ingestionstore"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 )
 
@@ -97,6 +98,59 @@ func TestNoDateCoalescesAndAdvancesFromSuccessfulFinish(t *testing.T) {
 	var mode string
 	if err := db.Get(&mode, `SELECT resolution_mode FROM schedule_occurrences WHERE schedule_id=?`, schedule.ID); err != nil || mode != "live_coalesced" {
 		t.Fatalf("resolution mode=%q error=%v", mode, err)
+	}
+}
+
+func TestDetailPublicationCrashBeforeSchedulerResolutionAdvancesOnce(t *testing.T) {
+	db, service := integrationService(t)
+	due := time.Date(2026, 8, 1, 1, 0, 0, 0, time.UTC)
+	schedule := createDueSchedule(t, db, service, "detail-publication-crash", "saving_detail", due)
+	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("submit changed=%v error=%v", changed, err)
+	}
+	attempt := latestAttempt(t, db, schedule.ID)
+	catalog, _ := ingestion.NewCatalog()
+	runs, _ := ingestionrun.NewRepository(db, catalog)
+	owner, _ := ingestionrun.NewOwnerID()
+	run, err := runs.Claim(context.Background(), owner)
+	if err != nil || run == nil || run.ID != attempt.RunID {
+		t.Fatalf("claimed run=%+v error=%v", run, err)
+	}
+	progress := ingestionrun.Progress{Total: 1, Started: 1, Succeeded: 1, Rows: 1, Step: "publish_detail"}
+	if err := runs.UpdateProgress(context.Background(), run.ID, owner, progress, nil); err != nil {
+		t.Fatal(err)
+	}
+	record, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailSaving,
+		[]byte(`{"norekening":"SCHEDULER-CRASH","nocif":"CIF","saldoawal":"1","saldoakhir":"1"}`), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	details := ingestionstore.NewDetailRepository(db)
+	if err := details.Stage(context.Background(), run.ID, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := details.Publish(context.Background(), run.ID, owner, ingestion.DetailSaving, 1); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM fincloud_saving_details WHERE account_no='SCHEDULER-CRASH'`) })
+	clearThrottle(t, db, schedule.ID)
+	restarted := newIntegrationService(t, db)
+	if changed, err := restarted.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("restart resolution changed=%v error=%v", changed, err)
+	}
+	var occurrenceStatus string
+	if err := db.Get(&occurrenceStatus, `SELECT status FROM schedule_occurrences WHERE id=?`, attempt.OccurrenceID); err != nil || occurrenceStatus != "resolved" {
+		t.Fatalf("occurrence status=%q error=%v", occurrenceStatus, err)
+	}
+	var attempts, linkedRuns int
+	if err := db.Get(&attempts, `SELECT COUNT(*) FROM schedule_attempts WHERE occurrence_id=?`, attempt.OccurrenceID); err != nil || attempts != 1 {
+		t.Fatalf("attempts=%d error=%v", attempts, err)
+	}
+	if err := db.Get(&linkedRuns, `SELECT COUNT(*) FROM ingestion_runs WHERE id=? AND status='succeeded'`, attempt.RunID); err != nil || linkedRuns != 1 {
+		t.Fatalf("linked succeeded runs=%d error=%v", linkedRuns, err)
+	}
+	if changed, err := restarted.process(context.Background(), schedule.ID); err != nil || changed {
+		t.Fatalf("repeated resolution changed=%v error=%v", changed, err)
 	}
 }
 

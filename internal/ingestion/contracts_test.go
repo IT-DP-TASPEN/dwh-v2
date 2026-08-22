@@ -270,18 +270,17 @@ func TestFixedRequestPositionalLayouts(t *testing.T) {
 }
 
 func TestDetailMapperPreservesRawPayloadSnapshotAndChildren(t *testing.T) {
-	asOf, _ := ParseCalendarDate("2026-08-12")
 	fetched := time.Date(2026, 8, 12, 8, 9, 10, 123456000, time.UTC)
 	raw := json.RawMessage(` { "id":"LN-1", "nocif":"CIF-1", "outstandingpinjaman":"1234567890.123456", "biayapencairan":[{"namabiaya":"x","jumlah_biaya":"1.25"}], "jadwalangsuran":[{"angsuranke":1}], "historybayar":[{"angsuranke":"1"}] } `)
-	record, err := MapDetailPayload(context.Background(), DetailLoan, raw, asOf, fetched)
+	record, err := MapDetailPayload(context.Background(), DetailLoan, raw, fetched)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Identifier != "LN-1" || record.AsOfDate.String() != "2026-08-12" || !record.LastFetchedAt.Equal(fetched) || record.RawChecksum == "" || len(record.Children) != 3 {
+	if record.Identifier != "LN-1" || !record.LastFetchedAt.Equal(fetched) || record.RawChecksum == "" || len(record.Children) != 3 {
 		t.Fatalf("record = %+v", record)
 	}
 	for name, children := range record.Children {
-		if len(children) != 1 || children[0].Identifier != "LN-1" || children[0].AsOfDate != asOf || children[0].ItemIndex != 0 || children[0].RawItemChecksum == "" {
+		if len(children) != 1 || children[0].Identifier != "LN-1" || children[0].ItemIndex != 0 || children[0].RawItemChecksum == "" {
 			t.Fatalf("%s children = %+v", name, children)
 		}
 	}
@@ -299,7 +298,6 @@ func TestDetailMapperPreservesRawPayloadSnapshotAndChildren(t *testing.T) {
 }
 
 func TestDetailMapperUsesStrictGroupedDecimalsForAllDomains(t *testing.T) {
-	date, _ := ParseCalendarDate("2026-08-12")
 	fetched := time.Date(2026, 8, 12, 8, 9, 10, 123456000, time.UTC)
 	tests := []struct {
 		name     string
@@ -321,7 +319,7 @@ func TestDetailMapperUsesStrictGroupedDecimalsForAllDomains(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			record, err := MapDetailPayload(context.Background(), test.domain, json.RawMessage(test.payload), date, fetched)
+			record, err := MapDetailPayload(context.Background(), test.domain, json.RawMessage(test.payload), fetched)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -343,7 +341,7 @@ func TestDetailMapperUsesStrictGroupedDecimalsForAllDomains(t *testing.T) {
 	}
 
 	_, err := MapDetailPayload(context.Background(), DetailSaving,
-		json.RawMessage(`{"norekening":"S-2","nocif":"C-2","saldoawal":"1","saldoakhir":"2","mutasidebit":"1,234"}`), date, fetched)
+		json.RawMessage(`{"norekening":"S-2","nocif":"C-2","saldoawal":"1","saldoakhir":"2","mutasidebit":"1,234"}`), fetched)
 	var mapper *MapperError
 	if !errors.As(err, &mapper) || mapper.Metadata().Field() != "debit_mutation" || mapper.Metadata().Category() != "decimal" || mapper.Metadata().Reason() != "invalid_value" {
 		t.Fatalf("unsafe or missing mapper metadata: %#v error=%v", mapper, err)

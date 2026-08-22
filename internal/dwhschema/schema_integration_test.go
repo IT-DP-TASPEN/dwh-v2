@@ -4,64 +4,33 @@ package dwhschema
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/pressly/goose/v3"
-
-	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 )
 
-func TestMapperDiagnosticsMigrationPreservesExistingRunsAndDetailRows(t *testing.T) {
+func TestDetailCurrentStateSchemaIdentityAndCascades(t *testing.T) {
 	db := integrationdb.Open(t)
-	ctx := context.Background()
-	parameters, _ := ingestionrun.NewLiveSnapshotExecution("saving_detail")
-	result, err := db.Exec(`INSERT INTO ingestion_runs
-		(kind,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,trigger_reference,finished_at)
-		VALUES ('job','saving_detail','succeeded',?,?,?,?, 'direct','migration-preservation',UTC_TIMESTAMP(6))`,
-		parameters.Kind, parameters.Version, parameters.JSON, parameters.Checksum[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	runID, _ := result.LastInsertId()
-	const checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	if _, err := db.Exec(`INSERT INTO fincloud_saving_details
-		(as_of_date,account_no,cif_no,beginning_balance,balance,raw_payload,raw_checksum,last_fetched_at)
-		VALUES ('2026-08-14','MIGRATION-PROBE','MIGRATION-PROBE',1,1,'{}',?,UTC_TIMESTAMP(6))`, checksum); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = db.Exec(`DELETE FROM fincloud_saving_details WHERE as_of_date='2026-08-14' AND account_no='MIGRATION-PROBE'`)
-		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, runID)
-		var column int
-		_ = db.Get(&column, `SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ingestion_runs' AND COLUMN_NAME='mapper_diagnostics'`)
-		if column == 0 {
-			_, _ = db.Exec(`ALTER TABLE ingestion_runs ADD COLUMN mapper_diagnostics JSON NULL AFTER error_step`)
+	for _, table := range []string{
+		"fincloud_cifs", "fincloud_saving_details", "fincloud_time_deposit_details", "fincloud_time_deposit_mutations",
+		"fincloud_loan_details", "fincloud_loan_disbursement_fees", "fincloud_loan_repayment_schedule", "fincloud_loan_payment_history",
+	} {
+		var dated int
+		if err := db.Get(&dated, `SELECT COUNT(*) FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME='as_of_date'`, table); err != nil || dated != 0 {
+			t.Fatalf("%s as_of_date columns=%d error=%v", table, dated, err)
 		}
-		if err := goose.SetDialect("mysql"); err == nil {
-			_ = goose.UpContext(context.Background(), db.DB, filepath.Join(integrationdb.Root(t), "migrations"))
+	}
+	for _, constraint := range []string{
+		"fk_stg_fincloud_cif_details_run", "fk_stg_fincloud_saving_details_run",
+		"fk_stg_fincloud_time_deposit_details_run", "fk_stg_fincloud_loan_details_run",
+	} {
+		var rule string
+		if err := db.Get(&rule, `SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
+			WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME=?`, constraint); err != nil || rule != "CASCADE" {
+			t.Fatalf("%s delete rule=%q error=%v", constraint, rule, err)
 		}
-	})
-	if _, err := db.Exec(`DELETE FROM goose_db_version WHERE version_id=?`, CurrentVersion); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`ALTER TABLE ingestion_runs DROP COLUMN mapper_diagnostics`); err != nil {
-		t.Fatal(err)
-	}
-	if err := goose.SetDialect("mysql"); err != nil {
-		t.Fatal(err)
-	}
-	if err := goose.UpContext(ctx, db.DB, filepath.Join(integrationdb.Root(t), "migrations")); err != nil {
-		t.Fatal(err)
-	}
-	var runCount, detailCount int
-	if err := db.Get(&runCount, `SELECT COUNT(*) FROM ingestion_runs WHERE id=?`, runID); err != nil || runCount != 1 {
-		t.Fatalf("migration did not preserve run: count=%d error=%v", runCount, err)
-	}
-	if err := db.Get(&detailCount, `SELECT COUNT(*) FROM fincloud_saving_details WHERE as_of_date='2026-08-14' AND account_no='MIGRATION-PROBE'`); err != nil || detailCount != 1 {
-		t.Fatalf("migration did not preserve detail: count=%d error=%v", detailCount, err)
 	}
 }
 

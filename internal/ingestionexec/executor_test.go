@@ -95,8 +95,8 @@ func TestDetailFatalFailuresStopPoolAndKeepLayer(t *testing.T) {
 		t.Fatalf("source result=%+v", result)
 	}
 
-	result = detailFatalFailure(context.Background(), detailLayerPersist, errors.New("database rejected snapshot"))
-	if result.Error.Class != "persistence" || result.Error.Step != "persist_detail" {
+	result = detailFatalFailure(context.Background(), detailLayerPersist, errors.New("database rejected candidate"))
+	if result.Error.Class != "persistence" || result.Error.Step != "stage_detail" {
 		t.Fatalf("business persistence result=%+v", result)
 	}
 	outcome = runDetailPool(context.Background(), []string{"one"}, 1, func(_ context.Context, _ string) detailItemResult {
@@ -110,13 +110,13 @@ func TestDetailFatalFailuresStopPoolAndKeepLayer(t *testing.T) {
 	}
 }
 
-func TestFetchAndSaveDetailMarksBusinessPersistenceFailure(t *testing.T) {
-	item := detailPersistenceFailure(errors.New("database rejected snapshot"))
+func TestFetchAndStageDetailMarksBusinessPersistenceFailure(t *testing.T) {
+	item := detailPersistenceFailure(errors.New("database rejected candidate"))
 	if item.err == nil || item.layer != detailLayerPersist {
 		t.Fatalf("business persistence failure=%+v", item)
 	}
 	result := detailFatalFailure(context.Background(), item.layer, item.err)
-	if result.Error.Class != "persistence" || result.Error.Step != "persist_detail" {
+	if result.Error.Class != "persistence" || result.Error.Step != "stage_detail" {
 		t.Fatalf("business persistence result=%+v", result)
 	}
 }
@@ -186,9 +186,8 @@ func TestFixedPoolPreservesPrimaryErrorAndJoinsWorkers(t *testing.T) {
 
 func testMapperFailure(t *testing.T) error {
 	t.Helper()
-	date, _ := ingestion.ParseCalendarDate("2026-08-14")
 	_, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailSaving,
-		json.RawMessage(`{"norekening":"SAFE","nocif":"SAFE","saldoawal":"not-a-decimal","saldoakhir":"1"}`), date, time.Now().UTC())
+		json.RawMessage(`{"norekening":"SAFE","nocif":"SAFE","saldoawal":"not-a-decimal","saldoakhir":"1"}`), time.Now().UTC())
 	var mapper *ingestion.MapperError
 	if !errors.As(err, &mapper) {
 		t.Fatalf("expected structured mapper error: %v", err)

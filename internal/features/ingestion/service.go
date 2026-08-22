@@ -218,7 +218,7 @@ func parameterFields(parameters ingestionrun.Parameters) []ParameterField {
 			return []ParameterField{{"From", value.Dates[0].String()}, {"To", value.Dates[len(value.Dates)-1].String()}, {"Dates", strconv.Itoa(len(value.Dates))}, {"Lookback days", strconv.Itoa(value.LookbackDays)}}
 		}
 	case ingestionrun.DetailLiveSnapshotV1:
-		return []ParameterField{{"Mode", "Live snapshot"}}
+		return []ParameterField{{"Mode", "Current-state synchronization"}}
 	}
 	return []ParameterField{{"Parameters", "Unavailable"}}
 }

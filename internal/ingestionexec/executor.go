@@ -286,9 +286,16 @@ func fixedFailure(ctx context.Context, result fixedMemberResult) Result {
 }
 
 func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		if err := executor.detail.CleanupRun(cleanupCtx, run.ID); err != nil {
+			executor.logger.Warn("clean Detail staging", "run_id", run.ID, "job_key", run.JobKey, "error", err)
+		}
+	}()
 	snapshotDate := jakartaSnapshotDate(executor.now())
 	if err := executor.runs.FreezeSnapshotDate(ctx, run.ID, run.OwnerID, snapshotDate); err != nil {
-		return failed("persistence", "could not freeze detail snapshot date", "snapshot_date", err)
+		return failed("persistence", "could not freeze Detail execution date", "snapshot_date", err)
 	}
 	identifiers, err := executor.enumerateDetails(ctx, job.Key, snapshotDate)
 	if err != nil {
@@ -300,7 +307,7 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 	}
 	outcome := runDetailPool(ctx, identifiers, executor.detailConcurrency,
 		func(workCtx context.Context, identifier string) detailItemResult {
-			return executor.fetchAndSaveDetail(workCtx, job.Key, identifier, snapshotDate)
+			return executor.fetchAndStageDetail(workCtx, run.ID, job.Key, identifier)
 		},
 		func(progress ingestionrun.Progress, diagnostics *ingestionrun.MapperDiagnostics) error {
 			return executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, diagnostics)
@@ -317,6 +324,26 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 	}
 	if outcome.firstLocal != nil {
 		return failed("item_data", "one or more detail identifiers failed", "map_detail", outcome.firstLocal)
+	}
+	outcome.progress.Step = "publish_detail"
+	var diagnostics *ingestionrun.MapperDiagnostics
+	if outcome.diagnostics.TotalCount > 0 {
+		diagnostics = &outcome.diagnostics
+	}
+	if err := executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, outcome.progress, diagnostics); err != nil {
+		return failed("persistence", "could not persist Detail publication progress", "persist_run_progress", err)
+	}
+	domain, err := detailDomain(job.Key)
+	if err != nil {
+		return failed("contract", "unsupported Detail job", "publish_detail", err)
+	}
+	publishCtx := diagnosticScope(ctx, "persistence", "publish_detail", "publish_"+job.Key, "", "")
+	if err := executor.detail.Publish(publishCtx, run.ID, run.OwnerID, domain, outcome.progress.Total); err != nil {
+		if result, cancelled := cancellationFailure(ctx, "publish_detail", err); cancelled {
+			return result
+		}
+		recordPersistenceDiagnostic(publishCtx, err, true)
+		return failed("persistence", "Detail current-state publication failed", "publish_detail", err)
 	}
 	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
 }
@@ -435,7 +462,7 @@ func detailFatalFailure(ctx context.Context, layer detailLayer, err error) Resul
 	case detailLayerFetch:
 		step = "fetch_detail"
 	case detailLayerPersist:
-		step = "persist_detail"
+		step = "stage_detail"
 	case detailLayerRunProgress:
 		step = "persist_run_progress"
 	}
@@ -446,7 +473,7 @@ func detailFatalFailure(ctx context.Context, layer detailLayer, err error) Resul
 	case detailLayerFetch:
 		return sourceFailure(ctx, err, step)
 	case detailLayerPersist:
-		return failed("persistence", "detail snapshot persistence failed", step, err)
+		return failed("persistence", "Detail candidate staging failed", step, err)
 	case detailLayerRunProgress:
 		return failed("persistence", "could not persist detail run progress", step, err)
 	default:
@@ -469,7 +496,7 @@ func (executor *Executor) enumerateDetails(ctx context.Context, jobKey string, s
 	}
 }
 
-func (executor *Executor) fetchAndSaveDetail(ctx context.Context, jobKey, identifier string, snapshotDate ingestion.CalendarDate) detailItemResult {
+func (executor *Executor) fetchAndStageDetail(ctx context.Context, runID uint64, jobKey, identifier string) detailItemResult {
 	fetchedAt := executor.now().UTC()
 	var record ingestion.DetailRecord
 	var err error
@@ -479,40 +506,31 @@ func (executor *Executor) fetchAndSaveDetail(ctx context.Context, jobKey, identi
 		if fetchErr != nil {
 			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
 		}
-		record, err = ingestion.MapCIFDetail(ctx, value, snapshotDate, fetchedAt)
+		record, err = ingestion.MapCIFDetail(ctx, value, fetchedAt)
 	case "saving_detail":
 		value, fetchErr := executor.client.FetchSavingDetail(ctx, identifier)
 		if fetchErr != nil {
 			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
 		}
-		record, err = ingestion.MapSavingDetail(ctx, value, snapshotDate, fetchedAt)
+		record, err = ingestion.MapSavingDetail(ctx, value, fetchedAt)
 	case "time_deposit_detail":
 		value, fetchErr := executor.client.FetchTimeDepositDetail(ctx, identifier)
 		if fetchErr != nil {
 			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
 		}
-		record, err = ingestion.MapTimeDepositDetail(ctx, value, snapshotDate, fetchedAt)
+		record, err = ingestion.MapTimeDepositDetail(ctx, value, fetchedAt)
 	case "loan_detail":
 		value, fetchErr := executor.client.FetchLoanDetail(ctx, identifier)
 		if fetchErr != nil {
 			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
 		}
-		record, err = ingestion.MapLoanDetail(ctx, value, snapshotDate, fetchedAt)
+		record, err = ingestion.MapLoanDetail(ctx, value, fetchedAt)
 	}
 	if err != nil {
 		return detailItemResult{layer: detailLayerMap, identifier: identifier, err: err}
 	}
-	persistCtx := diagnosticScope(ctx, "persistence", "persist_detail", "persist_"+jobKey, identifier, "")
-	switch jobKey {
-	case "cif_detail":
-		err = executor.detail.SaveCIFSnapshot(persistCtx, record)
-	case "saving_detail":
-		err = executor.detail.SaveSavingSnapshot(persistCtx, record)
-	case "time_deposit_detail":
-		err = executor.detail.SaveTimeDepositSnapshot(persistCtx, record)
-	case "loan_detail":
-		err = executor.detail.SaveLoanSnapshot(persistCtx, record)
-	}
+	persistCtx := diagnosticScope(ctx, "persistence", "stage_detail", "stage_"+jobKey, identifier, "")
+	err = executor.detail.Stage(persistCtx, runID, record)
 	if err != nil {
 		result := detailPersistenceFailure(err)
 		result.identifier = identifier
@@ -523,6 +541,21 @@ func (executor *Executor) fetchAndSaveDetail(ctx context.Context, jobKey, identi
 		rows += uint64(len(children))
 	}
 	return detailItemResult{rows: rows, identifier: identifier}
+}
+
+func detailDomain(jobKey string) (ingestion.DetailDomain, error) {
+	switch jobKey {
+	case "cif_detail":
+		return ingestion.DetailCIF, nil
+	case "saving_detail":
+		return ingestion.DetailSaving, nil
+	case "time_deposit_detail":
+		return ingestion.DetailTimeDeposit, nil
+	case "loan_detail":
+		return ingestion.DetailLoan, nil
+	default:
+		return "", fmt.Errorf("unsupported Detail job %q", jobKey)
+	}
 }
 
 func detailPersistenceFailure(err error) detailItemResult {

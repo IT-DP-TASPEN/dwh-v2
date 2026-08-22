@@ -88,8 +88,7 @@ func savingMapperError(t *testing.T, beginning, balance string) *ingestion.Mappe
 	if err != nil {
 		t.Fatal(err)
 	}
-	date, _ := ingestion.ParseCalendarDate("2026-08-14")
-	_, err = ingestion.MapDetailPayload(context.Background(), ingestion.DetailSaving, payload, date, time.Now().UTC())
+	_, err = ingestion.MapDetailPayload(context.Background(), ingestion.DetailSaving, payload, time.Now().UTC())
 	var mapper *ingestion.MapperError
 	if !errors.As(err, &mapper) {
 		t.Fatalf("error is not a structured mapper error: %v", err)

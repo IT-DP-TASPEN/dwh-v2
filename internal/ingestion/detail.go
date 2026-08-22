@@ -107,7 +107,6 @@ func mapperError(field, category, reason, message string, cause error) error {
 type DetailRecord struct {
 	Domain        DetailDomain
 	Identifier    string
-	AsOfDate      CalendarDate
 	LastFetchedAt time.Time
 	Fields        map[string]any
 	RawPayload    json.RawMessage
@@ -117,45 +116,41 @@ type DetailRecord struct {
 
 type DetailChildRecord struct {
 	Identifier      string
-	AsOfDate        CalendarDate
 	ItemIndex       int
 	Fields          map[string]any
 	RawItemPayload  json.RawMessage
 	RawItemChecksum string
 }
 
-func MapCIFDetail(ctx context.Context, detail *fincloud.CIFDetail, asOfDate CalendarDate, fetchedAt time.Time) (DetailRecord, error) {
+func MapCIFDetail(ctx context.Context, detail *fincloud.CIFDetail, fetchedAt time.Time) (DetailRecord, error) {
 	if detail == nil {
 		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
 	}
-	return MapDetailPayload(ctx, DetailCIF, detail.RawPayload, asOfDate, fetchedAt)
+	return MapDetailPayload(ctx, DetailCIF, detail.RawPayload, fetchedAt)
 }
 
-func MapSavingDetail(ctx context.Context, detail *fincloud.SavingDetail, asOfDate CalendarDate, fetchedAt time.Time) (DetailRecord, error) {
+func MapSavingDetail(ctx context.Context, detail *fincloud.SavingDetail, fetchedAt time.Time) (DetailRecord, error) {
 	if detail == nil {
 		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
 	}
-	return MapDetailPayload(ctx, DetailSaving, detail.RawPayload, asOfDate, fetchedAt)
+	return MapDetailPayload(ctx, DetailSaving, detail.RawPayload, fetchedAt)
 }
 
-func MapTimeDepositDetail(ctx context.Context, detail *fincloud.TimeDepositDetail, asOfDate CalendarDate, fetchedAt time.Time) (DetailRecord, error) {
+func MapTimeDepositDetail(ctx context.Context, detail *fincloud.TimeDepositDetail, fetchedAt time.Time) (DetailRecord, error) {
 	if detail == nil {
 		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
 	}
-	return MapDetailPayload(ctx, DetailTimeDeposit, detail.RawPayload, asOfDate, fetchedAt)
+	return MapDetailPayload(ctx, DetailTimeDeposit, detail.RawPayload, fetchedAt)
 }
 
-func MapLoanDetail(ctx context.Context, detail *fincloud.LoanDetail, asOfDate CalendarDate, fetchedAt time.Time) (DetailRecord, error) {
+func MapLoanDetail(ctx context.Context, detail *fincloud.LoanDetail, fetchedAt time.Time) (DetailRecord, error) {
 	if detail == nil {
 		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
 	}
-	return MapDetailPayload(ctx, DetailLoan, detail.RawPayload, asOfDate, fetchedAt)
+	return MapDetailPayload(ctx, DetailLoan, detail.RawPayload, fetchedAt)
 }
 
-func MapDetailPayload(ctx context.Context, domain DetailDomain, raw json.RawMessage, asOfDate CalendarDate, fetchedAt time.Time) (DetailRecord, error) {
-	if asOfDate.IsZero() {
-		return DetailRecord{}, fmt.Errorf("as_of_date is required")
-	}
+func MapDetailPayload(ctx context.Context, domain DetailDomain, raw json.RawMessage, fetchedAt time.Time) (DetailRecord, error) {
 	if fetchedAt.IsZero() {
 		return DetailRecord{}, fmt.Errorf("last_fetched_at is required")
 	}
@@ -186,7 +181,7 @@ func MapDetailPayload(ctx context.Context, domain DetailDomain, raw json.RawMess
 		return DetailRecord{}, fmt.Errorf("%s detail: %w", domain, err)
 	}
 	payload := append(json.RawMessage(nil), compact.Bytes()...)
-	record := DetailRecord{Domain: domain, Identifier: identifier, AsOfDate: asOfDate, LastFetchedAt: fetchedAt, Fields: mappedFields, RawPayload: payload, RawChecksum: sha256Hex(payload), Children: make(map[string][]DetailChildRecord)}
+	record := DetailRecord{Domain: domain, Identifier: identifier, LastFetchedAt: fetchedAt, Fields: mappedFields, RawPayload: payload, RawChecksum: sha256Hex(payload), Children: make(map[string][]DetailChildRecord)}
 	for _, childShape := range shape.children {
 		if err := ctx.Err(); err != nil {
 			return DetailRecord{}, err
@@ -216,7 +211,7 @@ func MapDetailPayload(ctx context.Context, domain DetailDomain, raw json.RawMess
 			if err != nil {
 				return DetailRecord{}, fmt.Errorf("%s[%d]: %w", childShape.sourceKey, index, err)
 			}
-			mapped[index] = DetailChildRecord{Identifier: identifier, AsOfDate: asOfDate, ItemIndex: index, Fields: mappedFields, RawItemPayload: data, RawItemChecksum: sha256Hex(data)}
+			mapped[index] = DetailChildRecord{Identifier: identifier, ItemIndex: index, Fields: mappedFields, RawItemPayload: data, RawItemChecksum: sha256Hex(data)}
 		}
 		record.Children[childShape.sourceKey] = mapped
 	}

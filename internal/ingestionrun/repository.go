@@ -246,7 +246,24 @@ func (repository *Repository) Finish(ctx context.Context, runID uint64, ownerID 
 	if status != StatusSucceeded && status != StatusFailed && status != StatusCancelled {
 		return fmt.Errorf("invalid executable terminal status %q", status)
 	}
-	result, err := repository.db.ExecContext(ctx, `UPDATE ingestion_runs SET status=?,error_class=?,error_message=?,error_step=?,
+	return finish(ctx, repository.db, runID, ownerID, status, safeError)
+}
+
+// FinishSucceededInTx applies the canonical successful Finish transition inside
+// a caller-owned transaction so business publication and run state commit together.
+func FinishSucceededInTx(ctx context.Context, tx *sqlx.Tx, runID uint64, ownerID string) error {
+	if tx == nil {
+		return fmt.Errorf("transaction is required")
+	}
+	return finish(ctx, tx, runID, ownerID, StatusSucceeded, SafeError{})
+}
+
+type finishExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func finish(ctx context.Context, executor finishExecutor, runID uint64, ownerID string, status Status, safeError SafeError) error {
+	result, err := executor.ExecContext(ctx, `UPDATE ingestion_runs SET status=?,error_class=?,error_message=?,error_step=?,
 		finished_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='running' AND owner_id=?`, status,
 		nullable(safeError.Class), nullable(safeError.Message), nullable(safeError.Step), runID, ownerID)
 	if err != nil {

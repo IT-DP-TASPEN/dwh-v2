@@ -58,6 +58,8 @@ APP_ENV=production ./bin/migrate up --confirm-database dwh
 
 The migration command verifies the selected database name, refuses `dwh2`, rejects unknown Goose history, and accepts only an empty first installation or a canonical migration prefix. It never enables `AllowMissing` or stamps versions. Web startup never runs migrations.
 
+The Detail current-state migration aborts before schema changes when any dated Detail parent or child table contains rows. Existing dated rows cannot be collapsed safely with `MAX(as_of_date)` because they have no durable complete-run identity. A populated deployment requires a separately approved backup/reset, the migration, then one fresh authoritative Detail synchronization.
+
 Start the application only after `GET /ready` returns `200`. `/health` is process liveness; `/ready` checks MySQL and the current application schema without contacting Fincloud.
 
 ## Database privileges

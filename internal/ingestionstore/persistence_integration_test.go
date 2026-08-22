@@ -360,152 +360,192 @@ func stageFixedConcurrently(t *testing.T, repository *FixedRepository, definitio
 	}
 }
 
-func TestDetailSnapshotsAndDecimalGuard(t *testing.T) {
+func TestDetailCurrentStatePublicationDeletionEmptyAndFailure(t *testing.T) {
 	db := integrationdb.Open(t)
-	for _, table := range []string{"fincloud_loan_disbursement_fees", "fincloud_loan_repayment_schedule", "fincloud_loan_payment_history", "fincloud_loan_details"} {
-		if _, err := db.Exec("DELETE FROM `" + table + "`"); err != nil {
-			t.Fatal(err)
-		}
-	}
+	resetDetail(t, db.DB)
 	repository := NewDetailRepository(db)
-	for _, value := range []string{"2026-08-11", "2026-08-12"} {
-		date, _ := ingestion.ParseCalendarDate(value)
-		record, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailLoan,
-			[]byte(`{"id":"LN-1","nocif":"CIF-1","outstandingpinjaman":"1234567890.123456","jadwalangsuran":[{"angsuranke":1,"angsuran":"10.250000"}]}`), date, time.Now().UTC())
-		if err != nil || repository.SaveLoanSnapshot(context.Background(), record) != nil {
-			t.Fatalf("save detail: map=%v", err)
-		}
+	for _, domain := range []ingestion.DetailDomain{ingestion.DetailCIF, ingestion.DetailSaving, ingestion.DetailTimeDeposit, ingestion.DetailLoan} {
+		t.Run(string(domain), func(t *testing.T) {
+			specification, _ := detailSpecification(domain)
+			runID, owner := detailRun(t, db.DB, specification.jobKey, 3)
+			stageDetailSet(t, repository, runID, domain, map[string]int{"A": 1, "B": 1, "C": 1})
+			if err := repository.Publish(context.Background(), runID, owner, domain, 3); err != nil {
+				t.Fatal(err)
+			}
+			if err := repository.Publish(context.Background(), runID, owner, domain, 3); err != nil {
+				t.Fatalf("committed publication was not recognized after ambiguous acknowledgement: %v", err)
+			}
+			assertDetailKeys(t, db.DB, specification, "A,B,C")
+			var staged int
+			if err := db.Get(&staged, "SELECT COUNT(*) FROM `"+specification.stage+"` WHERE ingestion_run_id=?", runID); err != nil || staged != 3 {
+				t.Fatalf("post-commit staging=%d error=%v", staged, err)
+			}
+			if err := repository.CleanupRun(context.Background(), runID); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Get(&staged, "SELECT COUNT(*) FROM `"+specification.stage+"` WHERE ingestion_run_id=?", runID); err != nil || staged != 0 {
+				t.Fatalf("cleaned staging=%d error=%v", staged, err)
+			}
+
+			fixed := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+			key := detailIdentifier(specification.fields)
+			if _, err := db.Exec("UPDATE `"+specification.table+"` SET created_at=?,updated_at=? WHERE `"+key+"`='C'", fixed, fixed); err != nil {
+				t.Fatal(err)
+			}
+			for _, child := range specification.children {
+				if _, err := db.Exec("UPDATE `"+child.table+"` SET created_at=?,updated_at=? WHERE account_no='C'", fixed, fixed); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			secondID, secondOwner := detailRun(t, db.DB, specification.jobKey, 3)
+			stageDetailSet(t, repository, secondID, domain, map[string]int{"B": 2, "C": 1, "D": 1})
+			if err := repository.Publish(context.Background(), secondID, secondOwner, domain, 3); err != nil {
+				t.Fatal(err)
+			}
+			assertDetailKeys(t, db.DB, specification, "B,C,D")
+			var timestamps struct {
+				Created time.Time `db:"created_at"`
+				Updated time.Time `db:"updated_at"`
+				Fetched time.Time `db:"last_fetched_at"`
+			}
+			if err := db.Get(&timestamps, "SELECT created_at,updated_at,last_fetched_at FROM `"+specification.table+"` WHERE `"+key+"`='C'"); err != nil || !timestamps.Created.Equal(fixed) || !timestamps.Updated.Equal(fixed) || !timestamps.Fetched.After(fixed) {
+				t.Fatalf("unchanged parent timestamps=%+v error=%v", timestamps, err)
+			}
+			for _, child := range specification.children {
+				var preserved int
+				if err := db.Get(&preserved, "SELECT COUNT(*) FROM `"+child.table+"` WHERE account_no='C' AND created_at=? AND updated_at=?", fixed, fixed); err != nil || preserved != 2 {
+					t.Fatalf("unchanged %s timestamps=%d error=%v", child.table, preserved, err)
+				}
+			}
+			if err := repository.CleanupTerminal(context.Background(), 100); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Get(&staged, "SELECT COUNT(*) FROM `"+specification.stage+"` WHERE ingestion_run_id=?", secondID); err != nil || staged != 0 {
+				t.Fatalf("terminal staging=%d error=%v", staged, err)
+			}
+
+			partialID, partialOwner := detailRun(t, db.DB, specification.jobKey, 2)
+			stageDetailSet(t, repository, partialID, domain, map[string]int{"B": 3})
+			if err := repository.Publish(context.Background(), partialID, partialOwner, domain, 2); err == nil {
+				t.Fatal("partial candidate published")
+			}
+			assertDetailKeys(t, db.DB, specification, "B,C,D")
+			if _, err := db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, partialID); err != nil {
+				t.Fatal(err)
+			}
+			cancelledID, cancelledOwner := detailRun(t, db.DB, specification.jobKey, 1)
+			stageDetailSet(t, repository, cancelledID, domain, map[string]int{"B": 3})
+			if _, err := db.Exec(`UPDATE ingestion_runs SET cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason='operator' WHERE id=?`, cancelledID); err != nil {
+				t.Fatal(err)
+			}
+			if err := repository.Publish(context.Background(), cancelledID, cancelledOwner, domain, 1); err == nil {
+				t.Fatal("cancelled candidate published")
+			}
+			assertDetailKeys(t, db.DB, specification, "B,C,D")
+			if _, err := db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, cancelledID); err != nil {
+				t.Fatal(err)
+			}
+
+			emptyID, emptyOwner := detailRun(t, db.DB, specification.jobKey, 0)
+			if err := repository.Publish(context.Background(), emptyID, emptyOwner, domain, 0); err != nil {
+				t.Fatal(err)
+			}
+			assertDetailKeys(t, db.DB, specification, "")
+		})
 	}
-	var count int
-	if err := db.Get(&count, `SELECT COUNT(*) FROM fincloud_loan_details WHERE account_no='LN-1'`); err != nil || count != 2 {
-		t.Fatalf("snapshot count=%d error=%v", count, err)
-	}
-	date, _ := ingestion.ParseCalendarDate("2026-08-12")
+}
+
+func TestDetailStageRejectsInvalidDecimalWithoutChangingPublishedState(t *testing.T) {
+	db := integrationdb.Open(t)
+	resetDetail(t, db.DB)
+	repository := NewDetailRepository(db)
+	runID, _ := detailRun(t, db.DB, "loan_detail", 1)
 	invalid, _ := ingestion.MapDetailPayload(context.Background(), ingestion.DetailLoan,
-		[]byte(`{"id":"LN-1","nocif":"CIF-1","outstandingpinjaman":"1.1234567"}`), date, time.Now().UTC())
-	if err := repository.SaveLoanSnapshot(context.Background(), invalid); err == nil {
+		[]byte(`{"id":"LN-1","nocif":"CIF-1","outstandingpinjaman":"1.1234567"}`), time.Now().UTC())
+	if err := repository.Stage(context.Background(), runID, invalid); err == nil {
 		t.Fatal("excess decimal scale accepted")
 	}
-	rollbackRecord, _ := ingestion.MapDetailPayload(context.Background(), ingestion.DetailLoan,
-		[]byte(`{"id":"LN-1","nocif":"CIF-1","outstandingpinjaman":"999.000000","jadwalangsuran":[{"angsuranke":1,"angsuran":"1.000000"}]}`), date, time.Now().UTC())
-	rollbackRecord.Children["jadwalangsuran"][0].Fields["installment_amount"] = decimal.RequireFromString("1.1234567")
-	if err := repository.SaveLoanSnapshot(context.Background(), rollbackRecord); err == nil {
+	valid := mapDetailRecord(t, ingestion.DetailLoan, "LN-1", 1)
+	valid.Children["jadwalangsuran"][0].Fields["installment_amount"] = decimal.RequireFromString("1.1234567")
+	if err := repository.Stage(context.Background(), runID, valid); err == nil {
 		t.Fatal("invalid child decimal accepted")
 	}
-	var outstanding string
-	if err := db.Get(&outstanding, `SELECT CAST(outstanding_principal AS CHAR) FROM fincloud_loan_details WHERE as_of_date=? AND account_no='LN-1'`, date.String()); err != nil || outstanding != "1234567890.123456" {
-		t.Fatalf("failed child changed parent: outstanding=%s error=%v", outstanding, err)
+	var count int
+	if err := db.Get(&count, `SELECT COUNT(*) FROM fincloud_loan_details`); err != nil || count != 0 {
+		t.Fatalf("failed stage changed final state: count=%d error=%v", count, err)
+	}
+}
+
+func TestDetailPublicationFailureRollsBackFinalStateAndRunSuccess(t *testing.T) {
+	db := integrationdb.Open(t)
+	resetDetail(t, db.DB)
+	repository := NewDetailRepository(db)
+	firstID, firstOwner := detailRun(t, db.DB, "loan_detail", 1)
+	stageDetailSet(t, repository, firstID, ingestion.DetailLoan, map[string]int{"A": 1})
+	if err := repository.Publish(context.Background(), firstID, firstOwner, ingestion.DetailLoan, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS fail_detail_publication`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_detail_publication BEFORE INSERT ON fincloud_loan_details
+		FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='forced publication failure'`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DROP TRIGGER IF EXISTS fail_detail_publication`) })
+	secondID, secondOwner := detailRun(t, db.DB, "loan_detail", 1)
+	stageDetailSet(t, repository, secondID, ingestion.DetailLoan, map[string]int{"B": 1})
+	if err := repository.Publish(context.Background(), secondID, secondOwner, ingestion.DetailLoan, 1); err == nil {
+		t.Fatal("forced publication failure succeeded")
+	}
+	specification, _ := detailSpecification(ingestion.DetailLoan)
+	assertDetailKeys(t, db.DB, specification, "A")
+	var status string
+	if err := db.Get(&status, `SELECT status FROM ingestion_runs WHERE id=?`, secondID); err != nil || status != "running" {
+		t.Fatalf("failed publication run status=%q error=%v", status, err)
 	}
 }
 
 func TestGroupedDetailDecimalsPersistExactly(t *testing.T) {
 	db := integrationdb.Open(t)
-	date, _ := ingestion.ParseCalendarDate("2026-08-14")
-	fetched := time.Date(2026, 8, 14, 1, 2, 3, 456000000, time.UTC)
-	type sample struct {
-		domain  ingestion.DetailDomain
-		payload string
-		save    func(context.Context, ingestion.DetailRecord) error
-	}
+	resetDetail(t, db.DB)
 	repository := NewDetailRepository(db)
-	samples := []sample{
-		{ingestion.DetailSaving, `{"norekening":"GROUPED-S","nocif":"SAFE","saldoawal":"1.25","saldoakhir":"2.50","mutasidebit":"1,234.56","mutasikredit":"2,345.67"}`, repository.SaveSavingSnapshot},
-		{ingestion.DetailTimeDeposit, `{"id":"GROUPED-T","nocif":"SAFE","nominal":"1,234,567.89","accrueinterest":"12,345.67","produk_sukubunga":"5.25","mutasideposito":[{"nominal":"98,765.43","sukubunga":"5.25"}]}`, repository.SaveTimeDepositSnapshot},
-		{ingestion.DetailLoan, `{"id":"GROUPED-L","nocif":"SAFE","outstandingpinjaman":"1,234,567.89","tunggakanpokok":"12,345.67","tunggakanbunga":"2,345.67","dendatunggakan":"1.25","produk_sukubunga":"5.50"}`, repository.SaveLoanSnapshot},
+	fetched := time.Date(2026, 8, 14, 1, 2, 3, 456000000, time.UTC)
+	samples := []struct {
+		domain  ingestion.DetailDomain
+		jobKey  string
+		payload string
+	}{
+		{domain: ingestion.DetailSaving, jobKey: "saving_detail", payload: `{"norekening":"GROUPED-S","nocif":"SAFE","saldoawal":"1.25","saldoakhir":"2.50","mutasidebit":"1,234.56","mutasikredit":"2,345.67"}`},
+		{domain: ingestion.DetailTimeDeposit, jobKey: "time_deposit_detail", payload: `{"id":"GROUPED-T","nocif":"SAFE","nominal":"1,234,567.89","accrueinterest":"12,345.67","produk_sukubunga":"5.25","mutasideposito":[{"nominal":"98,765.43","sukubunga":"5.25"}]}`},
+		{domain: ingestion.DetailLoan, jobKey: "loan_detail", payload: `{"id":"GROUPED-L","nocif":"SAFE","outstandingpinjaman":"1,234,567.89","tunggakanpokok":"12,345.67","tunggakanbunga":"2,345.67","dendatunggakan":"1.25","produk_sukubunga":"5.50"}`},
 	}
 	for _, sample := range samples {
-		record, err := ingestion.MapDetailPayload(context.Background(), sample.domain, []byte(sample.payload), date, fetched)
+		runID, owner := detailRun(t, db.DB, sample.jobKey, 1)
+		record, err := ingestion.MapDetailPayload(context.Background(), sample.domain, []byte(sample.payload), fetched)
 		if err != nil {
-			t.Fatalf("map %s: %v", sample.domain, err)
+			t.Fatal(err)
 		}
-		if err := sample.save(context.Background(), record); err != nil {
-			t.Fatalf("save %s: %v", sample.domain, err)
+		if err := repository.Stage(context.Background(), runID, record); err != nil {
+			t.Fatal(err)
+		}
+		if err := repository.Publish(context.Background(), runID, owner, sample.domain, 1); err != nil {
+			t.Fatal(err)
 		}
 	}
-	assertDecimal := func(query, want string, arguments ...any) {
+	assertDecimal := func(query, want string) {
 		t.Helper()
 		var got string
-		if err := db.Get(&got, query, arguments...); err != nil || !decimal.RequireFromString(got).Equal(decimal.RequireFromString(want)) {
+		if err := db.Get(&got, query); err != nil || !decimal.RequireFromString(got).Equal(decimal.RequireFromString(want)) {
 			t.Fatalf("decimal=%q want=%s error=%v", got, want, err)
 		}
 	}
-	assertDecimal(`SELECT CAST(debit_mutation AS CHAR) FROM fincloud_saving_details WHERE as_of_date=? AND account_no='GROUPED-S'`, "1234.56", date.String())
-	assertDecimal(`SELECT CAST(credit_mutation AS CHAR) FROM fincloud_saving_details WHERE as_of_date=? AND account_no='GROUPED-S'`, "2345.67", date.String())
-	assertDecimal(`SELECT CAST(nominal AS CHAR) FROM fincloud_time_deposit_details WHERE as_of_date=? AND account_no='GROUPED-T'`, "1234567.89", date.String())
-	assertDecimal(`SELECT CAST(accrued_interest AS CHAR) FROM fincloud_time_deposit_details WHERE as_of_date=? AND account_no='GROUPED-T'`, "12345.67", date.String())
-	assertDecimal(`SELECT CAST(nominal AS CHAR) FROM fincloud_time_deposit_mutations WHERE as_of_date=? AND account_no='GROUPED-T' AND item_index=0`, "98765.43", date.String())
-	assertDecimal(`SELECT CAST(outstanding_principal AS CHAR) FROM fincloud_loan_details WHERE as_of_date=? AND account_no='GROUPED-L'`, "1234567.89", date.String())
-	assertDecimal(`SELECT CAST(principal_arrears AS CHAR) FROM fincloud_loan_details WHERE as_of_date=? AND account_no='GROUPED-L'`, "12345.67", date.String())
-	assertDecimal(`SELECT CAST(interest_arrears AS CHAR) FROM fincloud_loan_details WHERE as_of_date=? AND account_no='GROUPED-L'`, "2345.67", date.String())
-	var checksums int
-	if err := db.Get(&checksums, `SELECT COUNT(*) FROM (
-		SELECT raw_checksum FROM fincloud_saving_details WHERE as_of_date=? AND account_no='GROUPED-S' AND raw_checksum<>''
-		UNION ALL SELECT raw_checksum FROM fincloud_time_deposit_details WHERE as_of_date=? AND account_no='GROUPED-T' AND raw_checksum<>''
-		UNION ALL SELECT raw_checksum FROM fincloud_loan_details WHERE as_of_date=? AND account_no='GROUPED-L' AND raw_checksum<>''
-		UNION ALL SELECT raw_item_checksum FROM fincloud_time_deposit_mutations WHERE as_of_date=? AND account_no='GROUPED-T' AND raw_item_checksum<>''
-	) AS checksums`, date.String(), date.String(), date.String(), date.String()); err != nil || checksums != 4 {
-		t.Fatalf("checksum rows=%d error=%v", checksums, err)
-	}
-}
-
-func TestDetailConcurrentReplacementKeepsCanonicalFamilies(t *testing.T) {
-	db := integrationdb.Open(t)
-	date, _ := ingestion.ParseCalendarDate("2026-08-16")
-	repository := NewDetailRepository(db)
-	for _, table := range []string{"fincloud_time_deposit_details", "fincloud_loan_details"} {
-		if _, err := db.Exec("DELETE FROM `"+table+"` WHERE as_of_date=? AND account_no IN ('TD-CONCURRENT','LOAN-CONCURRENT')", date.String()); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	t.Run("time deposit concurrency 3", func(t *testing.T) {
-		savers := make([]func() error, 0, 3)
-		for _, version := range []int{101, 202, 303} {
-			payload := fmt.Sprintf(`{"id":"TD-CONCURRENT","nocif":"SAFE","nominal":"%d","mutasideposito":[{"nominal":"%d","referensi":"td-%d-a"},{"nominal":"%d","referensi":"td-%d-b"}]}`, version, version, version, version+1, version)
-			record, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailTimeDeposit, []byte(payload), date, time.Now().UTC())
-			if err != nil {
-				t.Fatal(err)
-			}
-			savers = append(savers, func() error { return repository.SaveTimeDepositSnapshot(context.Background(), record) })
-		}
-		runConcurrentSaves(t, savers)
-		var version int
-		var references string
-		if err := db.Get(&version, `SELECT CAST(nominal AS UNSIGNED) FROM fincloud_time_deposit_details WHERE as_of_date=? AND account_no='TD-CONCURRENT'`, date.String()); err != nil {
-			t.Fatal(err)
-		}
-		if err := db.Get(&references, `SELECT GROUP_CONCAT(reference ORDER BY item_index SEPARATOR ',') FROM fincloud_time_deposit_mutations WHERE as_of_date=? AND account_no='TD-CONCURRENT'`, date.String()); err != nil || references != fmt.Sprintf("td-%d-a,td-%d-b", version, version) {
-			t.Fatalf("version=%d references=%q error=%v", version, references, err)
-		}
-	})
-
-	t.Run("loan concurrency 3", func(t *testing.T) {
-		savers := make([]func() error, 0, 3)
-		for _, version := range []int{11, 22, 33} {
-			payload := fmt.Sprintf(`{"id":"LOAN-CONCURRENT","nocif":"SAFE","outstandingpinjaman":"%d","biayapencairan":[{"namabiaya":"fee-%d-a"},{"namabiaya":"fee-%d-b"}],"jadwalangsuran":[{"angsuranke":%d},{"angsuranke":%d}],"historybayar":[{"angsuranke":1,"nojurnal":"history-%d-a"},{"angsuranke":2,"nojurnal":"history-%d-b"}]}`, version, version, version, version*10+1, version*10+2, version, version)
-			record, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailLoan, []byte(payload), date, time.Now().UTC())
-			if err != nil {
-				t.Fatal(err)
-			}
-			savers = append(savers, func() error { return repository.SaveLoanSnapshot(context.Background(), record) })
-		}
-		runConcurrentSaves(t, savers)
-		var version int
-		if err := db.Get(&version, `SELECT CAST(outstanding_principal AS UNSIGNED) FROM fincloud_loan_details WHERE as_of_date=? AND account_no='LOAN-CONCURRENT'`, date.String()); err != nil {
-			t.Fatal(err)
-		}
-		assertFamily := func(table, column, want string) {
-			t.Helper()
-			var got string
-			query := fmt.Sprintf("SELECT GROUP_CONCAT(`%s` ORDER BY item_index SEPARATOR ',') FROM `%s` WHERE as_of_date=? AND account_no='LOAN-CONCURRENT'", column, table)
-			if err := db.Get(&got, query, date.String()); err != nil || got != want {
-				t.Fatalf("%s=%q want=%q error=%v", table, got, want, err)
-			}
-		}
-		assertFamily("fincloud_loan_disbursement_fees", "fee_name", fmt.Sprintf("fee-%d-a,fee-%d-b", version, version))
-		assertFamily("fincloud_loan_repayment_schedule", "installment_no", fmt.Sprintf("%d,%d", version*10+1, version*10+2))
-		assertFamily("fincloud_loan_payment_history", "journal_no", fmt.Sprintf("history-%d-a,history-%d-b", version, version))
-	})
+	assertDecimal(`SELECT CAST(debit_mutation AS CHAR) FROM fincloud_saving_details WHERE account_no='GROUPED-S'`, "1234.56")
+	assertDecimal(`SELECT CAST(credit_mutation AS CHAR) FROM fincloud_saving_details WHERE account_no='GROUPED-S'`, "2345.67")
+	assertDecimal(`SELECT CAST(nominal AS CHAR) FROM fincloud_time_deposit_details WHERE account_no='GROUPED-T'`, "1234567.89")
+	assertDecimal(`SELECT CAST(nominal AS CHAR) FROM fincloud_time_deposit_mutations WHERE account_no='GROUPED-T' AND item_index=0`, "98765.43")
+	assertDecimal(`SELECT CAST(outstanding_principal AS CHAR) FROM fincloud_loan_details WHERE account_no='GROUPED-L'`, "1234567.89")
 }
 
 func TestRetryTransactionRecoversFromRealMySQLDeadlock(t *testing.T) {
@@ -762,6 +802,82 @@ func resetFixed(t *testing.T, db *sql.DB) {
 		if _, err := db.Exec("DELETE FROM `" + table + "`"); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func resetDetail(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, specification := range detailSpecifications {
+		if _, err := db.Exec("DELETE FROM `" + specification.stage + "`"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("DELETE FROM `" + specification.table + "`"); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func detailRun(t *testing.T, db *sql.DB, jobKey string, total uint64) (uint64, string) {
+	t.Helper()
+	owner := strings.Repeat("d", 64)
+	result, err := db.Exec(`INSERT INTO ingestion_runs
+		(kind,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,owner_id,
+		 claimed_at,heartbeat_at,started_at,progress_total,progress_started,progress_succeeded,progress_failed,current_step)
+		VALUES ('job',?,'running','detail_live_snapshot_v1',1,JSON_OBJECT(),UNHEX(REPEAT('00',32)),'direct',?,
+		 CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),?,?,?,0,'publish_detail')`, jobKey, owner, total, total, total)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, id) })
+	return uint64(id), owner
+}
+
+func stageDetailSet(t *testing.T, repository *DetailRepository, runID uint64, domain ingestion.DetailDomain, versions map[string]int) {
+	t.Helper()
+	errorsFound := make(chan error, len(versions))
+	for identifier, version := range versions {
+		record := mapDetailRecord(t, domain, identifier, version)
+		go func() { errorsFound <- repository.Stage(context.Background(), runID, record) }()
+	}
+	for range versions {
+		if err := <-errorsFound; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func mapDetailRecord(t *testing.T, domain ingestion.DetailDomain, identifier string, version int) ingestion.DetailRecord {
+	t.Helper()
+	var payload string
+	switch domain {
+	case ingestion.DetailCIF:
+		payload = fmt.Sprintf(`{"id":"%s","namanasabah":"name-%d"}`, identifier, version)
+	case ingestion.DetailSaving:
+		payload = fmt.Sprintf(`{"norekening":"%s","nocif":"CIF-%s","saldoawal":"%d","saldoakhir":"%d"}`, identifier, identifier, version, version)
+	case ingestion.DetailTimeDeposit:
+		payload = fmt.Sprintf(`{"id":"%s","nocif":"CIF-%s","nominal":"%d","mutasideposito":[{"nominal":"%d","referensi":"%s-%d-a"},{"nominal":"%d","referensi":"%s-%d-b"}]}`, identifier, identifier, version, version, identifier, version, version+1, identifier, version)
+	case ingestion.DetailLoan:
+		payload = fmt.Sprintf(`{"id":"%s","nocif":"CIF-%s","outstandingpinjaman":"%d","biayapencairan":[{"namabiaya":"%s-%d-a"},{"namabiaya":"%s-%d-b"}],"jadwalangsuran":[{"angsuranke":%d},{"angsuranke":%d}],"historybayar":[{"angsuranke":1,"nojurnal":"%s-%d-a"},{"angsuranke":2,"nojurnal":"%s-%d-b"}]}`, identifier, identifier, version, identifier, version, identifier, version, version*10+1, version*10+2, identifier, version, identifier, version)
+	default:
+		t.Fatalf("unsupported Detail domain %s", domain)
+	}
+	record, err := ingestion.MapDetailPayload(context.Background(), domain, []byte(payload), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func assertDetailKeys(t *testing.T, db *sql.DB, specification detailSpec, want string) {
+	t.Helper()
+	key := detailIdentifier(specification.fields)
+	var got string
+	if err := db.QueryRow("SELECT COALESCE(GROUP_CONCAT(`" + key + "` ORDER BY `" + key + "` SEPARATOR ','),'') FROM `" + specification.table + "`").Scan(&got); err != nil || got != want {
+		t.Fatalf("%s keys=%q want=%q error=%v", specification.table, got, want, err)
 	}
 }
 

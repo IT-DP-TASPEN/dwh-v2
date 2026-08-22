@@ -113,6 +113,54 @@ func TestSourceEnumerationReportProtocolAndTypedDetail(t *testing.T) {
 	}
 }
 
+func TestDetailListingsAcceptOnlyContractValidEmptyResults(t *testing.T) {
+	var accountResult atomic.Value
+	accountResult.Store(`[]`)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/fincloud/admin/access/login":
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session"}}}`)
+		case "/fincloud/system/laporanUmum/data/lap":
+			_, _ = io.WriteString(response, "CIF No|Name\n")
+		default:
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":`+accountResult.Load().(string)+`}}`)
+		}
+	}))
+	defer server.Close()
+	client, err := newClient(testConfig(server.URL+"/fincloud"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, fetch := range map[string]func(context.Context) ([]string, error){
+		"CIF":          func(ctx context.Context) ([]string, error) { return client.FetchCIFNumbers(ctx, "2026-08-12") },
+		"saving":       client.FetchSavingAccounts,
+		"time deposit": client.FetchTimeDepositAccounts,
+		"loan":         client.FetchLoanAccounts,
+	} {
+		values, err := fetch(context.Background())
+		if err != nil || len(values) != 0 {
+			t.Fatalf("%s empty listing=%v error=%v", name, values, err)
+		}
+	}
+	for _, invalid := range []string{"null", `{}`} {
+		accountResult.Store(invalid)
+		if _, err := client.FetchSavingAccounts(context.Background()); err == nil {
+			t.Fatalf("invalid result %s accepted", invalid)
+		}
+	}
+	accountResult.Store(`[]`)
+	server.Config.Handler = http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/fincloud/admin/access/login" {
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session"}}}`)
+			return
+		}
+		_, _ = io.WriteString(response, `{"status":"ok","data":{}}`)
+	})
+	if _, err := client.FetchSavingAccounts(context.Background()); err == nil {
+		t.Fatal("missing result accepted")
+	}
+}
+
 func TestScalarDecimalAcceptsOnlyStrictCommaGrouping(t *testing.T) {
 	valid := map[string]string{
 		"0": "0", "1234.56": "1234.56", "-0.01": "-0.01",

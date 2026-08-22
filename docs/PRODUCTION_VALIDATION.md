@@ -36,10 +36,10 @@ This matrix is a runbook, not evidence that live Fincloud behavior has been re-t
 | `cbr_loan` | CBR | Date series; lookback 3 | identity, dynamic columns, snapshot |
 | `cbr_savings` | CBR | Date series; lookback 3 | identity, dynamic columns, snapshot |
 | `cbr_time_deposit` | CBR | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `cif_detail` | Detail | Current live snapshot | frozen Jakarta date, identifiers, partial progress |
-| `saving_detail` | Detail | Current live snapshot | frozen Jakarta date, identifiers, partial progress |
-| `time_deposit_detail` | Detail | Current live snapshot | frozen Jakarta date, parents/children, partial progress |
-| `loan_detail` | Detail | Current live snapshot | frozen Jakarta date, parents/children, partial progress |
+| `cif_detail` | Detail | Complete current state | frozen Jakarta execution date, failure-atomic publication |
+| `saving_detail` | Detail | Complete current state | frozen Jakarta execution date, failure-atomic publication |
+| `time_deposit_detail` | Detail | Complete current state | frozen Jakarta execution date, atomic parent/children publication |
+| `loan_detail` | Detail | Complete current state | frozen Jakarta execution date, atomic parent/children publication |
 
 ## Acceptance per job
 

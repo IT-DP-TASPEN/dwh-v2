@@ -134,9 +134,7 @@ func (c *Client) fetchAccountList(ctx context.Context, operation, endpoint strin
 	var payload struct {
 		Status string `json:"status"`
 		Data   struct {
-			Result []struct {
-				ID string `json:"id"`
-			} `json:"result"`
+			Result json.RawMessage `json:"result"`
 		} `json:"data"`
 	}
 	diagnostic, err := c.getJSON(ctx, operation, endpoint+"?"+query.Encode(), &payload)
@@ -146,8 +144,20 @@ func (c *Client) fetchAccountList(ctx context.Context, operation, endpoint strin
 	if payload.Status != "ok" {
 		return nil, applicationFailure(operation, "Fincloud reported a source failure", diagnostic, payload.Status, "")
 	}
-	values := make([]string, len(payload.Data.Result))
-	for index, row := range payload.Data.Result {
+	result := bytes.TrimSpace(payload.Data.Result)
+	if len(result) == 0 || bytes.Equal(result, []byte("null")) {
+		diagnostic.FailureKind, diagnostic.DecodeStage = "missing_required", "account_list_result"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud account listing omitted required result array", diagnostic: diagnostic}
+	}
+	var rows []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(result, &rows); err != nil {
+		diagnostic.FailureKind, diagnostic.DecodeStage = decodeFailureKind(err), "account_list_result"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud account listing result was malformed", Cause: err, diagnostic: diagnostic}
+	}
+	values := make([]string, len(rows))
+	for index, row := range rows {
 		values[index] = row.ID
 	}
 	return normalizeIdentifiers(values), nil
