@@ -209,17 +209,17 @@ type LoanRepaymentSchedule struct {
 }
 
 type LoanPaymentHistory struct {
-	TransactionDate string `json:"tgl"`
-	InstallmentNo   Scalar `json:"angsuranke"`
-	PaymentDate     string `json:"tglbayar"`
-	Currency        string `json:"currency"`
-	DueDate         string `json:"tgljt"`
-	TotalPaid       Scalar `json:"totalbayar"`
-	PaidPrincipal   Scalar `json:"bayar_pokok"`
-	PaidInterest    Scalar `json:"bayar_bunga"`
-	PaidPenalty     Scalar `json:"bayar_denda"`
-	JournalNo       string `json:"nojurnal"`
-	Branch          string `json:"cabang"`
+	TransactionDate WrappedDateTime `json:"tgl"`
+	InstallmentNo   Scalar          `json:"angsuranke"`
+	PaymentDate     string          `json:"tglbayar"`
+	Currency        string          `json:"currency"`
+	DueDate         string          `json:"tgljt"`
+	TotalPaid       Scalar          `json:"totalbayar"`
+	PaidPrincipal   Scalar          `json:"bayar_pokok"`
+	PaidInterest    Scalar          `json:"bayar_bunga"`
+	PaidPenalty     Scalar          `json:"bayar_denda"`
+	JournalNo       string          `json:"nojurnal"`
+	Branch          string          `json:"cabang"`
 }
 
 func (c *Client) FetchCIFDetail(ctx context.Context, cifNo string) (*CIFDetail, error) {
