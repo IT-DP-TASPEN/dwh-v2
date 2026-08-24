@@ -25,6 +25,13 @@ var EmptyBeforeAdoption = []string{
 	"fincloud_vault_mutation_reports", "stg_fincloud_vault_mutation_reports",
 	"fincloud_teller_mutation_reports", "stg_fincloud_teller_mutation_reports",
 	"fincloud_cifs", "stg_fincloud_cif_details",
+	"fincloud_cif_personal_profiles", "stg_fincloud_cif_personal_profiles",
+	"fincloud_cif_ktp", "stg_fincloud_cif_ktp",
+	"fincloud_cif_addresses", "stg_fincloud_cif_addresses",
+	"fincloud_cif_employment", "stg_fincloud_cif_employment",
+	"fincloud_cif_company", "stg_fincloud_cif_company",
+	"fincloud_cif_kyc", "stg_fincloud_cif_kyc",
+	"fincloud_cif_regulatory", "stg_fincloud_cif_regulatory",
 	"fincloud_saving_details", "stg_fincloud_saving_details",
 	"fincloud_time_deposit_details", "stg_fincloud_time_deposit_details", "fincloud_time_deposit_mutations",
 	"stg_fincloud_time_deposit_mutations",
@@ -44,6 +51,12 @@ type MigrationGroup struct {
 }
 
 var AdoptionMigrationGroups = []MigrationGroup{
+	{"expand_detail_typed_schema.sql", []string{
+		"stg_fincloud_cif_personal_profiles", "stg_fincloud_cif_ktp", "stg_fincloud_cif_addresses",
+		"stg_fincloud_cif_employment", "stg_fincloud_cif_company", "stg_fincloud_cif_kyc", "stg_fincloud_cif_regulatory",
+		"fincloud_cif_personal_profiles", "fincloud_cif_ktp", "fincloud_cif_addresses",
+		"fincloud_cif_employment", "fincloud_cif_company", "fincloud_cif_kyc", "fincloud_cif_regulatory",
+	}},
 	{"create_ingestion_run_errors.sql", []string{"ingestion_run_errors"}},
 	{"create_ingestion_scheduler.sql", []string{"schedule_attempts", "schedule_occurrences", "schedule_executions", "schedules"}},
 	{"create_ingestion_execution_runtime.sql", []string{

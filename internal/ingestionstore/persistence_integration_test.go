@@ -456,6 +456,161 @@ func TestDetailCurrentStatePublicationDeletionEmptyAndFailure(t *testing.T) {
 	}
 }
 
+func TestCIFVerticalExtensionsPublishAsOneExactSet(t *testing.T) {
+	db := integrationdb.Open(t)
+	resetDetail(t, db.DB)
+	repository := NewDetailRepository(db)
+	fetched := time.Date(2026, 8, 23, 1, 2, 3, 0, time.UTC)
+
+	firstID, firstOwner := detailRun(t, db.DB, "cif_detail", 1)
+	first, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailCIF, []byte(`{
+		"id":"C-1","namanasabah":"name","perorangan_noktp":"","dataktp_nik":"fallback",
+		"perorangan_tempatlahir":"city","dataktp_nama":"ktp name","dataktp_berlakuseumurhidup":false,
+		"datapekerjaan_penghasilanbersihperbulan":"1000.25","perusahaan_nonpwp":"NPWP",
+		"datakyc_sumberdana":"salary","profilresiko_profil":"low"
+	}`), fetched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Stage(context.Background(), firstID, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.PrepareRun(context.Background(), firstID); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"stg_fincloud_cif_details", "stg_fincloud_cif_ktp"} {
+		var count int
+		if err := db.Get(&count, "SELECT COUNT(*) FROM `"+table+"` WHERE ingestion_run_id=?", firstID); err != nil || count != 0 {
+			t.Fatalf("prepared %s count=%d error=%v", table, count, err)
+		}
+	}
+	if err := repository.Stage(context.Background(), firstID, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Publish(context.Background(), firstID, firstOwner, ingestion.DetailCIF, 1); err != nil {
+		t.Fatal(err)
+	}
+	var ktpNo string
+	if err := db.Get(&ktpNo, `SELECT ktp_no FROM fincloud_cifs WHERE cif_no='C-1'`); err != nil || ktpNo != "" {
+		t.Fatalf("ktp_no=%q error=%v", ktpNo, err)
+	}
+	for _, table := range []string{
+		"fincloud_cif_personal_profiles", "fincloud_cif_ktp", "fincloud_cif_employment", "fincloud_cif_company",
+		"fincloud_cif_kyc", "fincloud_cif_regulatory",
+	} {
+		var count int
+		if err := db.Get(&count, "SELECT COUNT(*) FROM `"+table+"` WHERE cif_no='C-1'"); err != nil || count != 1 {
+			t.Fatalf("%s count=%d error=%v", table, count, err)
+		}
+	}
+	var addressCount int
+	if err := db.Get(&addressCount, `SELECT COUNT(*) FROM fincloud_cif_addresses WHERE cif_no='C-1'`); err != nil || addressCount != 0 {
+		t.Fatalf("meaningless address section count=%d error=%v", addressCount, err)
+	}
+	fixed := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	if _, err := db.Exec(`UPDATE fincloud_cif_regulatory SET created_at=?,updated_at=? WHERE cif_no='C-1'`, fixed, fixed); err != nil {
+		t.Fatal(err)
+	}
+
+	secondID, secondOwner := detailRun(t, db.DB, "cif_detail", 1)
+	second, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailCIF, []byte(`{
+		"id":"C-1","namanasabah":"name","perorangan_noktp":"","perorangan_tempatlahir":"new city",
+		"profilresiko_profil":"low"
+	}`), fetched.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Stage(context.Background(), secondID, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Publish(context.Background(), secondID, secondOwner, ingestion.DetailCIF, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"fincloud_cif_ktp", "fincloud_cif_employment", "fincloud_cif_company", "fincloud_cif_kyc"} {
+		var count int
+		if err := db.Get(&count, "SELECT COUNT(*) FROM `"+table+"` WHERE cif_no='C-1'"); err != nil || count != 0 {
+			t.Fatalf("stale %s count=%d error=%v", table, count, err)
+		}
+	}
+	var birthPlace string
+	if err := db.Get(&birthPlace, `SELECT birth_place FROM fincloud_cif_personal_profiles WHERE cif_no='C-1'`); err != nil || birthPlace != "new city" {
+		t.Fatalf("birth_place=%q error=%v", birthPlace, err)
+	}
+	var timestamps struct {
+		Created time.Time `db:"created_at"`
+		Updated time.Time `db:"updated_at"`
+	}
+	if err := db.Get(&timestamps, `SELECT created_at,updated_at FROM fincloud_cif_regulatory WHERE cif_no='C-1'`); err != nil || !timestamps.Created.Equal(fixed) || !timestamps.Updated.Equal(fixed) {
+		t.Fatalf("unchanged regulatory timestamps=%+v error=%v", timestamps, err)
+	}
+
+	emptyID, emptyOwner := detailRun(t, db.DB, "cif_detail", 0)
+	if err := repository.Publish(context.Background(), emptyID, emptyOwner, ingestion.DetailCIF, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"fincloud_cifs", "fincloud_cif_personal_profiles", "fincloud_cif_regulatory"} {
+		var count int
+		if err := db.Get(&count, "SELECT COUNT(*) FROM `"+table+"`"); err != nil || count != 0 {
+			t.Fatalf("empty publication %s count=%d error=%v", table, count, err)
+		}
+	}
+}
+
+func TestExpandedSavingLoanAndChildFieldsPersist(t *testing.T) {
+	db := integrationdb.Open(t)
+	resetDetail(t, db.DB)
+	repository := NewDetailRepository(db)
+	fetched := time.Date(2026, 8, 23, 1, 2, 3, 0, time.UTC)
+
+	savingID, savingOwner := detailRun(t, db.DB, "saving_detail", 1)
+	saving, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailSaving,
+		[]byte(`{"norekening":"S-1","nocif":"C-1","nama":"product","namarek":"display","saldoawal":"1","saldoakhir":"2","produk_bnpl":false}`), fetched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Stage(context.Background(), savingID, saving); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Publish(context.Background(), savingID, savingOwner, ingestion.DetailSaving, 1); err != nil {
+		t.Fatal(err)
+	}
+	var savingRow struct {
+		AccountName string `db:"account_name"`
+		ProductBNPL string `db:"product_bnpl"`
+	}
+	if err := db.Get(&savingRow, `SELECT account_name,product_bnpl FROM fincloud_saving_details WHERE account_no='S-1'`); err != nil || savingRow.AccountName != "display" || savingRow.ProductBNPL != "false" {
+		t.Fatalf("saving row=%+v error=%v", savingRow, err)
+	}
+
+	loanID, loanOwner := detailRun(t, db.DB, "loan_detail", 1)
+	loan, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailLoan, []byte(`{
+		"id":"L-1","nocif":"C-1","channeling":{"nopengajuan":"APP-1","premiajk":"12.25","lifeinsurancecompany":"insurer","collateralpolicenumber":"POL-1","collateraltype":"vehicle","collateralvalue":"100.50"},
+		"jadwalangsuran":[{"bunga_flat":"1.25","pokok_flat":"2.50","pinjaman_flat":"3.75","statusbayar":"paid"}],
+		"historybayar":[{"bayar_dendapelunasan":"4.25","nominaldwp":"5.50","otor":"checker"}]
+	}`), fetched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Stage(context.Background(), loanID, loan); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Publish(context.Background(), loanID, loanOwner, ingestion.DetailLoan, 1); err != nil {
+		t.Fatal(err)
+	}
+	var application string
+	var premium, collateral string
+	if err := db.QueryRow(`SELECT application_number,CAST(insurance_premium AS CHAR),CAST(collateral_value AS CHAR) FROM fincloud_loan_details WHERE account_no='L-1'`).Scan(&application, &premium, &collateral); err != nil || application != "APP-1" || !decimal.RequireFromString(premium).Equal(decimal.RequireFromString("12.25")) || !decimal.RequireFromString(collateral).Equal(decimal.RequireFromString("100.5")) {
+		t.Fatalf("loan application=%q premium=%q collateral=%q error=%v", application, premium, collateral, err)
+	}
+	var status, authorizer string
+	if err := db.Get(&status, `SELECT payment_status FROM fincloud_loan_repayment_schedule WHERE account_no='L-1' AND item_index=0`); err != nil || status != "paid" {
+		t.Fatalf("payment status=%q error=%v", status, err)
+	}
+	if err := db.Get(&authorizer, `SELECT authorizer FROM fincloud_loan_payment_history WHERE account_no='L-1' AND item_index=0`); err != nil || authorizer != "checker" {
+		t.Fatalf("authorizer=%q error=%v", authorizer, err)
+	}
+}
+
 func TestDetailStageRejectsInvalidDecimalWithoutChangingPublishedState(t *testing.T) {
 	db := integrationdb.Open(t)
 	resetDetail(t, db.DB)

@@ -28,7 +28,13 @@ type detailSpec struct {
 	jobKey       string
 	table, stage string
 	fields       []detailColumn
+	extensions   []detailExtensionSpec
 	children     []detailChildSpec
+}
+
+type detailExtensionSpec struct {
+	key, table, stage string
+	fields            []detailColumn
 }
 
 type detailChildSpec struct {
@@ -36,39 +42,130 @@ type detailChildSpec struct {
 	fields            []detailColumn
 }
 
+func detailID(name string) detailColumn  { return detailColumn{name: name, identifier: true} }
+func detailCol(name string) detailColumn { return detailColumn{name: name} }
+func detailDecimal(name string, scale int) detailColumn {
+	return detailColumn{name: name, scale: scale}
+}
+
 var detailSpecifications = []detailSpec{
 	{domain: ingestion.DetailCIF, jobKey: "cif_detail", table: "fincloud_cifs", stage: "stg_fincloud_cif_details", fields: []detailColumn{
-		{"cif_no", true, 0}, {"customer_name", false, 0}, {"customer_type", false, 0}, {"identity_type", false, 0},
-		{"ktp_no", false, 0}, {"birth_date", false, 0}, {"cif_open_date", false, 0}, {"record_created_at", false, 0},
+		detailID("cif_no"), detailCol("customer_name"), detailCol("customer_type"), detailCol("identity_type"), detailCol("ktp_no"),
+		detailCol("birth_date"), detailCol("cif_open_date"), detailCol("record_created_at"), detailCol("alt_no"), detailCol("document_status"),
+		detailCol("location_name"), detailCol("record_created_by"), detailCol("record_created_location"), detailCol("record_updated_by"),
+		detailCol("record_updated_location"), detailCol("record_updated_at"), detailCol("record_timestamp"),
+	}, extensions: []detailExtensionSpec{
+		{key: "personal_profile", table: "fincloud_cif_personal_profiles", stage: "stg_fincloud_cif_personal_profiles", fields: []detailColumn{
+			detailCol("birth_place"), detailCol("gender"), detailCol("religion"), detailCol("marital_status"), detailCol("formal_education"),
+			detailCol("mother_name"), detailCol("nationality"), detailCol("country_of_origin"), detailCol("email"), detailCol("title"),
+			detailCol("member_type"), detailCol("dependent_count"), detailCol("residence_years"), detailCol("residence_months"),
+			detailCol("residence_status"), detailCol("ethnicity"), detailCol("marriage_date"), detailCol("npwp_no"),
+		}},
+		{key: "ktp", table: "fincloud_cif_ktp", stage: "stg_fincloud_cif_ktp", fields: []detailColumn{
+			detailCol("ktp_name"), detailCol("ktp_birth_date"), detailCol("ktp_religion"), detailCol("ktp_snapshot_address"),
+			detailCol("ktp_valid_for_life"), detailCol("ktp_blood_type"), detailCol("ktp_gender"), detailCol("ktp_nationality"),
+			detailCol("ktp_occupation"), detailCol("ktp_marital_status"), detailCol("ktp_birth_place"), detailCol("ktp_issue_place"),
+			detailCol("ktp_issue_date"), detailCol("ktp_valid_until"),
+		}},
+		{key: "addresses", table: "fincloud_cif_addresses", stage: "stg_fincloud_cif_addresses", fields: []detailColumn{
+			detailCol("ktp_address_line_1"), detailCol("ktp_address_line_2"), detailCol("ktp_subdistrict"), detailCol("ktp_district"),
+			detailCol("ktp_city"), detailCol("ktp_province"), detailCol("ktp_postal_code"), detailCol("ktp_rt"), detailCol("ktp_rw"),
+			detailCol("home_address_line_1"), detailCol("home_address_line_2"), detailCol("home_subdistrict"), detailCol("home_district"),
+			detailCol("home_city"), detailCol("home_province"), detailCol("home_postal_code"), detailCol("home_rt"), detailCol("home_rw"),
+			detailCol("home_area_code"), detailCol("home_phone"), detailCol("home_mobile"), detailCol("home_fax"),
+			detailCol("office_address_line_1"), detailCol("office_address_line_2"), detailCol("office_subdistrict"), detailCol("office_district"),
+			detailCol("office_city"), detailCol("office_province"), detailCol("office_postal_code"), detailCol("office_rt"), detailCol("office_rw"),
+			detailCol("office_area_code"), detailCol("office_phone"), detailCol("office_mobile"), detailCol("office_fax"),
+			detailCol("home_same_as_ktp"), detailCol("office_same_as_deed"), detailCol("mailing_address_type"),
+		}},
+		{key: "employment", table: "fincloud_cif_employment", stage: "stg_fincloud_cif_employment", fields: []detailColumn{
+			detailCol("work_type"), detailCol("job_title"), detailCol("business_field"), detailCol("company_name"), detailCol("previous_company_name"),
+			detailCol("economic_sector"), detailCol("work_years"), detailCol("work_months"), detailCol("previous_work_years"),
+			detailCol("previous_work_months"), detailDecimal("monthly_net_income", 6), detailDecimal("monthly_side_income", 6),
+			detailDecimal("monthly_expense", 6), detailCol("side_business"),
+		}},
+		{key: "company", table: "fincloud_cif_company", stage: "stg_fincloud_cif_company", fields: []detailColumn{
+			detailCol("company_npwp_no"), detailCol("company_business_entity_type"), detailCol("company_initial_deed_no"),
+			detailCol("company_latest_deed_no"), detailCol("company_initial_deed_place"), detailCol("company_latest_deed_place"),
+			detailCol("company_initial_deed_date"), detailCol("company_latest_deed_date"),
+		}},
+		{key: "kyc", table: "fincloud_cif_kyc", stage: "stg_fincloud_cif_kyc", fields: []detailColumn{
+			detailCol("kyc_source_of_funds"), detailCol("kyc_income_source"), detailCol("kyc_fund_use_purpose"),
+			detailDecimal("kyc_cash_deposit_limit", 6), detailDecimal("kyc_noncash_deposit_limit", 6),
+			detailDecimal("kyc_cash_withdrawal_limit", 6), detailDecimal("kyc_noncash_withdrawal_limit", 6),
+			detailCol("kyc_transaction_frequency_limit"), detailDecimal("kyc_company_income", 6), detailCol("kyc_company_business_form"),
+			detailCol("kyc_company_business_field"), detailCol("kyc_company_fund_use"),
+		}},
+		{key: "regulatory", table: "fincloud_cif_regulatory", stage: "stg_fincloud_cif_regulatory", fields: []detailColumn{
+			detailCol("sid_alias_name"), detailCol("sid_debtor_group"), detailCol("sid_debtor_city"), detailCol("sid_status"), detailCol("sid_din"),
+			detailCol("sid_related_party"), detailCol("sid_related_party_notes"), detailCol("sid_exceeds_bmpk"), detailCol("sid_violates_bmpk"),
+			detailCol("labul_debtor_group"), detailCol("risk_identity"), detailCol("risk_business_location"), detailCol("risk_transaction_count"),
+			detailCol("risk_business_activity"), detailCol("risk_ownership_structure"), detailCol("risk_product_service_network"),
+			detailCol("risk_other_information"), detailCol("risk_final_summary"), detailCol("risk_profile"),
+		}},
 	}},
 	{domain: ingestion.DetailSaving, jobKey: "saving_detail", table: "fincloud_saving_details", stage: "stg_fincloud_saving_details", fields: []detailColumn{
-		{"account_no", true, 0}, {"cif_no", false, 0}, {"account_name", false, 0}, {"location_id", false, 0},
-		{"beginning_balance", false, 6}, {"balance", false, 6}, {"blocked_balance", false, 6},
-		{"debit_mutation", false, 6}, {"credit_mutation", false, 6}, {"open_date", false, 0}, {"closed_date", false, 0},
+		detailID("account_no"), detailCol("cif_no"), detailCol("account_name"), detailCol("location_id"), detailDecimal("beginning_balance", 6),
+		detailDecimal("balance", 6), detailDecimal("blocked_balance", 6), detailDecimal("debit_mutation", 6), detailDecimal("credit_mutation", 6),
+		detailCol("open_date"), detailCol("closed_date"), detailCol("alt_no"), detailCol("product_id"), detailCol("product_savings_type"),
+		detailCol("savings_type"), detailCol("currency"), detailCol("document_status"), detailCol("created_date"),
+		detailDecimal("product_credit_interest_rate", 2), detailCol("credit_interest_type"), detailCol("overdraft"), detailCol("joint_account"),
+		detailCol("opening_purpose"), detailCol("source_of_fund"), detailCol("product_bnpl"), detailCol("auto_debit"), detailCol("print_bilyet"),
+		detailCol("print_savings_book"), detailCol("block_reason"), detailCol("block_notes"), detailCol("unblock_reason"), detailCol("block_status"),
+		detailCol("block_date"), detailCol("block_end_date"), detailCol("unblock_date"), detailDecimal("unblock_amount", 6),
+		detailDecimal("accrued_balance", 6), detailDecimal("accrued_debit_balance", 6), detailDecimal("accrued_credit_interest_balance", 6),
+		detailCol("active_standing_order_count"), detailCol("fixed_debit_interest_payment_day"), detailCol("fixed_credit_interest_payment_day"),
+		detailCol("marketing_code"), detailCol("marketing_notes"),
 	}},
 	{domain: ingestion.DetailTimeDeposit, jobKey: "time_deposit_detail", table: "fincloud_time_deposit_details", stage: "stg_fincloud_time_deposit_details", fields: []detailColumn{
-		{"account_no", true, 0}, {"cif_no", false, 0}, {"nominal", false, 6}, {"accrued_interest", false, 6},
-		{"product_interest_rate", false, 2}, {"open_date", false, 0}, {"maturity_date", false, 0}, {"location_id", false, 0},
+		detailID("account_no"), detailCol("cif_no"), detailDecimal("nominal", 6), detailDecimal("accrued_interest", 6),
+		detailDecimal("product_interest_rate", 2), detailCol("open_date"), detailCol("maturity_date"), detailCol("location_id"),
+		detailCol("account_name"), detailCol("certificate_no"), detailCol("product_id"), detailCol("product_deposit_type"), detailCol("currency"),
+		detailCol("term"), detailCol("period"), detailCol("automatic_rollover"), detailCol("compound_interest"), detailCol("interest_rate_change"),
+		detailCol("interest_payment_method"), detailCol("print_certificate"), detailCol("document_status"), detailCol("joint_account"),
+		detailCol("joint_account_type"), detailCol("source_of_fund"), detailCol("opening_purpose"), detailCol("last_interest_payment_date"),
+		detailCol("next_interest_payment_date"), detailCol("source_account_no"), detailCol("interest_destination_account"),
+		detailCol("disbursement_account_no"), detailCol("created_date"), detailCol("description"),
 	}, children: []detailChildSpec{{key: "mutasideposito", table: "fincloud_time_deposit_mutations", stage: "stg_fincloud_time_deposit_mutations", fields: []detailColumn{
-		{"transaction_date", false, 0}, {"transaction_type", false, 0}, {"currency", false, 0}, {"nominal", false, 6},
-		{"interest_rate", false, 2}, {"reference", false, 0}, {"branch", false, 0}, {"journal_no", false, 0},
+		detailCol("transaction_date"), detailCol("transaction_type"), detailCol("currency"), detailDecimal("nominal", 6),
+		detailDecimal("interest_rate", 2), detailCol("reference"), detailCol("branch"), detailCol("journal_no"), detailCol("period"),
+		detailCol("term"), detailCol("officer"), detailCol("description"),
 	}}}},
 	{domain: ingestion.DetailLoan, jobKey: "loan_detail", table: "fincloud_loan_details", stage: "stg_fincloud_loan_details", fields: []detailColumn{
-		{"account_no", true, 0}, {"cif_no", false, 0}, {"location_id", false, 0}, {"disbursement_date", false, 0},
-		{"outstanding_principal", false, 6}, {"principal_arrears", false, 6}, {"interest_arrears", false, 6},
-		{"penalty_arrears", false, 6}, {"dpd", false, 0}, {"collectability_bi", false, 0},
-		{"product_interest_rate", false, 2}, {"write_off_date", false, 0},
+		detailID("account_no"), detailCol("cif_no"), detailCol("location_id"), detailCol("disbursement_date"),
+		detailDecimal("outstanding_principal", 6), detailDecimal("principal_arrears", 6), detailDecimal("interest_arrears", 6),
+		detailDecimal("penalty_arrears", 6), detailCol("dpd"), detailCol("collectability_bi"), detailDecimal("product_interest_rate", 2),
+		detailCol("write_off_date"), detailCol("application_number"), detailDecimal("insurance_premium", 6), detailCol("insurance_company"),
+		detailCol("collateral_policy_number"), detailCol("collateral_type"), detailDecimal("collateral_value", 6), detailCol("alt_no"), detailCol("pk_no"),
+		detailCol("loan_agreement_no"), detailCol("product_id"), detailCol("product_code"), detailCol("product_loan_type"),
+		detailCol("product_installment_type"), detailCol("account_status"), detailCol("document_status"), detailCol("currency"), detailCol("term"),
+		detailCol("period"), detailCol("installment_day"), detailDecimal("principal_amount", 6), detailDecimal("credit_limit", 6),
+		detailDecimal("accrued_interest", 6), detailDecimal("flat_interest_rate", 2), detailCol("collectability_bpr"), detailCol("collectability_update"),
+		detailCol("arrears_start_date"), detailCol("last_due_date"), detailCol("next_due_date"), detailCol("last_principal_interest_payment_date"),
+		detailCol("next_principal_interest_payment_date"), detailCol("close_date"), detailCol("restructure_final_agreement_no"),
+		detailCol("restructure_final_agreement_date"), detailCol("restructure_method"), detailCol("restructure_frequency"), detailCol("sid_credit_nature"),
+		detailCol("sid_credit_nature_2"), detailCol("sid_usage_type"), detailCol("sid_repayment_source"), detailCol("sid_credit_group"),
+		detailCol("sid_usage_orientation"), detailCol("sid_economic_sector"), detailCol("sid_economic_sector_2"), detailCol("sid_business_type"),
+		detailCol("disbursement_saving_account"), detailCol("disbursement_saving_account_2"), detailCol("installment_payment_account"),
+		detailCol("installment_payment_account_2"), detailCol("loan_purpose"), detailDecimal("last_month_ppap", 6), detailCol("last_ppap_date"),
+		detailDecimal("write_off_principal_balance", 6), detailDecimal("write_off_accrued_interest", 6), detailDecimal("write_off_interest_arrears", 6),
+		detailDecimal("write_off_penalty_arrears", 6), detailDecimal("total_write_off", 6), detailDecimal("charge_off_principal", 6),
+		detailDecimal("charge_off_interest", 6), detailCol("marketing"), detailCol("record_created_by"), detailCol("record_created_location"),
 	}, children: []detailChildSpec{
-		{key: "biayapencairan", table: "fincloud_loan_disbursement_fees", stage: "stg_fincloud_loan_disbursement_fees", fields: []detailColumn{{"fee_name", false, 0}, {"fee_amount", false, 6}, {"calculate_dwp", false, 0}}},
+		{key: "biayapencairan", table: "fincloud_loan_disbursement_fees", stage: "stg_fincloud_loan_disbursement_fees", fields: []detailColumn{
+			detailCol("fee_name"), detailDecimal("fee_amount", 6), detailCol("calculate_dwp"),
+		}},
 		{key: "jadwalangsuran", table: "fincloud_loan_repayment_schedule", stage: "stg_fincloud_loan_repayment_schedule", fields: []detailColumn{
-			{"schedule_date", false, 0}, {"installment_amount", false, 6}, {"interest_amount", false, 6}, {"principal_amount", false, 6},
-			{"penalty_amount", false, 6}, {"paid_principal", false, 6}, {"paid_interest", false, 6}, {"paid_penalty", false, 6},
-			{"remaining_loan", false, 6}, {"installment_no", false, 0},
+			detailCol("schedule_date"), detailDecimal("installment_amount", 6), detailDecimal("interest_amount", 6), detailDecimal("principal_amount", 6),
+			detailDecimal("penalty_amount", 6), detailDecimal("paid_principal", 6), detailDecimal("paid_interest", 6), detailDecimal("paid_penalty", 6),
+			detailDecimal("remaining_loan", 6), detailCol("installment_no"), detailDecimal("flat_interest", 6), detailDecimal("flat_principal", 6),
+			detailDecimal("flat_loan", 6), detailCol("payment_status"),
 		}},
 		{key: "historybayar", table: "fincloud_loan_payment_history", stage: "stg_fincloud_loan_payment_history", fields: []detailColumn{
-			{"transaction_date", false, 0}, {"installment_no", false, 0}, {"payment_date", false, 0}, {"currency", false, 0},
-			{"due_date", false, 0}, {"total_paid", false, 6}, {"paid_principal", false, 6}, {"paid_interest", false, 6},
-			{"paid_penalty", false, 6}, {"journal_no", false, 0}, {"branch", false, 0},
+			detailCol("transaction_date"), detailCol("installment_no"), detailCol("payment_date"), detailCol("currency"), detailCol("due_date"),
+			detailDecimal("total_paid", 6), detailDecimal("paid_principal", 6), detailDecimal("paid_interest", 6), detailDecimal("paid_penalty", 6),
+			detailCol("journal_no"), detailCol("branch"), detailDecimal("paid_closing_penalty", 6), detailDecimal("dwp_nominal", 6),
+			detailCol("description"), detailCol("officer"), detailCol("authorizer"),
 		}},
 	}},
 }
@@ -122,6 +219,28 @@ func (repository *DetailRepository) stageTransaction(ctx context.Context, runID 
 	values = append(values, string(record.RawPayload), record.RawChecksum, record.LastFetchedAt.UTC())
 	if err := upsertStagedDetail(ctx, tx, specification.stage, columns, values); err != nil {
 		return err
+	}
+	for _, extension := range specification.extensions {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM `"+extension.stage+"` WHERE ingestion_run_id=? AND cif_no=?", runID, record.Identifier); err != nil {
+			return wrapDatabaseError(fmt.Errorf("delete staged %s section: %w", extension.stage, err), "stage_detail", "delete_staged_extension", extension.stage, 0, 0)
+		}
+		section, present := record.Sections[extension.key]
+		if !present {
+			continue
+		}
+		extensionColumns := []string{"ingestion_run_id", "cif_no"}
+		extensionValues := []any{runID, record.Identifier}
+		for _, field := range extension.fields {
+			value, valueErr := detailSQLValue(section[field.name], field)
+			if valueErr != nil {
+				return fmt.Errorf("%s.%s: %w", extension.key, field.name, valueErr)
+			}
+			extensionColumns = append(extensionColumns, field.name)
+			extensionValues = append(extensionValues, value)
+		}
+		if err := upsertStagedDetail(ctx, tx, extension.stage, extensionColumns, extensionValues); err != nil {
+			return err
+		}
 	}
 	for _, childSpecification := range specification.children {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM `"+childSpecification.stage+"` WHERE ingestion_run_id=? AND account_no=?", runID, record.Identifier); err != nil {
@@ -314,10 +433,48 @@ func reconcileDetail(ctx context.Context, tx *sqlx.Tx, runID uint64, specificati
 		return wrapDatabaseError(err, "publish_detail", "insert_new_parent", specification.table, 0, 0)
 	}
 
+	for _, extension := range specification.extensions {
+		if err := reconcileDetailExtension(ctx, tx, runID, specification, extension); err != nil {
+			return err
+		}
+	}
 	for _, child := range specification.children {
 		if err := reconcileDetailChildren(ctx, tx, runID, specification, child); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func reconcileDetailExtension(ctx context.Context, tx *sqlx.Tx, runID uint64, parent detailSpec, extension detailExtensionSpec) error {
+	finalTable, _ := quoteIdentifier(extension.table)
+	stageTable, _ := quoteIdentifier(extension.stage)
+	stageParent, _ := quoteIdentifier(parent.stage)
+
+	deleteMissing := "DELETE current_extension FROM " + finalTable + " current_extension JOIN " + stageParent +
+		" candidate_parent ON candidate_parent.ingestion_run_id=? AND candidate_parent.cif_no=current_extension.cif_no" +
+		" LEFT JOIN " + stageTable + " candidate_extension ON candidate_extension.ingestion_run_id=? AND candidate_extension.cif_no=current_extension.cif_no" +
+		" WHERE candidate_extension.cif_no IS NULL"
+	if _, err := tx.ExecContext(ctx, deleteMissing, runID, runID); err != nil {
+		return wrapDatabaseError(err, "publish_detail", "delete_missing_extensions", extension.table, 0, 0)
+	}
+
+	difference := detailDifference("current_extension", "candidate_extension", extension.fields, "")
+	assignments := detailAssignments("current_extension", "candidate_extension", extension.fields)
+	updateChanged := "UPDATE " + finalTable + " current_extension JOIN " + stageTable +
+		" candidate_extension ON candidate_extension.ingestion_run_id=? AND candidate_extension.cif_no=current_extension.cif_no" +
+		" SET " + strings.Join(assignments, ",") + " WHERE " + difference
+	if _, err := tx.ExecContext(ctx, updateChanged, runID); err != nil {
+		return wrapDatabaseError(err, "publish_detail", "update_changed_extensions", extension.table, 0, 0)
+	}
+
+	columns := append([]string{"cif_no"}, detailColumnNames(extension.fields)...)
+	insertNew := "INSERT INTO " + finalTable + " (" + quotedColumns(columns) + ") SELECT " + selectedColumns("candidate_extension", columns) +
+		" FROM " + stageTable + " candidate_extension LEFT JOIN " + finalTable +
+		" current_extension ON current_extension.cif_no=candidate_extension.cif_no" +
+		" WHERE candidate_extension.ingestion_run_id=? AND current_extension.cif_no IS NULL"
+	if _, err := tx.ExecContext(ctx, insertNew, runID); err != nil {
+		return wrapDatabaseError(err, "publish_detail", "insert_new_extensions", extension.table, 0, 0)
 	}
 	return nil
 }
@@ -367,7 +524,10 @@ func detailIdentifier(fields []detailColumn) string {
 }
 
 func detailDifference(current, candidate string, fields []detailColumn, checksum string) string {
-	comparisons := []string{"NOT (" + current + ".`" + checksum + "` <=> " + candidate + ".`" + checksum + "`)"}
+	comparisons := make([]string, 0, len(fields)+1)
+	if checksum != "" {
+		comparisons = append(comparisons, "NOT ("+current+".`"+checksum+"` <=> "+candidate+".`"+checksum+"`)")
+	}
 	for _, field := range fields {
 		if !field.identifier {
 			comparisons = append(comparisons, "NOT ("+current+".`"+field.name+"` <=> "+candidate+".`"+field.name+"`)")
@@ -414,10 +574,18 @@ func selectedColumns(alias string, columns []string) string {
 }
 
 func (repository *DetailRepository) CleanupRun(ctx context.Context, runID uint64) error {
+	return repository.clearRun(ctx, runID, "cleanup_detail_staging")
+}
+
+func (repository *DetailRepository) PrepareRun(ctx context.Context, runID uint64) error {
+	return repository.clearRun(ctx, runID, "prepare_detail_staging")
+}
+
+func (repository *DetailRepository) clearRun(ctx context.Context, runID uint64, operation string) error {
 	if repository == nil || repository.db == nil || runID == 0 {
 		return fmt.Errorf("Detail staging cleanup requires a run")
 	}
-	return retryTransaction(ctx, "cleanup_detail_staging", func() error {
+	return retryTransaction(ctx, operation, func() error {
 		tx, err := repository.db.BeginTxx(ctx, nil)
 		if err != nil {
 			return err
@@ -426,7 +594,7 @@ func (repository *DetailRepository) CleanupRun(ctx context.Context, runID uint64
 		defer rollbackUnlessCommitted(tx, &committed)
 		for _, specification := range detailSpecifications {
 			if _, err := tx.ExecContext(ctx, "DELETE FROM `"+specification.stage+"` WHERE ingestion_run_id=?", runID); err != nil {
-				return wrapDatabaseError(err, "cleanup_detail_staging", "delete_run_staging", specification.stage, 0, 0)
+				return wrapDatabaseError(err, operation, "delete_run_staging", specification.stage, 0, 0)
 			}
 		}
 		if err := tx.Commit(); err != nil {

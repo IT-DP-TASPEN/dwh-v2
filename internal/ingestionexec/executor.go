@@ -286,13 +286,9 @@ func fixedFailure(ctx context.Context, result fixedMemberResult) Result {
 }
 
 func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-		defer cancel()
-		if err := executor.detail.CleanupRun(cleanupCtx, run.ID); err != nil {
-			executor.logger.Warn("clean Detail staging", "run_id", run.ID, "job_key", run.JobKey, "error", err)
-		}
-	}()
+	if err := executor.detail.PrepareRun(ctx, run.ID); err != nil {
+		return failed("persistence", "could not prepare Detail staging", "prepare_detail_staging", err)
+	}
 	snapshotDate := jakartaSnapshotDate(executor.now())
 	if err := executor.runs.FreezeSnapshotDate(ctx, run.ID, run.OwnerID, snapshotDate); err != nil {
 		return failed("persistence", "could not freeze Detail execution date", "snapshot_date", err)
@@ -344,6 +340,11 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 		}
 		recordPersistenceDiagnostic(publishCtx, err, true)
 		return failed("persistence", "Detail current-state publication failed", "publish_detail", err)
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	if err := executor.detail.CleanupRun(cleanupCtx, run.ID); err != nil {
+		executor.logger.Warn("clean Detail staging", "run_id", run.ID, "job_key", run.JobKey, "error", err)
 	}
 	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
 }

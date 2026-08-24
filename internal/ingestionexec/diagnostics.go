@@ -223,7 +223,7 @@ func recordMapperDiagnostic(ctx context.Context, err error, item string, termina
 	metadata := mapper.Metadata()
 	event.ErrorMessage = metadata.SafeMessage()
 	event.Details = marshalDetails(map[string]any{"mapper": map[string]string{
-		"class": metadata.Class(), "field": metadata.Field(), "category": metadata.Category(),
+		"class": metadata.Class(), "field": metadata.Field(), "source_path": metadata.SourcePath(), "category": metadata.Category(),
 		"reason": metadata.Reason(), "safe_message": metadata.SafeMessage(),
 	}, "error_chain": safeErrorChain(err, false)})
 	if !terminal {

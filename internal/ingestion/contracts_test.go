@@ -1,6 +1,7 @@
 package ingestion
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -294,6 +295,106 @@ func TestDetailMapperPreservesRawPayloadSnapshotAndChildren(t *testing.T) {
 	decimalValue, err := scalar.Decimal()
 	if err != nil || decimalValue.String() != "1234567890.123456" {
 		t.Fatalf("decimal=%s error=%v", decimalValue, err)
+	}
+}
+
+func TestDetailMapperPreservesKTPFallbackAndSectionPresenceStates(t *testing.T) {
+	fetched := time.Date(2026, 8, 23, 1, 2, 3, 0, time.UTC)
+	tests := []struct {
+		name, primary, want string
+	}{
+		{name: "missing primary", want: "fallback"},
+		{name: "null primary", primary: `null`, want: "fallback"},
+		{name: "explicit empty primary", primary: `""`, want: ""},
+		{name: "primary value", primary: `"primary"`, want: "primary"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			primary := ""
+			if test.primary != "" {
+				primary = `,"perorangan_noktp":` + test.primary
+			}
+			payload := `{"id":"C-1","namanasabah":"name","dataktp_nik":"fallback"` + primary + `}`
+			record, err := MapDetailPayload(context.Background(), DetailCIF, []byte(payload), fetched)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := record.Fields["ktp_no"].(string); !ok || got != test.want {
+				t.Fatalf("ktp_no=%#v want=%q", record.Fields["ktp_no"], test.want)
+			}
+		})
+	}
+
+	record, err := MapDetailPayload(context.Background(), DetailCIF,
+		[]byte(`{"id":"C-2","namanasabah":"name","dataktp_agama":"","dataktp_berlakuseumurhidup":false,"perorangan_jumlahtanggungan":0}`), fetched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Sections["ktp"]["ktp_religion"] != "" || record.Sections["ktp"]["ktp_valid_for_life"] != "false" {
+		t.Fatalf("ktp section=%#v", record.Sections["ktp"])
+	}
+	if got := record.Sections["personal_profile"]["dependent_count"]; got != int64(0) {
+		t.Fatalf("dependent_count=%#v", got)
+	}
+
+	record, err = MapDetailPayload(context.Background(), DetailCIF,
+		[]byte(`{"id":"C-3","namanasabah":"name","dataktp_agama":null,"perorangan_agama":null}`), fetched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(record.Sections) != 0 {
+		t.Fatalf("null-only sections=%#v", record.Sections)
+	}
+}
+
+func TestDetailMapperUsesApprovedSavingLoanAndChildMappings(t *testing.T) {
+	fetched := time.Date(2026, 8, 23, 1, 2, 3, 0, time.UTC)
+	saving, err := MapDetailPayload(context.Background(), DetailSaving,
+		[]byte(`{"norekening":"S-1","nocif":"C-1","nama":"product label","namarek":"account display","saldoawal":"1","saldoakhir":"2"}`), fetched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saving.Fields["account_name"] != "account display" || !bytes.Contains(saving.RawPayload, []byte(`"nama":"product label"`)) {
+		t.Fatalf("saving mapping=%#v raw=%s", saving.Fields["account_name"], saving.RawPayload)
+	}
+	if _, exists := saving.Fields["product_name"]; exists {
+		t.Fatal("deferred product_name was mapped")
+	}
+
+	loan, err := MapDetailPayload(context.Background(), DetailLoan, []byte(`{
+		"id":"L-1","nocif":"C-1","channeling":{"nopengajuan":"APP-1","premiajk":"12.25","lifeinsurancecompany":"insurer","collateralpolicenumber":"POL-1","collateraltype":"vehicle","collateralvalue":"100.50"},
+		"jadwalangsuran":[{"bunga_flat":"1.25","pokok_flat":"2.50","pinjaman_flat":"3.75","statusbayar":"paid"}],
+		"historybayar":[{"bayar_dendapelunasan":"4.25","nominaldwp":"5.50","keterangan":"note","officer":"maker","otor":"checker"}]
+	}`), fetched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loan.Fields["application_number"] != "APP-1" || loan.Fields["insurance_company"] != "insurer" || loan.Fields["collateral_policy_number"] != "POL-1" {
+		t.Fatalf("loan string fields=%#v", loan.Fields)
+	}
+	for field, want := range map[string]string{"insurance_premium": "12.25", "collateral_value": "100.5"} {
+		if got, ok := loan.Fields[field].(decimal.Decimal); !ok || got.String() != want {
+			t.Fatalf("%s=%#v want=%s", field, loan.Fields[field], want)
+		}
+	}
+	if got := loan.Children["jadwalangsuran"][0].Fields["payment_status"]; got != "paid" {
+		t.Fatalf("payment_status=%#v", got)
+	}
+	if got := loan.Children["historybayar"][0].Fields["authorizer"]; got != "checker" {
+		t.Fatalf("authorizer=%#v", got)
+	}
+
+	withoutChanneling, err := MapDetailPayload(context.Background(), DetailLoan,
+		[]byte(`{"id":"L-2","nocif":"C-1","channeling":false}`), fetched)
+	if err != nil || withoutChanneling.Fields["application_number"] != nil {
+		t.Fatalf("false channeling record=%#v error=%v", withoutChanneling.Fields, err)
+	}
+
+	_, err = MapDetailPayload(context.Background(), DetailLoan,
+		[]byte(`{"id":"L-3","nocif":"C-1","channeling":{"premiajk":"invalid"}}`), fetched)
+	var mapper *MapperError
+	if !errors.As(err, &mapper) || mapper.Metadata().SourcePath() != "channeling__premiajk" {
+		t.Fatalf("mapper source path=%q error=%v", mapper.Metadata().SourcePath(), err)
 	}
 }
 
