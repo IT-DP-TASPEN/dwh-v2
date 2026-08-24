@@ -239,10 +239,14 @@ func (c *Client) DownloadMaintenanceReport(ctx context.Context, file, directory 
 }
 
 func (c *Client) ListMaintenanceReportFiles(ctx context.Context, folder string) ([]string, error) {
-	return c.listMaintenanceDirectory(ctx, folder, "/app/report")
+	root := path.Join("/app/report", folder)
+	return c.listMaintenanceDirectory(ctx, folder, "/app/report", root)
 }
 
-func (c *Client) listMaintenanceDirectory(ctx context.Context, file, directory string) ([]string, error) {
+func (c *Client) listMaintenanceDirectory(ctx context.Context, file, directory, root string) ([]string, error) {
+	if !pathWithin(path.Join(directory, file), root) {
+		return nil, fmt.Errorf("maintenance report directory is outside requested date")
+	}
 	query := url.Values{"file": {file}, "jenis": {"Folder"}, "pathfolder": {directory}}
 	var payload struct {
 		Status string `json:"status"`
@@ -263,6 +267,12 @@ func (c *Client) listMaintenanceDirectory(ctx context.Context, file, directory s
 	if payload.Status != "ok" {
 		return nil, applicationFailure("list maintenance reports", "Fincloud reported a source failure", diagnostic, payload.Status, "")
 	}
+	if payload.Data.Result.Path == "" && len(payload.Data.Result.List) == 0 {
+		return nil, nil
+	}
+	if !pathWithin(payload.Data.Result.Path, root) {
+		return nil, fmt.Errorf("maintenance report directory is outside requested date")
+	}
 	var files []string
 	for _, item := range payload.Data.Result.List {
 		if err := ctx.Err(); err != nil {
@@ -270,16 +280,25 @@ func (c *Client) listMaintenanceDirectory(ctx context.Context, file, directory s
 		}
 		switch item.Kind {
 		case "Folder":
-			children, err := c.listMaintenanceDirectory(ctx, item.File, payload.Data.Result.Path)
+			children, err := c.listMaintenanceDirectory(ctx, item.File, payload.Data.Result.Path, root)
 			if err != nil {
 				return nil, err
 			}
 			files = append(files, children...)
 		case "File":
-			files = append(files, path.Join(payload.Data.Result.Path, item.File))
+			file := path.Join(payload.Data.Result.Path, item.File)
+			if !pathWithin(file, root) {
+				return nil, fmt.Errorf("maintenance report file is outside requested date")
+			}
+			files = append(files, file)
 		}
 	}
 	return files, nil
+}
+
+func pathWithin(value, root string) bool {
+	value, root = path.Clean(value), path.Clean(root)
+	return value == root || strings.HasPrefix(value, root+"/")
 }
 
 func (c *Client) getJSON(ctx context.Context, operation, requestPath string, target any) (*DiagnosticPayload, error) {

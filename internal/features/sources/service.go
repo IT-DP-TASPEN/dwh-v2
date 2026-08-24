@@ -148,7 +148,7 @@ func Parameters(job core.JobDefinition, fromValue, toValue string) (ingestionrun
 	} else if job.Category == core.CategoryFixed {
 		parameters, err = ingestionrun.NewDateSeriesExecution(job.Key, from, to)
 	} else {
-		parameters, err = ingestionrun.NewMaintenanceSeriesExecution(job.Key, from, to, 3)
+		parameters, err = ingestionrun.NewMaintenanceSeriesExecution(job.Key, from, to)
 	}
 	if err != nil {
 		errorsByField["form"] = err.Error()

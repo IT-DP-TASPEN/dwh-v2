@@ -55,6 +55,14 @@ type fixedMemberResult struct {
 	err             error
 }
 
+type maintenanceDateError struct {
+	class string
+	cause error
+}
+
+func (failure *maintenanceDateError) Error() string { return failure.cause.Error() }
+func (failure *maintenanceDateError) Unwrap() error { return failure.cause }
+
 func New(client *fincloud.Client, fixed *ingestionstore.FixedRepository, detail *ingestionstore.DetailRepository, maintenance *ingestionstore.MaintenanceRepository, runs *ingestionrun.Repository, catalog ingestion.Catalog, fixedConcurrency, detailConcurrency int, logger *slog.Logger) (*Executor, error) {
 	if client == nil || fixed == nil || detail == nil || maintenance == nil || runs == nil || fixedConcurrency < 1 || detailConcurrency < 1 || logger == nil {
 		return nil, fmt.Errorf("complete ingestion executor dependencies are required")
@@ -571,6 +579,7 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 	progress := ingestionrun.Progress{Total: uint64(len(series.Dates)), Step: "maintenance_dates"}
 	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
 	var first error
+	firstClass := ""
 	for _, requested := range series.Dates {
 		if err := ctx.Err(); err != nil {
 			if result, cancelled := cancellationFailure(ctx, "maintenance_dates", err); cancelled {
@@ -579,27 +588,30 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 			return sourceFailure(ctx, err, "maintenance_dates")
 		}
 		progress.Started++
-		rows, err := executor.fetchAndSaveMaintenance(ctx, *job.Maintenance, requested, series.LookbackDays)
+		rows, err := executor.fetchAndSaveMaintenance(ctx, *job.Maintenance, requested)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return sourceFailure(ctx, err, "maintenance_dates")
 			}
 			progress.Failed++
+			class := maintenanceErrorClass(err)
+			primary := first == nil
 			if first == nil {
 				first = err
+				firstClass = class
 			}
-			if sourceWide(err) {
+			if class == "source" {
 				sourceCtx := diagnosticScope(ctx, "source", "maintenance_dates", "maintenance_dates", requested.String(), "")
 				recordSourceDiagnostic(sourceCtx, err, true, false)
 				_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
 				return sourceFailure(ctx, err, "maintenance_dates")
 			}
-			if _, ok := fincloud.TechnicalDiagnostic(err); ok {
-				sourceCtx := diagnosticScope(ctx, "source", "maintenance_dates", "maintenance_dates", requested.String(), "")
-				recordSourceDiagnostic(sourceCtx, err, false, true)
-			} else if database := ingestionstore.TechnicalDiagnostic(err); database.Operation != "" || database.Table != "" || database.MySQLNumber != 0 {
+			if class == "source_contract" {
+				parserCtx := diagnosticScope(ctx, "source_contract", "parse_maintenance_csv", "parse_maintenance_csv", requested.String(), "")
+				recordParserDiagnostic(parserCtx, err, primary)
+			} else if class == "persistence" {
 				persistCtx := diagnosticScope(ctx, "persistence", "persist_maintenance", "persist_maintenance", requested.String(), "")
-				recordPersistenceDiagnostic(persistCtx, err, false)
+				recordPersistenceDiagnostic(persistCtx, err, primary)
 			}
 		} else {
 			progress.Succeeded++
@@ -608,47 +620,83 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 		_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
 	}
 	if first != nil {
-		return failed("date_local", "one or more maintenance dates failed", "maintenance_dates", first)
+		return failed(firstClass, maintenanceFailureMessage(firstClass), "maintenance_dates", first)
 	}
 	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
 }
 
-func (executor *Executor) fetchAndSaveMaintenance(ctx context.Context, definition ingestion.MaintenanceDefinition, requested ingestion.CalendarDate, lookback int) (uint64, error) {
-	candidates, err := ingestion.MaintenanceCandidateDates(ingestion.MaintenanceParams{RequestedDate: requested, LookbackDays: lookback})
-	if err != nil {
-		return 0, err
+func (executor *Executor) fetchAndSaveMaintenance(ctx context.Context, definition ingestion.MaintenanceDefinition, requested ingestion.CalendarDate) (uint64, error) {
+	if requested.IsZero() {
+		return 0, &maintenanceDateError{class: "contract", cause: fmt.Errorf("maintenance requested date is required")}
 	}
 	folderKind := "daily"
 	if definition.Kind == ingestion.MaintenanceCBR {
 		folderKind = "cbr"
 	}
-	for _, matched := range candidates {
-		folder := folderKind + "/" + strings.ReplaceAll(matched.String(), "-", "")
-		sourceCtx := diagnosticScope(ctx, "source", "list_maintenance_reports", "list_maintenance_reports", requested.String(), "")
-		files, err := executor.client.ListMaintenanceReportFiles(sourceCtx, folder)
+	folder := folderKind + "/" + strings.ReplaceAll(requested.String(), "-", "")
+	sourceCtx := diagnosticScope(ctx, "source", "list_maintenance_reports", "list_maintenance_reports", requested.String(), "")
+	files, err := executor.client.ListMaintenanceReportFiles(sourceCtx, folder)
+	if err != nil {
+		var source *fincloud.Error
+		if !errors.As(err, &source) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			return 0, &maintenanceDateError{class: "source_contract", cause: err}
+		}
+		return 0, err
+	}
+	expectedRoot := path.Join("/app/report", folder) + "/"
+	for _, sourcePath := range files {
+		if !strings.HasPrefix(path.Clean(sourcePath), expectedRoot) {
+			return 0, &maintenanceDateError{class: "source_contract", cause: fmt.Errorf("maintenance report path does not match requested date %s", requested)}
+		}
+	}
+	for _, sourcePath := range files {
+		disposition, candidate := ingestion.ClassifyMaintenanceFile(definition.Kind, path.Base(sourcePath))
+		if disposition != ingestion.MaintenanceRegistered || candidate == nil || candidate.Key != definition.Key {
+			continue
+		}
+		downloadCtx := diagnosticScope(ctx, "source", "download_maintenance_report", "download_maintenance_report", requested.String(), "")
+		content, err := executor.client.DownloadMaintenanceReport(downloadCtx, path.Base(sourcePath), path.Dir(sourcePath))
 		if err != nil {
 			return 0, err
 		}
-		for _, sourcePath := range files {
-			disposition, candidate := ingestion.ClassifyMaintenanceFile(definition.Kind, path.Base(sourcePath))
-			if disposition != ingestion.MaintenanceRegistered || candidate == nil || candidate.Key != definition.Key {
-				continue
-			}
-			downloadCtx := diagnosticScope(ctx, "source", "download_maintenance_report", "download_maintenance_report", requested.String(), "")
-			content, err := executor.client.DownloadMaintenanceReport(downloadCtx, path.Base(sourcePath), path.Dir(sourcePath))
-			if err != nil {
-				return 0, err
-			}
-			parsed, err := ingestion.ParseMaintenanceCSV(diagnosticScope(ctx, "source_contract", "parse_maintenance_csv", "parse_maintenance_csv", requested.String(), ""), definition, matched, content)
-			if err != nil {
-				return 0, err
-			}
-			persistCtx := diagnosticScope(ctx, "persistence", "persist_maintenance", "persist_maintenance", requested.String(), "")
-			err = executor.maintenance.SaveSnapshot(persistCtx, ingestionstore.MaintenanceSnapshot{RequestedDate: requested, MatchedDate: matched, FileName: path.Base(sourcePath), Parsed: parsed})
-			return uint64(len(parsed.Rows)), err
+		parsed, err := ingestion.ParseMaintenanceCSV(diagnosticScope(ctx, "source_contract", "parse_maintenance_csv", "parse_maintenance_csv", requested.String(), ""), definition, requested, content)
+		if err != nil {
+			return 0, &maintenanceDateError{class: "source_contract", cause: err}
 		}
+		if parsed.AsOfDate != requested {
+			return 0, &maintenanceDateError{class: "source_contract", cause: fmt.Errorf("maintenance report date does not match requested date %s", requested)}
+		}
+		persistCtx := diagnosticScope(ctx, "persistence", "persist_maintenance", "persist_maintenance", requested.String(), "")
+		if err := executor.maintenance.SaveSnapshot(persistCtx, ingestionstore.MaintenanceSnapshot{RequestedDate: requested, FileName: path.Base(sourcePath), Parsed: parsed}); err != nil {
+			return 0, &maintenanceDateError{class: "persistence", cause: err}
+		}
+		return uint64(len(parsed.Rows)), nil
 	}
-	return 0, fmt.Errorf("registered maintenance file was not found within lookback")
+	return 0, &maintenanceDateError{class: "date_local", cause: fmt.Errorf("registered maintenance file was not found for requested date %s", requested)}
+}
+
+func maintenanceErrorClass(err error) string {
+	var failure *maintenanceDateError
+	if errors.As(err, &failure) {
+		return failure.class
+	}
+	if sourceWide(err) {
+		return "source"
+	}
+	return "date_local"
+}
+
+func maintenanceFailureMessage(class string) string {
+	switch class {
+	case "source_contract":
+		return "maintenance report contract validation failed"
+	case "persistence":
+		return "maintenance snapshot persistence failed"
+	case "contract":
+		return "invalid maintenance execution contract"
+	default:
+		return "one or more maintenance dates failed"
+	}
 }
 
 func sourceWide(err error) bool {

@@ -49,12 +49,12 @@ func TestMySQLCanonicalParametersAndAllRunAllChildren(t *testing.T) {
 	}{
 		{job: "cif_opening_report", transformed: `{ "to":"2026-06-03", "from":"2026-06-01" }`},
 		{job: "balance_sheet_report", transformed: `{ "dates":["2026-06-01", "2026-06-02", "2026-06-03"] }`},
-		{job: "eod_cif_opening_report_full", transformed: `{ "lookback_days":3, "dates":["2026-06-01","2026-06-02","2026-06-03"] }`},
+		{job: "eod_cif_opening_report_full", transformed: `{ "dates":["2026-06-01","2026-06-02","2026-06-03"] }`},
 		{job: "saving_detail", transformed: `{ }`},
 	}
 	tests[0].parameters, _ = NewRangeExecution(tests[0].job, from, to)
 	tests[1].parameters, _ = NewDateSeriesExecution(tests[1].job, from, to)
-	tests[2].parameters, _ = NewMaintenanceSeriesExecution(tests[2].job, from, to, 3)
+	tests[2].parameters, _ = NewMaintenanceSeriesExecution(tests[2].job, from, to)
 	tests[3].parameters, _ = NewLiveSnapshotExecution(tests[3].job)
 	for _, test := range tests {
 		runID, err := repository.Submit(context.Background(), test.job, test.parameters, TriggerDirect, "mysql-json-roundtrip", nil)
@@ -80,7 +80,7 @@ func TestMySQLCanonicalParametersAndAllRunAllChildren(t *testing.T) {
 		}
 	}
 
-	parentID, err := repository.CreateRunAll(context.Background(), from, to, 3, TriggerDirect, "mysql-run-all-roundtrip", nil)
+	parentID, err := repository.CreateRunAll(context.Background(), from, to, TriggerDirect, "mysql-run-all-roundtrip", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +116,44 @@ func TestMySQLCanonicalParametersAndAllRunAllChildren(t *testing.T) {
 	if err != nil || parent.Status != StatusCompleted {
 		t.Fatalf("Run All parent=%+v error=%v", parent, err)
 	}
+}
+
+func TestDirectMaintenanceFailureDoesNotRetryAndCanBeResubmitted(t *testing.T) {
+	db := integrationdb.Open(t)
+	catalog, _ := ingestion.NewCatalog()
+	repository, err := NewRepository(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const job = "eod_cif_opening_report_full"
+	if _, err := db.Exec(`UPDATE source_settings SET enabled=TRUE WHERE source_id=?`, job); err != nil {
+		t.Fatal(err)
+	}
+	date, _ := ingestion.ParseCalendarDate("2026-08-24")
+	parameters, _ := NewMaintenanceSeriesExecution(job, date, date)
+	firstID, err := repository.Submit(context.Background(), job, parameters, TriggerDirect, "manual-exact-date", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := NewOwnerID()
+	run, err := repository.Claim(context.Background(), owner)
+	if err != nil || run == nil || run.ID != firstID {
+		t.Fatalf("claimed run=%+v error=%v", run, err)
+	}
+	if err := repository.Finish(context.Background(), firstID, owner, StatusFailed, SafeError{Class: "date_local", Message: "exact source missing", Step: "maintenance_dates"}); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	if err := db.Get(&attempts, `SELECT COUNT(*) FROM schedule_attempts WHERE ingestion_run_id=?`, firstID); err != nil || attempts != 0 {
+		t.Fatalf("manual schedule attempts=%d error=%v", attempts, err)
+	}
+	secondID, err := repository.Submit(context.Background(), job, parameters, TriggerDirect, "manual-exact-date-again", nil)
+	if err != nil || secondID == firstID {
+		t.Fatalf("explicit retry id=%d first=%d error=%v", secondID, firstID, err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id IN (?,?)`, firstID, secondID)
+	})
 }
 
 func TestTransactionalSuccessfulFinishMatchesCanonicalFinish(t *testing.T) {
@@ -303,7 +341,7 @@ func TestDurableQueueRunAllAndTerminalCAS(t *testing.T) {
 		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, journalID)
 		_, _ = db.Exec(`UPDATE source_settings SET enabled=? WHERE source_id='journal_transaction_report'`, journalEnabled)
 	})
-	parentID, err := repository.CreateRunAll(context.Background(), from, to, 3, TriggerDirect, "", nil)
+	parentID, err := repository.CreateRunAll(context.Background(), from, to, TriggerDirect, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

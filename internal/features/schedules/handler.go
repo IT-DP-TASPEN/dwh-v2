@@ -216,7 +216,7 @@ func (handler *Handler) form(writer http.ResponseWriter, request *http.Request) 
 	form.Timezone = strings.TrimSpace(request.PostFormValue("timezone"))
 	form.Enabled = request.PostFormValue("enabled") == "true"
 	form.ExpectedRevision, _ = strconv.ParseUint(request.PostFormValue("expected_revision"), 10, 64)
-	for _, key := range []string{"policy_json", "policy_kind", "policy_version", "policy_checksum", "lookback", "target_kind"} {
+	for _, key := range []string{"policy_json", "policy_kind", "policy_version", "policy_checksum", "target_kind"} {
 		if _, found := request.PostForm[key]; found {
 			form.Errors["form"] = "Scheduler policy fields are managed by the application."
 		}

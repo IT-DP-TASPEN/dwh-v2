@@ -71,10 +71,6 @@ func (date *CalendarDate) UnmarshalJSON(data []byte) error {
 type FixedDateRangeParams struct{ From, To CalendarDate }
 type FixedSnapshotDateParams struct{ Date CalendarDate }
 type DetailSnapshotParams struct{ AsOfDate CalendarDate }
-type MaintenanceParams struct {
-	RequestedDate CalendarDate
-	LookbackDays  int
-}
 
 type SchedulePolicy string
 

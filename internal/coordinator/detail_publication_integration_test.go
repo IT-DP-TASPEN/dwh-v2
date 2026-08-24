@@ -24,7 +24,7 @@ func TestDetailPublicationCrashBeforeRunAllReconciliationCompletesOnce(t *testin
 		t.Fatal(err)
 	}
 	date, _ := ingestion.ParseCalendarDate("2026-08-22")
-	parentID, err := runs.CreateRunAll(context.Background(), date, date, 3, ingestionrun.TriggerDirect, "detail-publication-crash", nil)
+	parentID, err := runs.CreateRunAll(context.Background(), date, date, ingestionrun.TriggerDirect, "detail-publication-crash", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

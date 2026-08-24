@@ -95,7 +95,7 @@ func TestOccurrenceParametersUseHistoricalJakartaBusinessDate(t *testing.T) {
 	}{
 		{"cif_opening_report", ingestionrun.FixedRangeV1},
 		{"balance_sheet_report", ingestionrun.FixedDateSeriesV1},
-		{"eod_cif_opening_report_full", ingestionrun.MaintenanceDateSeriesV1},
+		{"eod_cif_opening_report_full", ingestionrun.MaintenanceDateSeriesV2},
 		{"cif_detail", ingestionrun.DetailLiveSnapshotV1},
 	}
 	for _, test := range tests {
@@ -115,9 +115,9 @@ func TestOccurrenceParametersUseHistoricalJakartaBusinessDate(t *testing.T) {
 			if len(value.Dates) != 1 || value.Dates[0].String() != "2026-08-14" {
 				t.Fatalf("date series=%+v", value)
 			}
-		case ingestionrun.MaintenanceDateSeriesV1:
+		case ingestionrun.MaintenanceDateSeriesV2:
 			value, _ := ingestionrun.DecodeMaintenanceSeries(parameters)
-			if len(value.Dates) != 1 || value.Dates[0].String() != "2026-08-14" || value.LookbackDays != 3 {
+			if len(value.Dates) != 1 || value.Dates[0].String() != "2026-08-14" {
 				t.Fatalf("maintenance=%+v", value)
 			}
 		case ingestionrun.DetailLiveSnapshotV1:

@@ -29,7 +29,7 @@ func TestManualParameterContractsCoverCatalog(t *testing.T) {
 				t.Fatalf("%s live parameters=%s %s", job.Key, parameters.Kind, parameters.JSON)
 			}
 		case core.SingleDate:
-			want := ingestionrun.MaintenanceDateSeriesV1
+			want := ingestionrun.MaintenanceDateSeriesV2
 			if job.Category == core.CategoryFixed {
 				want = ingestionrun.FixedDateSeriesV1
 			}

@@ -212,10 +212,10 @@ func parameterFields(parameters ingestionrun.Parameters) []ParameterField {
 		if err == nil && len(value.Dates) > 0 {
 			return []ParameterField{{"From", value.Dates[0].String()}, {"To", value.Dates[len(value.Dates)-1].String()}, {"Dates", strconv.Itoa(len(value.Dates))}}
 		}
-	case ingestionrun.MaintenanceDateSeriesV1:
+	case ingestionrun.MaintenanceDateSeriesV2:
 		value, err := ingestionrun.DecodeMaintenanceSeries(parameters)
 		if err == nil && len(value.Dates) > 0 {
-			return []ParameterField{{"From", value.Dates[0].String()}, {"To", value.Dates[len(value.Dates)-1].String()}, {"Dates", strconv.Itoa(len(value.Dates))}, {"Lookback days", strconv.Itoa(value.LookbackDays)}}
+			return []ParameterField{{"From", value.Dates[0].String()}, {"To", value.Dates[len(value.Dates)-1].String()}, {"Dates", strconv.Itoa(len(value.Dates))}}
 		}
 	case ingestionrun.DetailLiveSnapshotV1:
 		return []ParameterField{{"Mode", "Current-state synchronization"}}

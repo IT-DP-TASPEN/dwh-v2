@@ -24,12 +24,13 @@ import (
 func TestRetryUntilSuccessAndChronologicalCursor(t *testing.T) {
 	db, service := integrationService(t)
 	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)
-	schedule := createDueSchedule(t, db, service, "retry", "cif_opening_report", due)
+	schedule := createDueSchedule(t, db, service, "retry", "eod_cif_opening_report_full", due)
 
 	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
 		t.Fatalf("submit first changed=%v error=%v", changed, err)
 	}
 	first := latestAttempt(t, db, schedule.ID)
+	assertMaintenanceAttemptDate(t, db, first, "2026-08-09")
 	finishRun(t, db, first.RunID, ingestionrun.StatusFailed, due.Add(time.Hour))
 	clearThrottle(t, db, schedule.ID)
 	restarted := newIntegrationService(t, db)
@@ -46,6 +47,7 @@ func TestRetryUntilSuccessAndChronologicalCursor(t *testing.T) {
 	if second.AttemptNo != 2 {
 		t.Fatalf("second attempt=%d", second.AttemptNo)
 	}
+	assertMaintenanceAttemptDate(t, db, second, "2026-08-09")
 	finishRun(t, db, second.RunID, ingestionrun.StatusFailed, due.Add(2*time.Hour))
 	clearThrottle(t, db, schedule.ID)
 	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
@@ -58,7 +60,27 @@ func TestRetryUntilSuccessAndChronologicalCursor(t *testing.T) {
 		t.Fatalf("submit third changed=%v error=%v", changed, err)
 	}
 	third := latestAttempt(t, db, schedule.ID)
-	finishRun(t, db, third.RunID, ingestionrun.StatusSucceeded, due.Add(3*time.Hour))
+	assertMaintenanceAttemptDate(t, db, third, "2026-08-09")
+	finishRun(t, db, third.RunID, ingestionrun.StatusFailed, due.Add(3*time.Hour))
+	clearThrottle(t, db, schedule.ID)
+	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("record third backoff changed=%v error=%v", changed, err)
+	}
+	assertCursor(t, db, schedule.ID, due)
+	var occurrences int
+	if err := db.Get(&occurrences, `SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id=?`, schedule.ID); err != nil || occurrences != 1 {
+		t.Fatalf("head-of-line occurrences=%d error=%v", occurrences, err)
+	}
+	expireThrottle(t, db, schedule.ID)
+	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
+		t.Fatalf("submit fourth changed=%v error=%v", changed, err)
+	}
+	fourth := latestAttempt(t, db, schedule.ID)
+	if fourth.AttemptNo != 4 {
+		t.Fatalf("fourth attempt=%d", fourth.AttemptNo)
+	}
+	assertMaintenanceAttemptDate(t, db, fourth, "2026-08-09")
+	finishRun(t, db, fourth.RunID, ingestionrun.StatusSucceeded, due.Add(4*time.Hour))
 	clearThrottle(t, db, schedule.ID)
 	restarted = newIntegrationService(t, db) // Simulate crash after run success, before cursor reconciliation.
 	if changed, err := restarted.process(context.Background(), schedule.ID); err != nil || !changed {
@@ -66,10 +88,10 @@ func TestRetryUntilSuccessAndChronologicalCursor(t *testing.T) {
 	}
 	assertCursor(t, db, schedule.ID, due.AddDate(0, 0, 1))
 	var attempts int
-	if err := db.Get(&attempts, `SELECT COUNT(*) FROM schedule_attempts WHERE occurrence_id=?`, third.OccurrenceID); err != nil || attempts != 3 {
+	if err := db.Get(&attempts, `SELECT COUNT(*) FROM schedule_attempts WHERE occurrence_id=?`, fourth.OccurrenceID); err != nil || attempts != 4 {
 		t.Fatalf("attempts=%d error=%v", attempts, err)
 	}
-	assertCanonicalLink(t, db, schedule.ID, third)
+	assertCanonicalLink(t, db, schedule.ID, fourth)
 }
 
 func TestNoDateCoalescesAndAdvancesFromSuccessfulFinish(t *testing.T) {
@@ -448,6 +470,20 @@ type attemptView struct {
 	OccurrenceID uint64 `db:"occurrence_id"`
 	RunID        uint64 `db:"run_id"`
 	AttemptNo    uint32 `db:"attempt_no"`
+}
+
+func assertMaintenanceAttemptDate(t *testing.T, db *sqlx.DB, attempt attemptView, want string) {
+	t.Helper()
+	catalog, _ := ingestion.NewCatalog()
+	runs, _ := ingestionrun.NewRepository(db, catalog)
+	run, err := runs.Get(context.Background(), attempt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameters, err := ingestionrun.DecodeMaintenanceSeries(run.Parameters)
+	if err != nil || len(parameters.Dates) != 1 || parameters.Dates[0].String() != want {
+		t.Fatalf("attempt %d dates=%v error=%v", attempt.AttemptNo, parameters.Dates, err)
+	}
 }
 
 func latestAttempt(t *testing.T, db *sqlx.DB, scheduleID uint64) attemptView {

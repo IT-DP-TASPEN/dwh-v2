@@ -511,6 +511,10 @@ func TestMaintenanceParseIdentityAndCancellation(t *testing.T) {
 	if len(parsed.Rows) != 1 || parsed.Rows[0].BusinessKeyHash == "" || parsed.Rows[0].RowChecksum == "" {
 		t.Fatalf("parsed=%+v", parsed)
 	}
+	empty, err := ParseMaintenanceCSV(context.Background(), definition, asOf, "CIF No|Name\n")
+	if err != nil || len(empty.Rows) != 0 || len(empty.Columns) != 2 {
+		t.Fatalf("valid empty parsed=%+v error=%v", empty, err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := ParseMaintenanceCSV(ctx, definition, asOf, "CIF No|Name\n001|Masked\n"); err == nil {
@@ -518,18 +522,8 @@ func TestMaintenanceParseIdentityAndCancellation(t *testing.T) {
 	}
 }
 
-func TestMaintenanceLookbackAndBundleResolution(t *testing.T) {
+func TestMaintenanceBundleResolution(t *testing.T) {
 	requested, _ := ParseCalendarDate("2026-08-12")
-	dates, err := MaintenanceCandidateDates(MaintenanceParams{RequestedDate: requested, LookbackDays: 3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := []string{dates[0].String(), dates[1].String(), dates[2].String(), dates[3].String()}; !reflect.DeepEqual(got, []string{"2026-08-12", "2026-08-11", "2026-08-10", "2026-08-09"}) {
-		t.Fatalf("dates=%v", got)
-	}
-	if _, err := MaintenanceCandidateDates(MaintenanceParams{RequestedDate: requested, LookbackDays: 4}); err == nil {
-		t.Fatal("lookback beyond three previous days accepted")
-	}
 	bundle, err := ResolveMaintenanceBundle(MaintenanceCBR, requested, map[string]string{
 		"/reports/cbrloan.csv": "Loan No\n1\n", "/reports/Done.csv": "done", "/reports/SIPENDAR20260812.csv": "x", "/reports/extra.csv": "x",
 	})

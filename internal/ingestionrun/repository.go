@@ -97,7 +97,7 @@ func (repository *Repository) SubmitInTx(ctx context.Context, tx *sqlx.Tx, jobKe
 	return uint64(id), nil
 }
 
-func (repository *Repository) CreateRunAll(ctx context.Context, from, to ingestion.CalendarDate, lookback int, trigger Trigger, reference string, requester *uint64) (uint64, error) {
+func (repository *Repository) CreateRunAll(ctx context.Context, from, to ingestion.CalendarDate, trigger Trigger, reference string, requester *uint64) (uint64, error) {
 	parentParameters, err := NewRunAllRange(from, to)
 	if err != nil {
 		return 0, err
@@ -113,7 +113,7 @@ func (repository *Repository) CreateRunAll(ctx context.Context, from, to ingesti
 	}
 	parentID, _ := result.LastInsertId()
 	for index, job := range repository.catalog.Jobs() {
-		parameters, err := parametersForJob(job, from, to, lookback)
+		parameters, err := parametersForJob(job, from, to)
 		if err != nil {
 			return 0, err
 		}
@@ -128,7 +128,7 @@ func (repository *Repository) CreateRunAll(ctx context.Context, from, to ingesti
 	return uint64(parentID), nil
 }
 
-func parametersForJob(job ingestion.JobDefinition, from, to ingestion.CalendarDate, lookback int) (Parameters, error) {
+func parametersForJob(job ingestion.JobDefinition, from, to ingestion.CalendarDate) (Parameters, error) {
 	switch job.DateStrategy {
 	case ingestion.RangeCapable:
 		return NewRangeExecution(job.Key, from, to)
@@ -136,7 +136,7 @@ func parametersForJob(job ingestion.JobDefinition, from, to ingestion.CalendarDa
 		if job.Category == ingestion.CategoryFixed {
 			return NewDateSeriesExecution(job.Key, from, to)
 		}
-		return NewMaintenanceSeriesExecution(job.Key, from, to, lookback)
+		return NewMaintenanceSeriesExecution(job.Key, from, to)
 	case ingestion.NoDate:
 		return NewLiveSnapshotExecution(job.Key)
 	default:

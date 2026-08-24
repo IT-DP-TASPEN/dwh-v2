@@ -804,14 +804,14 @@ func TestMaintenanceDynamicAdditiveRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := NewMaintenanceRepository(db)
-	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, MatchedDate: date, FileName: "cbrcustomer.csv", Parsed: parsed}); err != nil {
+	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: parsed}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec("CREATE TRIGGER phase3_fail_cbr_customer BEFORE INSERT ON `" + definition.TableName + "` FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='forced load failure'"); err != nil {
 		t.Fatal(err)
 	}
 	broken, _ := ingestion.ParseMaintenanceCSV(context.Background(), definition, date, "One|Two|Three\nc|d|e\n")
-	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, MatchedDate: date, FileName: "cbrcustomer.csv", Parsed: broken}); err == nil {
+	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: broken}); err == nil {
 		t.Fatal("broken load succeeded")
 	}
 	if _, err := db.Exec(`DROP TRIGGER phase3_fail_cbr_customer`); err != nil {
@@ -822,8 +822,24 @@ func TestMaintenanceDynamicAdditiveRetry(t *testing.T) {
 		t.Fatalf("additive DDL did not survive failed load: count=%d error=%v", newColumn, err)
 	}
 	valid, _ := ingestion.ParseMaintenanceCSV(context.Background(), definition, date, "One|Two|Three\nc|d|e\n")
-	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, MatchedDate: date, FileName: "cbrcustomer.csv", Parsed: valid}); err != nil {
+	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: valid}); err != nil {
 		t.Fatal(err)
+	}
+	otherDate, _ := ingestion.ParseCalendarDate("2026-08-11")
+	mismatched, _ := ingestion.ParseMaintenanceCSV(context.Background(), definition, otherDate, "One|Two|Three\nc|d|e\n")
+	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: mismatched}); err == nil {
+		t.Fatal("mismatched maintenance source date succeeded")
+	}
+	empty, err := ingestion.ParseMaintenanceCSV(context.Background(), definition, date, "One|Two|Three\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: empty}); err != nil {
+		t.Fatalf("valid empty maintenance snapshot: %v", err)
+	}
+	var rows int
+	if err := db.Get(&rows, "SELECT COUNT(*) FROM `"+definition.TableName+"` WHERE as_of_date=?", date.String()); err != nil || rows != 0 {
+		t.Fatalf("empty maintenance publication rows=%d error=%v", rows, err)
 	}
 }
 
@@ -887,7 +903,7 @@ func TestConcurrentMaintenanceSchemaEvolutionSerializes(t *testing.T) {
 			parsed, err := ingestion.ParseMaintenanceCSV(context.Background(), definition, date, header+"\nvalue\n")
 			if err == nil {
 				<-start
-				err = repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, MatchedDate: date, FileName: "cbrcustomer.csv", Parsed: parsed})
+				err = repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: parsed})
 			}
 			errorsByHeader <- err
 		}(header)

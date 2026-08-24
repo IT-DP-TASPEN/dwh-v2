@@ -12,36 +12,38 @@ This matrix is a runbook, not evidence that live Fincloud behavior has been re-t
 | `fund_distribution_report` | Fixed | Range; one all-location-empty member | chunks, rows, atomic promotion |
 | `vault_mutation_report` | Fixed | Range; one all-location-empty member | chunks, rows, atomic promotion |
 | `teller_mutation_report` | Fixed | Range; one all-location-empty member | chunks, rows, atomic promotion |
-| `eod_cif_opening_report_full` | EOD | Date series; lookback 3 | matched date, dynamic columns, snapshot |
-| `eod_detail_outstanding_rekening_pinjaman` | EOD | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `eod_laporan_pelunasan_pinjaman_sebelum_jt` | EOD | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `eod_laporan_pembayaran_angsuran` | EOD | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `eod_laporan_pencairan_pinjaman` | EOD | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `eod_laporan_pinjaman_akan_jatuh_tempo` | EOD | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `eod_loan_write_off_report` | EOD | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `eod_savings_account_api_transaction` | EOD | Date series; lookback 3 | row-number identity, snapshot |
-| `eod_savings_account_closing_report` | EOD | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `eod_savings_account_opening_report` | EOD | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `eod_savings_account_balance_report` | EOD | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `eod_loan_will_due_report` | EOD | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `eod_savings_balance_details_report` | EOD | Date series; lookback 3 | intentional fixture gap; contract validation |
-| `eod_time_deposit_account_balance_details` | EOD | Date series; lookback 3 | intentional fixture gap; contract validation |
-| `eod_time_deposit_closing_report` | EOD | Date series; lookback 3 | intentional fixture gap; contract validation |
-| `eod_time_deposit_placement_report` | EOD | Date series; lookback 3 | intentional fixture gap; contract validation |
-| `eod_savings_balance_details_report_rak` | EOD | Date series; lookback 3 | intentional fixture gap; contract validation |
-| `cbr_balance_sheet` | CBR | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `cbr_arrears` | CBR | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `cbr_collateral` | CBR | Date series; lookback 3 | row-number identity, snapshot |
-| `cbr_customer` | CBR | Date series; lookback 3 | row-number identity, snapshot |
-| `cbr_loan` | CBR | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `cbr_savings` | CBR | Date series; lookback 3 | identity, dynamic columns, snapshot |
-| `cbr_time_deposit` | CBR | Date series; lookback 3 | identity, dynamic columns, snapshot |
+| `eod_cif_opening_report_full` | EOD | Exact date series | requested date, dynamic columns, snapshot |
+| `eod_detail_outstanding_rekening_pinjaman` | EOD | Exact date series | identity, dynamic columns, snapshot |
+| `eod_laporan_pelunasan_pinjaman_sebelum_jt` | EOD | Exact date series | identity, dynamic columns, snapshot |
+| `eod_laporan_pembayaran_angsuran` | EOD | Exact date series | identity, dynamic columns, snapshot |
+| `eod_laporan_pencairan_pinjaman` | EOD | Exact date series | identity, dynamic columns, snapshot |
+| `eod_laporan_pinjaman_akan_jatuh_tempo` | EOD | Exact date series | identity, dynamic columns, snapshot |
+| `eod_loan_write_off_report` | EOD | Exact date series | identity, dynamic columns, snapshot |
+| `eod_savings_account_api_transaction` | EOD | Exact date series | row-number identity, snapshot |
+| `eod_savings_account_closing_report` | EOD | Exact date series | identity, dynamic columns, snapshot |
+| `eod_savings_account_opening_report` | EOD | Exact date series | identity, dynamic columns, snapshot |
+| `eod_savings_account_balance_report` | EOD | Exact date series | identity, dynamic columns, snapshot |
+| `eod_loan_will_due_report` | EOD | Exact date series | identity, dynamic columns, snapshot |
+| `eod_savings_balance_details_report` | EOD | Exact date series | intentional fixture gap; contract validation |
+| `eod_time_deposit_account_balance_details` | EOD | Exact date series | intentional fixture gap; contract validation |
+| `eod_time_deposit_closing_report` | EOD | Exact date series | intentional fixture gap; contract validation |
+| `eod_time_deposit_placement_report` | EOD | Exact date series | intentional fixture gap; contract validation |
+| `eod_savings_balance_details_report_rak` | EOD | Exact date series | intentional fixture gap; contract validation |
+| `cbr_balance_sheet` | CBR | Exact date series | identity, dynamic columns, snapshot |
+| `cbr_arrears` | CBR | Exact date series | identity, dynamic columns, snapshot |
+| `cbr_collateral` | CBR | Exact date series | row-number identity, snapshot |
+| `cbr_customer` | CBR | Exact date series | row-number identity, snapshot |
+| `cbr_loan` | CBR | Exact date series | identity, dynamic columns, snapshot |
+| `cbr_savings` | CBR | Exact date series | identity, dynamic columns, snapshot |
+| `cbr_time_deposit` | CBR | Exact date series | identity, dynamic columns, snapshot |
 | `cif_detail` | Detail | Complete current state | frozen Jakarta execution date, failure-atomic publication |
 | `saving_detail` | Detail | Complete current state | frozen Jakarta execution date, failure-atomic publication |
 | `time_deposit_detail` | Detail | Complete current state | frozen Jakarta execution date, atomic parent/children publication |
 | `loan_detail` | Detail | Complete current state | frozen Jakarta execution date, atomic parent/children publication |
 
 ## Acceptance per job
+
+Date-specific ingestion uses exactly each requested date. If its source report is unavailable, the run fails; scheduled replay retains and retries that same requested date. A contract-valid source with zero rows remains a successful empty publication, while a missing or malformed source fails.
 
 - Canonical parameters and internal member set match the catalog contract.
 - Source completion is proven without exposing payloads.

@@ -75,7 +75,7 @@ func TestRunReadModelsPaginationAndPlans(t *testing.T) {
 	if err != nil || sources.Enabled+sources.Disabled != 36 {
 		t.Fatalf("canonical source overview=%+v error=%v", sources, err)
 	}
-	parentID, err := runs.CreateRunAll(context.Background(), from, from, 3, ingestionrun.TriggerDirect, "phase6-read-run-all", nil)
+	parentID, err := runs.CreateRunAll(context.Background(), from, from, ingestionrun.TriggerDirect, "phase6-read-run-all", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

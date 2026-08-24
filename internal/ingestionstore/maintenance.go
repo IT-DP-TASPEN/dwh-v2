@@ -27,7 +27,6 @@ type MaintenanceRepository struct {
 
 type MaintenanceSnapshot struct {
 	RequestedDate ingestion.CalendarDate
-	MatchedDate   ingestion.CalendarDate
 	FileName      string
 	Parsed        ingestion.ParsedMaintenanceCSV
 }
@@ -41,7 +40,7 @@ func (repository *MaintenanceRepository) SaveSnapshot(ctx context.Context, snaps
 		return fmt.Errorf("maintenance repository is not configured")
 	}
 	definition := snapshot.Parsed.Definition
-	if snapshot.RequestedDate.IsZero() || snapshot.MatchedDate.IsZero() || snapshot.FileName == "" || snapshot.Parsed.AsOfDate != snapshot.MatchedDate || definition.SchemaMode != ingestion.DynamicAdditive || len(snapshot.Parsed.Columns) == 0 {
+	if snapshot.RequestedDate.IsZero() || snapshot.FileName == "" || snapshot.Parsed.AsOfDate != snapshot.RequestedDate || definition.SchemaMode != ingestion.DynamicAdditive || len(snapshot.Parsed.Columns) == 0 {
 		return fmt.Errorf("complete dynamic-additive maintenance snapshot is required")
 	}
 	if !canonicalMaintenanceDefinition(definition) {
@@ -283,9 +282,6 @@ func validateMaintenanceSnapshot(snapshot MaintenanceSnapshot) error {
 		}
 		identities[identity] = true
 	}
-	if len(snapshot.Parsed.Rows) == 0 {
-		return fmt.Errorf("empty maintenance snapshot is not allowed")
-	}
 	return nil
 }
 
@@ -331,7 +327,7 @@ func replaceMaintenanceSnapshot(ctx context.Context, connection *sql.Conn, snaps
 		}
 	}()
 	table, _ := quoteIdentifier(snapshot.Parsed.Definition.TableName)
-	if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE as_of_date = ?", snapshot.MatchedDate.String()); err != nil {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE as_of_date = ?", snapshot.RequestedDate.String()); err != nil {
 		return fmt.Errorf("delete maintenance snapshot: %w", err)
 	}
 	columns := []string{"requested_date", "as_of_date", "source_file_name", "source_row_number", "source_row_checksum", "business_key_hash"}
@@ -344,7 +340,7 @@ func replaceMaintenanceSnapshot(ctx context.Context, connection *sql.Conn, snaps
 		if row.BusinessKeyHash != "" {
 			businessKey = row.BusinessKeyHash
 		}
-		values[index] = []any{snapshot.RequestedDate.String(), snapshot.MatchedDate.String(), snapshot.FileName, row.SourceRowNumber, row.RowChecksum, businessKey}
+		values[index] = []any{snapshot.RequestedDate.String(), snapshot.RequestedDate.String(), snapshot.FileName, row.SourceRowNumber, row.RowChecksum, businessKey}
 		for _, value := range row.Values {
 			values[index] = append(values[index], value)
 		}
@@ -372,7 +368,7 @@ func upsertDynamicRegistry(ctx context.Context, tx *sql.Tx, snapshot Maintenance
 		 last_seen_at=VALUES(last_seen_at), last_seen_filename=VALUES(last_seen_filename), last_seen_as_of_date=VALUES(last_seen_as_of_date),
 		 source_kind=VALUES(source_kind), table_name=VALUES(table_name), identity_mode=VALUES(identity_mode), schema_mode=VALUES(schema_mode)`,
 		definition.Key, definition.Kind, definition.TableName, definition.Identity, definition.SchemaMode,
-		snapshot.FileName, snapshot.FileName, snapshot.MatchedDate.String(), snapshot.MatchedDate.String()); err != nil {
+		snapshot.FileName, snapshot.FileName, snapshot.RequestedDate.String(), snapshot.RequestedDate.String()); err != nil {
 		return fmt.Errorf("upsert dynamic source registry: %w", err)
 	}
 	for _, column := range snapshot.Parsed.Columns {
@@ -384,7 +380,7 @@ func upsertDynamicRegistry(ctx context.Context, tx *sql.Tx, snapshot Maintenance
 			 last_seen_at=VALUES(last_seen_at), last_seen_filename=VALUES(last_seen_filename),
 			 last_seen_as_of_date=VALUES(last_seen_as_of_date), seen_count=seen_count+1`,
 			definition.Key, column.OriginalHeader, column.PhysicalName, column.Ordinal,
-			snapshot.FileName, snapshot.FileName, snapshot.MatchedDate.String(), snapshot.MatchedDate.String()); err != nil {
+			snapshot.FileName, snapshot.FileName, snapshot.RequestedDate.String(), snapshot.RequestedDate.String()); err != nil {
 			return fmt.Errorf("upsert dynamic column registry: %w", err)
 		}
 	}

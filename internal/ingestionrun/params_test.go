@@ -19,11 +19,11 @@ func TestCanonicalParametersCoverAllJobDateContracts(t *testing.T) {
 	counts := map[ingestion.DateStrategy]int{}
 	for _, job := range catalog.Jobs() {
 		counts[job.DateStrategy]++
-		first, err := parametersForJob(job, from, to, 3)
+		first, err := parametersForJob(job, from, to)
 		if err != nil {
 			t.Fatalf("%s: %v", job.Key, err)
 		}
-		second, err := parametersForJob(job, from, to, 3) // direct/scheduler/Run All all use this constructor path.
+		second, err := parametersForJob(job, from, to) // direct/scheduler/Run All all use this constructor path.
 		if err != nil || first.Kind != second.Kind || first.Checksum != second.Checksum || !bytes.Equal(first.JSON, second.JSON) {
 			t.Fatalf("%s parameters are not deterministic", job.Key)
 		}
@@ -86,8 +86,8 @@ func TestValidateReencodesTypedParametersBeforeChecksum(t *testing.T) {
 		{"cif_opening_report", func() (Parameters, error) { return NewRangeExecution("cif_opening_report", from, to) }, `{ "to": "2026-06-03", "from": "2026-06-01" }`},
 		{"balance_sheet_report", func() (Parameters, error) { return NewDateSeriesExecution("balance_sheet_report", from, to) }, `{ "dates": [ "2026-06-01", "2026-06-02", "2026-06-03" ] }`},
 		{"eod_cif_opening_report_full", func() (Parameters, error) {
-			return NewMaintenanceSeriesExecution("eod_cif_opening_report_full", from, to, 3)
-		}, `{ "lookback_days": 3, "dates": ["2026-06-01","2026-06-02","2026-06-03"] }`},
+			return NewMaintenanceSeriesExecution("eod_cif_opening_report_full", from, to)
+		}, `{ "dates": ["2026-06-01","2026-06-02","2026-06-03"] }`},
 		{"saving_detail", func() (Parameters, error) { return NewLiveSnapshotExecution("saving_detail") }, `{ }`},
 	}
 	for _, test := range tests {

@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -12,6 +16,69 @@ import (
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 )
+
+func TestMaintenanceUsesOnlyExactRequestedDirectoryAndPreservesFailureClass(t *testing.T) {
+	requested, _ := ingestion.ParseCalendarDate("2026-08-24")
+	definition := ingestion.MaintenanceDefinitions()[0]
+	const exactFolder = "daily/20260824"
+	tests := []struct {
+		name, exactPath, folderItem, content, class string
+		status                                      int
+		wantDownloads                               int
+	}{
+		{name: "missing with prior date", class: "date_local"},
+		{name: "missing with several prior dates", class: "date_local"},
+		{name: "malformed exact report", exactPath: "/app/report/daily/20260824/CIF Opening Report (Full).csv", content: "Wrong Header\n", class: "source_contract", wantDownloads: 1},
+		{name: "returned path identifies prior date", exactPath: "/app/report/daily/20260823/CIF Opening Report (Full).csv", class: "source_contract"},
+		{name: "nested directory identifies prior date", folderItem: "../20260823", class: "source_contract"},
+		{name: "Fincloud request failure", status: http.StatusServiceUnavailable, class: "source"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			listed := []string{}
+			downloads := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/admin/access/login":
+					_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session"}}}`)
+				case "/system/downloaderlaporan/pembuatan/loadorDownload":
+					folder := request.URL.Query().Get("file")
+					listed = append(listed, folder)
+					if test.status != 0 {
+						response.WriteHeader(test.status)
+						return
+					}
+					path, list := "/app/report/"+folder, `[]`
+					if test.exactPath != "" {
+						path = test.exactPath[:len(test.exactPath)-len("CIF Opening Report (Full).csv")-1]
+						list = `[{"file":"CIF Opening Report (Full).csv","jenis":"File"}]`
+					} else if test.folderItem != "" {
+						list = fmt.Sprintf(`[{"file":%q,"jenis":"Folder"}]`, test.folderItem)
+					}
+					_, _ = fmt.Fprintf(response, `{"status":"ok","data":{"result":{"pathfolder":%q,"list":%s}}}`, path, list)
+				case "/system/downloaderlaporan/download.php":
+					downloads++
+					_, _ = io.WriteString(response, test.content)
+				default:
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+			client, err := fincloud.NewClient(fincloud.Config{BaseURL: server.URL, Username: "user", Password: "pass", LocationID: "001", RoleID: "role", HTTPTimeout: time.Second, InsecureSkipVerify: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			executor := &Executor{client: client}
+			_, err = executor.fetchAndSaveMaintenance(context.Background(), definition, requested)
+			if err == nil || maintenanceErrorClass(err) != test.class {
+				t.Fatalf("error=%v class=%s want=%s", err, maintenanceErrorClass(err), test.class)
+			}
+			if !reflect.DeepEqual(listed, []string{exactFolder}) || downloads != test.wantDownloads {
+				t.Fatalf("listed=%v downloads=%d", listed, downloads)
+			}
+		})
+	}
+}
 
 func TestSourceWideFailureClassification(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusNotFound} {

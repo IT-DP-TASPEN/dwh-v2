@@ -22,7 +22,6 @@ const (
 	PolicyPreviousCalendarDay        = "previous_calendar_day_jakarta"
 	PolicyDetailLiveSnapshot         = "detail_live_snapshot"
 	policyVersionV1           uint16 = 1
-	defaultLookbackDays              = 3
 )
 
 var (
@@ -195,7 +194,7 @@ func parametersForOccurrence(job ingestion.JobDefinition, scheduledFor time.Time
 		if job.Category == ingestion.CategoryFixed {
 			return ingestionrun.NewDateSeriesExecution(job.Key, date, date)
 		}
-		return ingestionrun.NewMaintenanceSeriesExecution(job.Key, date, date, defaultLookbackDays)
+		return ingestionrun.NewMaintenanceSeriesExecution(job.Key, date, date)
 	case ingestion.NoDate:
 		// Fincloud exposes current detail only; missed historical detail states
 		// cannot be reconstructed and are therefore one live obligation.

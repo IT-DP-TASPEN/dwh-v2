@@ -157,17 +157,6 @@ func ClassifyMaintenanceFile(kind MaintenanceKind, filename string) (Maintenance
 	return MaintenanceUnknown, nil
 }
 
-func MaintenanceCandidateDates(parameters MaintenanceParams) ([]CalendarDate, error) {
-	if parameters.RequestedDate.IsZero() || parameters.LookbackDays < 0 || parameters.LookbackDays > 3 {
-		return nil, fmt.Errorf("maintenance requested date and lookback between 0 and 3 are required")
-	}
-	dates := make([]CalendarDate, parameters.LookbackDays+1)
-	for offset := range dates {
-		dates[offset] = parameters.RequestedDate.AddDays(-offset)
-	}
-	return dates, nil
-}
-
 type MaintenanceFile struct {
 	SourcePath string
 	FileName   string
@@ -345,9 +334,6 @@ func ParseMaintenanceCSV(ctx context.Context, definition MaintenanceDefinition, 
 			seenKeys[row.BusinessKeyHash] = line
 		}
 		rows = append(rows, row)
-	}
-	if len(rows) == 0 {
-		return ParsedMaintenanceCSV{}, fmt.Errorf("%s: empty snapshot is not allowed", definition.Key)
 	}
 	return ParsedMaintenanceCSV{Definition: definition, AsOfDate: asOfDate, Columns: columns, Rows: rows}, nil
 }

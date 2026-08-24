@@ -15,7 +15,7 @@ type ParameterKind string
 const (
 	FixedRangeV1            ParameterKind = "fixed_range_v1"
 	FixedDateSeriesV1       ParameterKind = "fixed_date_series_v1"
-	MaintenanceDateSeriesV1 ParameterKind = "maintenance_date_series_v1"
+	MaintenanceDateSeriesV2 ParameterKind = "maintenance_date_series_v2"
 	DetailLiveSnapshotV1    ParameterKind = "detail_live_snapshot_v1"
 	RunAllRangeV1           ParameterKind = "run_all_range_v1"
 )
@@ -34,11 +34,6 @@ type Range struct {
 
 type DateSeries struct {
 	Dates []ingestion.CalendarDate `json:"dates"`
-}
-
-type MaintenanceSeries struct {
-	Dates        []ingestion.CalendarDate `json:"dates"`
-	LookbackDays int                      `json:"lookback_days"`
 }
 
 func NewRangeExecution(jobKey string, from, to ingestion.CalendarDate) (Parameters, error) {
@@ -65,7 +60,7 @@ func NewDateSeriesExecution(jobKey string, from, to ingestion.CalendarDate) (Par
 	return encode(FixedDateSeriesV1, DateSeries{Dates: dates})
 }
 
-func NewMaintenanceSeriesExecution(jobKey string, from, to ingestion.CalendarDate, lookback int) (Parameters, error) {
+func NewMaintenanceSeriesExecution(jobKey string, from, to ingestion.CalendarDate) (Parameters, error) {
 	job, err := requireJob(jobKey, ingestion.SingleDate, "")
 	if err != nil {
 		return Parameters{}, err
@@ -73,14 +68,11 @@ func NewMaintenanceSeriesExecution(jobKey string, from, to ingestion.CalendarDat
 	if job.Category != ingestion.CategoryEOD && job.Category != ingestion.CategoryCBR {
 		return Parameters{}, fmt.Errorf("job %s is not maintenance", jobKey)
 	}
-	if lookback < 0 || lookback > 3 {
-		return Parameters{}, fmt.Errorf("maintenance lookback must be between 0 and 3")
-	}
 	dates, err := inclusiveDates(from, to)
 	if err != nil {
 		return Parameters{}, err
 	}
-	return encode(MaintenanceDateSeriesV1, MaintenanceSeries{Dates: dates, LookbackDays: lookback})
+	return encode(MaintenanceDateSeriesV2, DateSeries{Dates: dates})
 }
 
 func NewLiveSnapshotExecution(jobKey string) (Parameters, error) {
@@ -115,17 +107,12 @@ func (parameters Parameters) Validate(job ingestion.JobDefinition) error {
 		}
 		var value DateSeries
 		return validateCanonical(parameters, &value, func() error { return validateDateSeries(value.Dates) })
-	case MaintenanceDateSeriesV1:
+	case MaintenanceDateSeriesV2:
 		if job.Category != ingestion.CategoryEOD && job.Category != ingestion.CategoryCBR {
 			return fmt.Errorf("job %s does not accept maintenance parameters", job.Key)
 		}
-		var value MaintenanceSeries
-		return validateCanonical(parameters, &value, func() error {
-			if value.LookbackDays < 0 || value.LookbackDays > 3 {
-				return fmt.Errorf("maintenance lookback must be between 0 and 3")
-			}
-			return validateDateSeries(value.Dates)
-		})
+		var value DateSeries
+		return validateCanonical(parameters, &value, func() error { return validateDateSeries(value.Dates) })
 	case DetailLiveSnapshotV1:
 		if job.Category != ingestion.CategoryDetail || job.DateStrategy != ingestion.NoDate {
 			return fmt.Errorf("job %s does not accept live-snapshot parameters", job.Key)
@@ -155,17 +142,12 @@ func DecodeDateSeries(parameters Parameters) (DateSeries, error) {
 	return value, err
 }
 
-func DecodeMaintenanceSeries(parameters Parameters) (MaintenanceSeries, error) {
-	var value MaintenanceSeries
-	if parameters.Kind != MaintenanceDateSeriesV1 {
+func DecodeMaintenanceSeries(parameters Parameters) (DateSeries, error) {
+	var value DateSeries
+	if parameters.Kind != MaintenanceDateSeriesV2 {
 		return value, fmt.Errorf("parameters are not a maintenance date series")
 	}
-	err := decodeCanonical(parameters.JSON, &value, func() error {
-		if value.LookbackDays < 0 || value.LookbackDays > 3 {
-			return fmt.Errorf("invalid lookback")
-		}
-		return validateDateSeries(value.Dates)
-	})
+	err := decodeCanonical(parameters.JSON, &value, func() error { return validateDateSeries(value.Dates) })
 	return value, err
 }
 
