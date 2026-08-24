@@ -41,12 +41,12 @@ func TestFeatureCompositionOwnsCompleteRouteMatrix(t *testing.T) {
 		"GET /roles", "GET /roles/new", "GET /roles/{id}", "GET /roles/{id}/edit",
 		"GET /runs", "GET /runs/run-all", "GET /runs/{id}", "GET /runs/{id}/status",
 		"GET /sources", "GET /sources/{jobKey}/run",
-		"GET /schedules", "GET /schedules/new", "GET /schedules/{id}", "GET /schedules/{id}/edit", "GET /schedules/{id}/occurrences/{occurrenceID}",
+		"GET /schedules", "GET /schedules/new", "GET /schedules/bulk/new", "GET /schedules/{id}", "GET /schedules/{id}/edit", "GET /schedules/{id}/occurrences/{occurrenceID}",
 		"GET /users", "GET /users/new", "GET /users/{id}", "GET /users/{id}/edit", "GET /users/{id}/reset-password",
 		"POST /impersonation/stop", "POST /roles", "POST /roles/{id}", "POST /roles/{id}/delete", "POST /roles/{id}/permissions",
 		"POST /runs/run-all", "POST /runs/{id}/cancel", "POST /runs/{id}/recover-abandoned",
 		"POST /sources/{jobKey}/runs", "POST /sources/{jobKey}/enable", "POST /sources/{jobKey}/disable",
-		"POST /schedules", "POST /schedules/{id}", "POST /schedules/{id}/enable", "POST /schedules/{id}/disable", "POST /schedules/{id}/archive",
+		"POST /schedules", "POST /schedules/bulk", "POST /schedules/{id}", "POST /schedules/{id}/enable", "POST /schedules/{id}/disable", "POST /schedules/{id}/archive",
 		"POST /users", "POST /users/{id}", "POST /users/{id}/activate", "POST /users/{id}/deactivate", "POST /users/{id}/impersonate", "POST /users/{id}/reset-password", "POST /users/{id}/role",
 	}
 	sort.Strings(want)

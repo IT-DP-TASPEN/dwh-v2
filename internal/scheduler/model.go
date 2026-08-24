@@ -50,6 +50,11 @@ type CreateInput struct {
 	ActorID *uint64
 }
 
+type CreateManyResult struct {
+	Created  []Schedule
+	Existing []Schedule
+}
+
 type UpdateInput struct {
 	Definition
 	ExpectedRevision uint64

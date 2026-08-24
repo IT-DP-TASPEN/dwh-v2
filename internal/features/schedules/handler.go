@@ -51,6 +51,10 @@ func (handler *Handler) New(writer http.ResponseWriter, request *http.Request) {
 	handler.admin.RenderPage(writer, request, 200, "features/schedules/new", "New schedule", handler.blankForm())
 }
 
+func (handler *Handler) BulkNew(writer http.ResponseWriter, request *http.Request) {
+	handler.admin.RenderPage(writer, request, http.StatusOK, "features/schedules/bulk", "Bulk create schedules", handler.blankBulkForm())
+}
+
 func (handler *Handler) Create(writer http.ResponseWriter, request *http.Request) {
 	form, ok := handler.form(writer, request)
 	if !ok {
@@ -69,6 +73,33 @@ func (handler *Handler) Create(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	http.Redirect(writer, request, fmt.Sprintf("/schedules/%d?notice=schedule-created", value.ID), 303)
+}
+
+func (handler *Handler) BulkCreate(writer http.ResponseWriter, request *http.Request) {
+	form, ok := handler.bulkForm(writer, request)
+	if !ok {
+		return
+	}
+	if len(form.Errors) != 0 {
+		handler.admin.RenderPage(writer, request, http.StatusUnprocessableEntity, "features/schedules/bulk", "Bulk create schedules", form)
+		return
+	}
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	result, err := handler.service.CreateMany(request.Context(), form, principal.Actor.UserID)
+	if err != nil {
+		if errors.Is(err, domain.ErrInvalidDefinition) {
+			form.Errors["form"] = strings.TrimPrefix(err.Error(), domain.ErrInvalidDefinition.Error()+": ")
+			handler.admin.RenderPage(writer, request, http.StatusUnprocessableEntity, "features/schedules/bulk", "Bulk create schedules", form)
+			return
+		}
+		handler.admin.Internal(writer, request, "bulk create schedules", err)
+		return
+	}
+	form.Result = &result
+	handler.admin.RenderPage(writer, request, http.StatusOK, "features/schedules/bulk", "Bulk schedule result", form)
 }
 
 func (handler *Handler) Show(writer http.ResponseWriter, request *http.Request) {
@@ -205,6 +236,11 @@ func (handler *Handler) Occurrence(writer http.ResponseWriter, request *http.Req
 func (handler *Handler) blankForm() FormData {
 	return FormData{Timezone: domain.DefaultTimezone, Jobs: handler.service.Jobs(), Errors: map[string]string{}}
 }
+
+func (handler *Handler) blankBulkForm() BulkFormData {
+	return BulkFormData{Timezone: domain.DefaultTimezone, Jobs: handler.service.Jobs(), SelectedJobs: map[string]bool{}, Errors: map[string]string{}}
+}
+
 func (handler *Handler) form(writer http.ResponseWriter, request *http.Request) (FormData, bool) {
 	if !webutil.ParseForm(writer, request, maxFormBody) {
 		return FormData{}, false
@@ -216,12 +252,39 @@ func (handler *Handler) form(writer http.ResponseWriter, request *http.Request) 
 	form.Timezone = strings.TrimSpace(request.PostFormValue("timezone"))
 	form.Enabled = request.PostFormValue("enabled") == "true"
 	form.ExpectedRevision, _ = strconv.ParseUint(request.PostFormValue("expected_revision"), 10, 64)
+	handler.rejectManagedFields(request, form.Errors)
+	return form, true
+}
+
+func (handler *Handler) bulkForm(writer http.ResponseWriter, request *http.Request) (BulkFormData, bool) {
+	if !webutil.ParseForm(writer, request, maxFormBody) {
+		return BulkFormData{}, false
+	}
+	form := handler.blankBulkForm()
+	for _, jobKey := range request.PostForm["job_keys"] {
+		jobKey = strings.TrimSpace(jobKey)
+		if jobKey == "" {
+			continue
+		}
+		form.JobKeys = append(form.JobKeys, jobKey)
+		form.SelectedJobs[jobKey] = true
+	}
+	form.CronExpression = strings.TrimSpace(request.PostFormValue("cron_expression"))
+	form.Timezone = strings.TrimSpace(request.PostFormValue("timezone"))
+	form.Enabled = request.PostFormValue("enabled") == "true"
+	if len(form.JobKeys) == 0 {
+		form.Errors["jobs"] = "Select at least one job."
+	}
+	handler.rejectManagedFields(request, form.Errors)
+	return form, true
+}
+
+func (*Handler) rejectManagedFields(request *http.Request, formErrors map[string]string) {
 	for _, key := range []string{"policy_json", "policy_kind", "policy_version", "policy_checksum", "target_kind"} {
 		if _, found := request.PostForm[key]; found {
-			form.Errors["form"] = "Scheduler policy fields are managed by the application."
+			formErrors["form"] = "Scheduler policy fields are managed by the application."
 		}
 	}
-	return form, true
 }
 
 func (handler *Handler) mutationError(writer http.ResponseWriter, request *http.Request, err error, page, title string, form FormData) bool {

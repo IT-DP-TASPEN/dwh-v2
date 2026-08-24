@@ -105,6 +105,50 @@ func (service *Service) Create(ctx context.Context, form FormData, actor uint64)
 	return service.domain.Create(ctx, domain.CreateInput{Definition: service.definition(form), Enabled: form.Enabled, ActorID: &actor})
 }
 
+func (service *Service) CreateMany(ctx context.Context, form BulkFormData, actor uint64) (BulkResultData, error) {
+	cronExpression, timezone := strings.TrimSpace(form.CronExpression), strings.TrimSpace(form.Timezone)
+	if timezone == "" {
+		timezone = domain.DefaultTimezone
+	}
+	inputs := make([]domain.CreateInput, len(form.JobKeys))
+	for index, jobKey := range form.JobKeys {
+		job, found := service.catalog.Find(jobKey)
+		if !found {
+			return BulkResultData{}, fmt.Errorf("%w: unknown job %q", domain.ErrInvalidDefinition, jobKey)
+		}
+		inputs[index] = domain.CreateInput{Definition: service.definition(FormData{
+			Name: job.Name, JobKey: job.Key, CronExpression: cronExpression, Timezone: timezone,
+		}), Enabled: form.Enabled, ActorID: &actor}
+	}
+	created, err := service.domain.CreateMany(ctx, inputs)
+	if err != nil {
+		return BulkResultData{}, err
+	}
+	result := BulkResultData{Selected: len(form.JobKeys), Created: len(created.Created), CronExpression: cronExpression,
+		Timezone: timezone, Enabled: form.Enabled, CreatedSchedules: make([]BulkSchedule, 0, len(created.Created))}
+	for _, schedule := range created.Created {
+		job, _ := service.catalog.Find(schedule.Definition.JobKey)
+		result.CreatedSchedules = append(result.CreatedSchedules, BulkSchedule{ID: schedule.ID, JobName: job.Name, Enabled: schedule.Enabled})
+	}
+	existing := make(map[string][]BulkSchedule)
+	for _, schedule := range created.Existing {
+		job, _ := service.catalog.Find(schedule.Definition.JobKey)
+		existing[schedule.Definition.JobKey] = append(existing[schedule.Definition.JobKey], BulkSchedule{
+			ID: schedule.ID, JobName: job.Name, Enabled: schedule.Enabled,
+		})
+	}
+	for _, jobKey := range form.JobKeys {
+		matches := existing[jobKey]
+		if len(matches) == 0 {
+			continue
+		}
+		job, _ := service.catalog.Find(jobKey)
+		result.SkippedJobs = append(result.SkippedJobs, BulkSkippedJob{JobName: job.Name, Existing: matches})
+	}
+	result.Skipped = len(result.SkippedJobs)
+	return result, nil
+}
+
 func (service *Service) Update(ctx context.Context, id uint64, form FormData, actor uint64) (domain.Schedule, error) {
 	return service.domain.Update(ctx, id, domain.UpdateInput{Definition: service.definition(form), ExpectedRevision: form.ExpectedRevision, ActorID: &actor})
 }

@@ -120,3 +120,32 @@ type FormData struct {
 	Jobs                                   []core.JobDefinition
 	Errors                                 map[string]string
 }
+
+type BulkFormData struct {
+	JobKeys                  []string
+	SelectedJobs             map[string]bool
+	CronExpression, Timezone string
+	Enabled                  bool
+	Jobs                     []core.JobDefinition
+	Errors                   map[string]string
+	Result                   *BulkResultData
+}
+
+type BulkResultData struct {
+	Selected, Created, Skipped int
+	CronExpression, Timezone   string
+	Enabled                    bool
+	CreatedSchedules           []BulkSchedule
+	SkippedJobs                []BulkSkippedJob
+}
+
+type BulkSchedule struct {
+	ID      uint64
+	JobName string
+	Enabled bool
+}
+
+type BulkSkippedJob struct {
+	JobName  string
+	Existing []BulkSchedule
+}

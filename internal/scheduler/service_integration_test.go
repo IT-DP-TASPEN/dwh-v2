@@ -405,6 +405,163 @@ func TestUTCSessionAndMicrosecondRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCreateManyCreatesOrdinarySchedulesAndSkipsCurrentDuplicates(t *testing.T) {
+	db, service := integrationService(t)
+	ctx := context.Background()
+	cron, timezone := "0 1 * * *", DefaultTimezone
+	jobs := []string{"cif_opening_report", "journal_transaction_report", "cif_detail"}
+	inputs := make([]CreateInput, len(jobs))
+	for index, job := range jobs {
+		inputs[index] = bulkCreateInput(job, cron, timezone, false, nil)
+	}
+	result, err := service.CreateMany(ctx, inputs)
+	if err != nil || len(result.Created) != 3 || len(result.Existing) != 0 {
+		t.Fatalf("initial bulk result=%+v error=%v", result, err)
+	}
+	var ordinary struct {
+		Rows, Crons, Timezones, Names int
+	}
+	if err := db.Get(&ordinary, `SELECT COUNT(*) rows,COUNT(DISTINCT cron_expression) crons,
+		COUNT(DISTINCT timezone) timezones,COUNT(DISTINCT name) names FROM schedules WHERE id IN (?,?,?)`,
+		result.Created[0].ID, result.Created[1].ID, result.Created[2].ID); err != nil || ordinary.Rows != 3 || ordinary.Crons != 1 || ordinary.Timezones != 1 {
+		t.Fatalf("ordinary schedules=%+v error=%v", ordinary, err)
+	}
+
+	alternate, err := service.CreateMany(ctx, []CreateInput{bulkCreateInput(jobs[0], "0 13 * * *", timezone, false, nil)})
+	if err != nil || len(alternate.Created) != 1 || len(alternate.Existing) != 0 || alternate.Created[0].Definition.CronExpression != "0 13 * * *" {
+		t.Fatalf("alternate result=%+v error=%v", alternate, err)
+	}
+
+	duplicate, err := service.CreateMany(ctx, []CreateInput{bulkCreateInput(jobs[0], cron, timezone, true, nil)})
+	if err != nil || len(duplicate.Created) != 0 || len(duplicate.Existing) != 1 || duplicate.Existing[0].Enabled {
+		t.Fatalf("disabled duplicate result=%+v error=%v", duplicate, err)
+	}
+
+	mixed, err := service.CreateMany(ctx, []CreateInput{
+		bulkCreateInput(jobs[0], cron, timezone, true, nil),
+		bulkCreateInput(jobs[1], cron, timezone, true, nil),
+		bulkCreateInput("saving_detail", cron, timezone, true, nil),
+	})
+	if err != nil || len(mixed.Created) != 1 || len(mixed.Existing) != 2 || mixed.Created[0].Definition.JobKey != "saving_detail" {
+		t.Fatalf("mixed result=%+v error=%v", mixed, err)
+	}
+	allExisting, err := service.CreateMany(ctx, []CreateInput{
+		bulkCreateInput(jobs[0], cron, timezone, false, nil),
+		bulkCreateInput(jobs[1], cron, timezone, false, nil),
+		bulkCreateInput("saving_detail", cron, timezone, false, nil),
+	})
+	if err != nil || len(allExisting.Created) != 0 || len(allExisting.Existing) != 3 {
+		t.Fatalf("all-existing result=%+v error=%v", allExisting, err)
+	}
+
+	archivedSeed, err := service.CreateMany(ctx, []CreateInput{bulkCreateInput("loan_detail", "0 3 * * *", timezone, false, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Archive(ctx, archivedSeed.Created[0].ID, archivedSeed.Created[0].Revision, nil); err != nil {
+		t.Fatal(err)
+	}
+	afterArchive, err := service.CreateMany(ctx, []CreateInput{bulkCreateInput("loan_detail", "0 3 * * *", timezone, false, nil)})
+	if err != nil || len(afterArchive.Created) != 1 || len(afterArchive.Existing) != 0 {
+		t.Fatalf("archived replacement=%+v error=%v", afterArchive, err)
+	}
+
+	var before int
+	if err := db.Get(&before, `SELECT COUNT(*) FROM schedules`); err != nil {
+		t.Fatal(err)
+	}
+	invalidRequests := [][]CreateInput{
+		nil,
+		{bulkCreateInput("unknown_job", cron, timezone, false, nil)},
+		{bulkCreateInput(jobs[0], "not a cron", timezone, false, nil)},
+		{bulkCreateInput(jobs[0], cron, "Not/A_Timezone", false, nil)},
+		{bulkCreateInput(jobs[0], cron, timezone, false, nil), bulkCreateInput(jobs[0], cron, timezone, false, nil)},
+		{bulkCreateInput(jobs[0], cron, timezone, false, nil), bulkCreateInput(jobs[1], "0 2 * * *", timezone, false, nil)},
+	}
+	for index, request := range invalidRequests {
+		if _, err := service.CreateMany(ctx, request); !errors.Is(err, ErrInvalidDefinition) {
+			t.Fatalf("invalid request %d error=%v", index, err)
+		}
+	}
+	var after int
+	if err := db.Get(&after, `SELECT COUNT(*) FROM schedules`); err != nil || after != before {
+		t.Fatalf("validation persisted rows before=%d after=%d error=%v", before, after, err)
+	}
+}
+
+func TestCreateManyRollsBackPersistenceFailure(t *testing.T) {
+	db, service := integrationService(t)
+	missingActor := uint64(9_000_000_000)
+	_, err := service.CreateMany(context.Background(), []CreateInput{
+		bulkCreateInput("cif_opening_report", "0 4 * * *", DefaultTimezone, false, nil),
+		bulkCreateInput("journal_transaction_report", "0 4 * * *", DefaultTimezone, false, &missingActor),
+	})
+	if err == nil {
+		t.Fatal("persistence failure accepted")
+	}
+	var count int
+	if queryErr := db.Get(&count, `SELECT COUNT(*) FROM schedules WHERE cron_expression='0 4 * * *' AND timezone=?`, DefaultTimezone); queryErr != nil || count != 0 {
+		t.Fatalf("partial bulk rows=%d error=%v create_error=%v", count, queryErr, err)
+	}
+}
+
+func TestCreateManySerializesIdenticalConcurrentRequestsAndUsesNormalRuntime(t *testing.T) {
+	db, first := integrationService(t)
+	second := newIntegrationService(t, db)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	type outcome struct {
+		result CreateManyResult
+		err    error
+	}
+	outcomes := make(chan outcome, 2)
+	for _, service := range []*Service{first, second} {
+		go func(service *Service) {
+			<-start
+			result, err := service.CreateMany(ctx, []CreateInput{
+				bulkCreateInput("vault_mutation_report", "0 5 * * *", DefaultTimezone, true, nil),
+			})
+			outcomes <- outcome{result, err}
+		}(service)
+	}
+	close(start)
+	created, existing := 0, 0
+	var scheduleID uint64
+	for range 2 {
+		value := <-outcomes
+		if value.err != nil {
+			t.Fatal(value.err)
+		}
+		created += len(value.result.Created)
+		existing += len(value.result.Existing)
+		if len(value.result.Created) == 1 {
+			scheduleID = value.result.Created[0].ID
+		}
+	}
+	var rows int
+	if err := db.Get(&rows, `SELECT COUNT(*) FROM schedules WHERE job_key='vault_mutation_report' AND cron_expression='0 5 * * *'
+		AND timezone=? AND archived_at IS NULL`, DefaultTimezone); err != nil || rows != 1 || created != 1 || existing != 1 {
+		t.Fatalf("created=%d existing=%d rows=%d error=%v", created, existing, rows, err)
+	}
+	due := time.Date(2026, 8, 10, 5, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`UPDATE schedules SET next_run_at=? WHERE id=?`, due, scheduleID); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := first.process(ctx, scheduleID); err != nil || !changed {
+		t.Fatalf("bulk-created runtime changed=%v error=%v", changed, err)
+	}
+	assertAttemptCount(t, db, scheduleID, 1)
+}
+
+func bulkCreateInput(job, cron, timezone string, enabled bool, actor *uint64) CreateInput {
+	policy := PreviousCalendarDayPolicy()
+	if job == "cif_detail" || job == "saving_detail" || job == "time_deposit_detail" || job == "loan_detail" {
+		policy = DetailLiveSnapshotPolicy()
+	}
+	return CreateInput{Definition: Definition{Name: job, JobKey: job, CronExpression: cron, Timezone: timezone, Policy: policy}, Enabled: enabled, ActorID: actor}
+}
+
 func integrationService(t *testing.T) (*sqlx.DB, *Service) {
 	t.Helper()
 	db := integrationdb.Open(t)

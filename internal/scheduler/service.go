@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -51,33 +52,129 @@ func (service *Service) Create(ctx context.Context, input CreateInput) (Schedule
 	if err != nil {
 		return Schedule{}, err
 	}
+	prepared, err := service.prepareCreate(input, now)
+	if err != nil {
+		return Schedule{}, err
+	}
+	created, err := insertSchedule(ctx, tx, prepared)
+	if err != nil {
+		return Schedule{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Schedule{}, err
+	}
+	return service.Get(ctx, created.ID)
+}
+
+func (service *Service) CreateMany(ctx context.Context, inputs []CreateInput) (CreateManyResult, error) {
+	if len(inputs) == 0 {
+		return CreateManyResult{}, fmt.Errorf("%w: at least one job is required", ErrInvalidDefinition)
+	}
+	tx, err := service.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return CreateManyResult{}, err
+	}
+	defer tx.Rollback()
+	now, err := dbNow(ctx, tx)
+	if err != nil {
+		return CreateManyResult{}, err
+	}
+	prepared := make([]preparedCreate, len(inputs))
+	jobKeys := make([]string, 0, len(inputs))
+	seen := make(map[string]struct{}, len(inputs))
+	for index, input := range inputs {
+		value, err := service.prepareCreate(input, now)
+		if err != nil {
+			return CreateManyResult{}, err
+		}
+		if _, duplicate := seen[value.definition.JobKey]; duplicate {
+			return CreateManyResult{}, fmt.Errorf("%w: job %q was selected more than once", ErrInvalidDefinition, value.definition.JobKey)
+		}
+		if index > 0 && (value.definition.CronExpression != prepared[0].definition.CronExpression ||
+			value.definition.Timezone != prepared[0].definition.Timezone || value.enabled != prepared[0].enabled) {
+			return CreateManyResult{}, fmt.Errorf("%w: bulk schedules must share cron, timezone, and enabled state", ErrInvalidDefinition)
+		}
+		seen[value.definition.JobKey] = struct{}{}
+		jobKeys = append(jobKeys, value.definition.JobKey)
+		prepared[index] = value
+	}
+	slices.Sort(jobKeys)
+	// Canonical source rows serialize overlapping bulk requests without changing individual create semantics.
+	for _, jobKey := range jobKeys {
+		var locked string
+		if err := tx.GetContext(ctx, &locked, `SELECT source_id FROM source_settings WHERE source_id=? FOR UPDATE`, jobKey); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return CreateManyResult{}, fmt.Errorf("%w: job %q is not schedulable", ErrInvalidDefinition, jobKey)
+			}
+			return CreateManyResult{}, err
+		}
+	}
+	result := CreateManyResult{Created: make([]Schedule, 0, len(prepared))}
+	for _, value := range prepared {
+		var rows []scheduleRow
+		if err := tx.SelectContext(ctx, &rows, scheduleSelect+`
+			WHERE job_key=? AND cron_expression=? AND timezone=? AND archived_at IS NULL ORDER BY id FOR UPDATE`,
+			value.definition.JobKey, value.definition.CronExpression, value.definition.Timezone); err != nil {
+			return CreateManyResult{}, err
+		}
+		if len(rows) != 0 {
+			for _, row := range rows {
+				result.Existing = append(result.Existing, row.value())
+			}
+			continue
+		}
+		created, err := insertSchedule(ctx, tx, value)
+		if err != nil {
+			return CreateManyResult{}, err
+		}
+		result.Created = append(result.Created, created)
+	}
+	if err := tx.Commit(); err != nil {
+		return CreateManyResult{}, err
+	}
+	return result, nil
+}
+
+type preparedCreate struct {
+	definition Definition
+	enabled    bool
+	actorID    *uint64
+	nextRunAt  *time.Time
+}
+
+func (service *Service) prepareCreate(input CreateInput, now time.Time) (preparedCreate, error) {
 	if strings.TrimSpace(input.Definition.Timezone) == "" {
 		input.Definition.Timezone = DefaultTimezone
 	}
 	definition, parsed, err := validateDefinition(service.catalog, input.Definition, now)
 	if err != nil {
-		return Schedule{}, err
+		return preparedCreate{}, err
 	}
-	var next any
+	var next *time.Time
 	if input.Enabled {
 		value := parsed.Next(now)
 		if value.IsZero() {
-			return Schedule{}, fmt.Errorf("%w: cron has no future occurrence", ErrInvalidDefinition)
+			return preparedCreate{}, fmt.Errorf("%w: cron has no future occurrence", ErrInvalidDefinition)
 		}
-		next = value
+		next = &value
 	}
+	return preparedCreate{definition: definition, enabled: input.Enabled, actorID: input.ActorID, nextRunAt: next}, nil
+}
+
+func insertSchedule(ctx context.Context, tx *sqlx.Tx, input preparedCreate) (Schedule, error) {
+	definition := input.definition
 	result, err := tx.ExecContext(ctx, `INSERT INTO schedules
 		(name,job_key,cron_expression,timezone,policy_kind,policy_version,policy_json,policy_checksum,enabled,next_run_at,created_by_user_id,updated_by_user_id)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, definition.Name, definition.JobKey, definition.CronExpression, definition.Timezone,
-		definition.Policy.Kind, definition.Policy.Version, definition.Policy.Payload, definition.Policy.Checksum[:], input.Enabled, next, input.ActorID, input.ActorID)
+		definition.Policy.Kind, definition.Policy.Version, definition.Policy.Payload, definition.Policy.Checksum[:], input.enabled, input.nextRunAt, input.actorID, input.actorID)
 	if err != nil {
 		return Schedule{}, err
 	}
-	id, _ := result.LastInsertId()
-	if err := tx.Commit(); err != nil {
+	id, err := result.LastInsertId()
+	if err != nil {
 		return Schedule{}, err
 	}
-	return service.Get(ctx, uint64(id))
+	return Schedule{ID: uint64(id), Definition: definition, Enabled: input.enabled, NextRunAt: input.nextRunAt, Revision: 1}, nil
 }
 
 func (service *Service) Get(ctx context.Context, id uint64) (Schedule, error) {
