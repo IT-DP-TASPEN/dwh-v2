@@ -318,6 +318,7 @@ func (err *FixedHeaderError) Unwrap() error {
 func ParseFixedCSV(ctx context.Context, definition FixedDefinition, sourceLocationID, content string) ([]FixedCSVRow, error) {
 	reader := csv.NewReader(strings.NewReader(strings.TrimPrefix(content, "\uFEFF")))
 	reader.Comma = '|'
+	reader.LazyQuotes = true
 	headers, err := reader.Read()
 	if err == io.EOF {
 		return nil, fmt.Errorf("%s: no CSV header", definition.Key)
