@@ -15,9 +15,10 @@ var ApplicationVersions = []int64{
 	20260813033056, 20260813084201, 20260814025546, 20260814042806,
 	20260814161323, 20260821120000, 20260822120000,
 	20260823120000,
+	20260825090000,
 }
 
-const CurrentVersion int64 = 20260823120000
+const CurrentVersion int64 = 20260825090000
 
 type MigrationRecord struct {
 	Version int64 `db:"version_id"`
@@ -140,12 +141,17 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 			return fmt.Errorf("required runtime safety index %s.%s is missing", required.table, required.index)
 		}
 	}
-	for _, table := range []string{"schedules", "schedule_attempts"} {
+	for _, table := range []string{"schedules", "schedule_attempts", "report_datasources", "report_templates", "report_parameters", "report_parameter_options", "report_template_user_access", "report_export_jobs"} {
 		var count int
 		if err := db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.TABLES
 			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, table); err != nil || count != 1 {
 			return fmt.Errorf("required runtime table %s is missing", table)
 		}
+	}
+	var exportClaimIndex int
+	if err := db.GetContext(ctx, &exportClaimIndex, `SELECT COUNT(*) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='report_export_jobs' AND INDEX_NAME='idx_report_export_jobs_claim'`); err != nil || exportClaimIndex == 0 {
+		return fmt.Errorf("required report export claim index is missing")
 	}
 	var diagnosticsIndex int
 	if err := db.GetContext(ctx, &diagnosticsIndex, `SELECT COUNT(*) FROM information_schema.STATISTICS

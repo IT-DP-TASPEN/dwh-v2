@@ -90,7 +90,7 @@ The web runtime also requires Fincloud source configuration: `FINCLOUD_BASE_URL`
 
 ## Permissions and management
 
-The 25 canonical permission keys are aggregated from features and synchronized additively at server and CLI bootstrap. Unknown database permissions and assignments are preserved. Migrations never run automatically at application startup. `audit.view` may be assigned to user or custom roles; administrators receive it through the normal superuser bypass.
+The 38 canonical permission keys are aggregated from features and synchronized additively at server and CLI bootstrap. Unknown database permissions and assignments are preserved. Migrations never run automatically at application startup. `audit.view` may be assigned to user or custom roles; administrators receive it through the normal superuser bypass.
 
 Each user has exactly one role. The `admin` role is an immutable superuser; non-admin roles use current database permission assignments. Permissions are loaded for every authenticated request, so changes apply on the next request without cache invalidation.
 
@@ -207,6 +207,8 @@ internal/adoption/    fail-closed dwh2 preflight and adoption engine
 internal/dwhschema/   canonical DWH schema/adoption metadata
 internal/render/      templates, notices, and safe error responses
 internal/server/      Chi routes, middleware, and graceful server
+internal/reporting/   report templates, parameters, ACL, pools, and bounded MySQL execution
+internal/reportexport/ durable export queue, XLSX/ZIP generation, fencing, and artifact storage
 internal/testutil/    shared test-only infrastructure
 migrations/           immutable Goose migration history
 web/                  templates, frontend source, generated assets

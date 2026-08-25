@@ -6,7 +6,10 @@ import (
 	"github.com/ibldzn/go-admin/internal/access"
 	"github.com/ibldzn/go-admin/internal/features/auditlogs"
 	"github.com/ibldzn/go-admin/internal/features/dashboard"
+	"github.com/ibldzn/go-admin/internal/features/datasources"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
+	"github.com/ibldzn/go-admin/internal/features/reports"
+	"github.com/ibldzn/go-admin/internal/features/reporttemplates"
 	"github.com/ibldzn/go-admin/internal/features/roles"
 	schedulesfeature "github.com/ibldzn/go-admin/internal/features/schedules"
 	sourcesfeature "github.com/ibldzn/go-admin/internal/features/sources"
@@ -57,8 +60,8 @@ func TestPhaseFourNavigation(t *testing.T) {
 
 func TestPermissionAggregation(t *testing.T) {
 	definitions := PermissionDefinitions()
-	if len(definitions) != 25 {
-		t.Fatalf("got %d permissions, want 25", len(definitions))
+	if len(definitions) != 38 {
+		t.Fatalf("got %d permissions, want 38", len(definitions))
 	}
 	if err := access.ValidateRegistry(definitions); err != nil {
 		t.Fatal(err)
@@ -75,6 +78,11 @@ func TestPermissionAggregation(t *testing.T) {
 		sourcesfeature.PermissionView: true, sourcesfeature.PermissionManage: true,
 		schedulesfeature.PermissionView: true, schedulesfeature.PermissionCreate: true, schedulesfeature.PermissionUpdate: true,
 		schedulesfeature.PermissionEnableDisable: true, schedulesfeature.PermissionArchive: true,
+		datasources.PermissionView: true, datasources.PermissionCreate: true, datasources.PermissionUpdate: true,
+		datasources.PermissionChangeState: true, datasources.PermissionTest: true,
+		reporttemplates.PermissionView: true, reporttemplates.PermissionCreate: true, reporttemplates.PermissionUpdate: true,
+		reporttemplates.PermissionChangeState: true, reporttemplates.PermissionManageAccess: true,
+		reports.PermissionView: true, reports.PermissionExecute: true, reports.PermissionExport: true,
 	}
 	for _, definition := range definitions {
 		delete(want, definition.Key)

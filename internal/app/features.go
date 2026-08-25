@@ -3,6 +3,7 @@ package app
 import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
+	"time"
 
 	"github.com/ibldzn/go-admin/internal/access"
 	"github.com/ibldzn/go-admin/internal/audit"
@@ -10,20 +11,25 @@ import (
 	"github.com/ibldzn/go-admin/internal/coordinator"
 	"github.com/ibldzn/go-admin/internal/features/auditlogs"
 	"github.com/ibldzn/go-admin/internal/features/dashboard"
+	"github.com/ibldzn/go-admin/internal/features/datasources"
 	"github.com/ibldzn/go-admin/internal/features/impersonation"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
+	"github.com/ibldzn/go-admin/internal/features/reports"
+	"github.com/ibldzn/go-admin/internal/features/reporttemplates"
 	"github.com/ibldzn/go-admin/internal/features/roles"
 	schedulesfeature "github.com/ibldzn/go-admin/internal/features/schedules"
 	sourcesfeature "github.com/ibldzn/go-admin/internal/features/sources"
 	"github.com/ibldzn/go-admin/internal/features/users"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
+	"github.com/ibldzn/go-admin/internal/reportexport"
+	"github.com/ibldzn/go-admin/internal/reporting"
 	"github.com/ibldzn/go-admin/internal/scheduler"
 	"github.com/ibldzn/go-admin/internal/user"
 )
 
 func PermissionDefinitions() []access.PermissionDefinition {
-	definitions := make([]access.PermissionDefinition, 0, 25)
+	definitions := make([]access.PermissionDefinition, 0, 38)
 	definitions = append(definitions, dashboard.PermissionDefinitions()...)
 	definitions = append(definitions, users.PermissionDefinitions()...)
 	definitions = append(definitions, roles.PermissionDefinitions()...)
@@ -31,17 +37,26 @@ func PermissionDefinitions() []access.PermissionDefinition {
 	definitions = append(definitions, ingestionfeature.PermissionDefinitions()...)
 	definitions = append(definitions, sourcesfeature.PermissionDefinitions()...)
 	definitions = append(definitions, schedulesfeature.PermissionDefinitions()...)
+	definitions = append(definitions, datasources.PermissionDefinitions()...)
+	definitions = append(definitions, reporttemplates.PermissionDefinitions()...)
+	definitions = append(definitions, reports.PermissionDefinitions()...)
 	return definitions
 }
 
 type featureDependencies struct {
-	database    *sqlx.DB
-	users       *user.Repository
-	access      *access.Repository
-	admin       *adminshell.Shell
-	cookies     browserauth.CookieManager
-	coordinator *coordinator.Coordinator
-	scheduler   *scheduler.Service
+	database            *sqlx.DB
+	users               *user.Repository
+	access              *access.Repository
+	admin               *adminshell.Shell
+	cookies             browserauth.CookieManager
+	coordinator         *coordinator.Coordinator
+	scheduler           *scheduler.Service
+	reportingRepository *reporting.Repository
+	reportingService    *reporting.Service
+	reportingPools      *reporting.PoolManager
+	exportRepository    *reportexport.Repository
+	exportStorage       *reportexport.Storage
+	downloadTimeout     time.Duration
 }
 
 func registerFeatureRoutes(router chi.Router, dependencies featureDependencies) {
@@ -66,6 +81,10 @@ func registerFeatureRoutes(router chi.Router, dependencies featureDependencies) 
 		panic(err)
 	}
 
+	datasourceHandler := datasources.NewHandler(dependencies.admin, dependencies.reportingRepository, dependencies.reportingService, dependencies.reportingPools)
+	templateHandler := reporttemplates.NewHandler(dependencies.admin, dependencies.reportingRepository, dependencies.reportingService)
+	reportHandler := reports.NewHandler(dependencies.admin, dependencies.reportingRepository, dependencies.reportingService, dependencies.exportRepository, dependencies.exportStorage, dependencies.downloadTimeout)
+
 	dashboard.NewHandler(dependencies.admin).RegisterRoutes(router)
 	users.NewHandler(dependencies.admin, userService, dependencies.cookies, roles.PermissionAssign, impersonation.CanStart).RegisterRoutes(router)
 	roles.NewHandler(dependencies.admin, roleService).RegisterRoutes(router)
@@ -74,6 +93,9 @@ func registerFeatureRoutes(router chi.Router, dependencies featureDependencies) 
 	ingestionfeature.NewHandler(dependencies.admin, ingestionService, dependencies.coordinator).RegisterRoutes(router)
 	sourcesfeature.NewHandler(dependencies.admin, sourceService, dependencies.coordinator).RegisterRoutes(router)
 	schedulesfeature.NewHandler(dependencies.admin, scheduleService).RegisterRoutes(router)
+	datasourceHandler.RegisterRoutes(router)
+	templateHandler.RegisterRoutes(router)
+	reportHandler.RegisterRoutes(router)
 }
 
 func navigationGroups() []navigation.Group {
@@ -81,6 +103,10 @@ func navigationGroups() []navigation.Group {
 		{Key: "general", Label: "General", Items: []navigation.Item{dashboard.Navigation()}},
 		{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.Item{
 			ingestionfeature.OverviewNavigation(), sourcesfeature.Navigation(), ingestionfeature.RunsNavigation(), schedulesfeature.Navigation(),
+		}},
+		{Key: "reporting", Label: "Reporting", Items: []navigation.Item{
+			reports.Navigation(), reports.ExportsNavigation(),
+			{Key: "report-configuration", Label: "Configuration", Icon: "settings", Children: []navigation.Item{reporttemplates.Navigation(), datasources.Navigation()}},
 		}},
 		{Key: "management", Label: "Management", Items: []navigation.Item{
 			users.Navigation(),

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"os"
 	"strings"
 	"testing"
@@ -127,6 +128,9 @@ func TestParseRuntimeRequiresFincloudOnlyAtRuntimeBoundary(t *testing.T) {
 	if got.Fincloud.LocationID != "001" || got.Fincloud.RoleID != "role-1" || got.Fincloud.HTTPTimeout != 30*time.Second {
 		t.Fatalf("unexpected Fincloud config: %+v", got.Fincloud)
 	}
+	if got.Reporting.InteractiveMaxRows != 10000 || got.Reporting.InteractivePayloadBytes != 8<<20 || got.Reporting.CellPreviewBytes != 16<<10 {
+		t.Fatalf("unexpected reporting config: %+v", got.Reporting)
+	}
 }
 
 func TestParseFincloudValidation(t *testing.T) {
@@ -152,6 +156,29 @@ func TestParseFincloudValidation(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestParseReportingValidation(t *testing.T) {
+	tests := []struct{ key, value, want string }{
+		{"REPORT_DATASOURCE_MASTER_KEY", "short", "exactly 32 bytes"},
+		{"REPORT_INTERACTIVE_PAYLOAD_BYTES", "0", "positive integer"},
+		{"REPORT_CELL_PREVIEW_BYTES", "many", "positive integer"},
+		{"REPORT_EXPORT_HEARTBEAT_INTERVAL", "30s", "shorter"},
+	}
+	for _, test := range tests {
+		values := runtimeValues()
+		values[test.key] = test.value
+		if _, err := parseRuntime(mapLookup(values)); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("%s error=%v want %q", test.key, err, test.want)
+		}
+	}
+	values := runtimeValues()
+	productionValues(values)
+	values["APP_ENV"] = "production"
+	delete(values, "REPORT_EXPORT_DIR")
+	if _, err := parseRuntime(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "REPORT_EXPORT_DIR") {
+		t.Fatalf("production export directory error=%v", err)
 	}
 }
 
@@ -187,6 +214,7 @@ func runtimeValues() map[string]string {
 	values["FINCLOUD_PASSWORD"] = "secret"
 	values["FINCLOUD_LOCATION_ID"] = "001"
 	values["FINCLOUD_ROLE_ID"] = "role-1"
+	values["REPORT_DATASOURCE_MASTER_KEY"] = base64.StdEncoding.EncodeToString(make([]byte, 32))
 	return values
 }
 

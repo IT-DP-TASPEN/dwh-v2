@@ -23,6 +23,8 @@ import (
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/render"
+	"github.com/ibldzn/go-admin/internal/reportexport"
+	"github.com/ibldzn/go-admin/internal/reporting"
 	"github.com/ibldzn/go-admin/internal/scheduler"
 	"github.com/ibldzn/go-admin/internal/server"
 	"github.com/ibldzn/go-admin/internal/user"
@@ -99,6 +101,32 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize ingestion scheduler: %w", err)
 	}
+	reportCipher := reporting.NewCipher(applicationConfig.Reporting.MasterKey)
+	reportingRepository, err := reporting.NewRepository(databaseConnection, reportCipher)
+	if err != nil {
+		return fmt.Errorf("initialize reporting repository: %w", err)
+	}
+	reportingPools, err := reporting.NewPoolManager(reportCipher, reporting.PoolConfig{ConnectTimeout: applicationConfig.Reporting.ConnectTimeout, MySQLMaxPacketBytes: applicationConfig.Reporting.MySQLMaxPacketBytes})
+	if err != nil {
+		return fmt.Errorf("initialize reporting pools: %w", err)
+	}
+	defer reportingPools.Close()
+	reportingService, err := reporting.NewService(reportingRepository, reportingPools, reporting.ServiceConfig{ConnectTimeout: applicationConfig.Reporting.ConnectTimeout, InteractiveTimeout: applicationConfig.Reporting.InteractiveTimeout, InteractiveMaxRows: applicationConfig.Reporting.InteractiveMaxRows, InteractivePayloadBytes: applicationConfig.Reporting.InteractivePayloadBytes, CellPreviewBytes: applicationConfig.Reporting.CellPreviewBytes})
+	if err != nil {
+		return fmt.Errorf("initialize reporting service: %w", err)
+	}
+	exportRepository, err := reportexport.NewRepository(databaseConnection)
+	if err != nil {
+		return fmt.Errorf("initialize report export repository: %w", err)
+	}
+	exportStorage, err := reportexport.NewStorage(applicationConfig.Reporting.ExportDir)
+	if err != nil {
+		return fmt.Errorf("initialize report export storage: %w", err)
+	}
+	exportWorker, err := reportexport.NewWorker(exportRepository, reportingRepository, reportingPools, exportStorage, reportexport.WorkerConfig{Concurrency: applicationConfig.Reporting.MaxConcurrentExports, ExportTimeout: applicationConfig.Reporting.ExportTimeout, HeartbeatInterval: applicationConfig.Reporting.HeartbeatInterval, StaleAfter: applicationConfig.Reporting.StaleAfter, Retention: applicationConfig.Reporting.Retention, CleanupInterval: applicationConfig.Reporting.CleanupInterval, OrphanGrace: applicationConfig.Reporting.OrphanGrace}, logger)
+	if err != nil {
+		return fmt.Errorf("initialize report export worker: %w", err)
+	}
 
 	userRepository := user.NewRepository(databaseConnection)
 	accessRepository := access.NewRepository(databaseConnection)
@@ -161,6 +189,8 @@ func Run(ctx context.Context) error {
 			registerFeatureRoutes(router, featureDependencies{
 				database: databaseConnection, users: userRepository, access: accessRepository,
 				admin: adminHTTP, cookies: cookieManager, coordinator: ingestionCoordinator, scheduler: scheduleService,
+				reportingRepository: reportingRepository, reportingService: reportingService, reportingPools: reportingPools,
+				exportRepository: exportRepository, exportStorage: exportStorage, downloadTimeout: applicationConfig.Reporting.DownloadTimeout,
 			})
 		},
 		Ready: func(ctx context.Context) error {
@@ -185,6 +215,10 @@ func Run(ctx context.Context) error {
 		scheduleService.Run(schedulerContext)
 	}()
 	logger.Info("ingestion scheduler initialized")
+	exportContext, stopExport := context.WithCancel(runtimeContext)
+	exportDone := make(chan struct{})
+	go func() { defer close(exportDone); exportWorker.Run(exportContext) }()
+	logger.Info("report export worker initialized", "owner_id", exportWorker.OwnerID())
 	cleanupContext, stopCleanup := context.WithCancel(runtimeContext)
 	cleanupDone := make(chan struct{})
 	go func() {
@@ -207,6 +241,7 @@ func Run(ctx context.Context) error {
 	httpShutdownDone := make(chan error, 1)
 	go func() { httpShutdownDone <- httpServer.Shutdown(shutdownContext) }()
 	stopCoordinator()
+	stopExport()
 	stopCleanup()
 
 	componentsDone := make(chan struct{})
@@ -214,6 +249,7 @@ func Run(ctx context.Context) error {
 		<-schedulerDone
 		<-coordinatorDone
 		<-cleanupDone
+		<-exportDone
 		close(componentsDone)
 	}()
 	select {

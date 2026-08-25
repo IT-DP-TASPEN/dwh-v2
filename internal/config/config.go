@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -14,18 +15,27 @@ import (
 )
 
 const (
-	defaultAppName                 = "Go Admin"
-	defaultAppEnvironment          = "development"
-	defaultAppURL                  = "http://localhost:8080"
-	defaultAppBindHost             = "127.0.0.1"
-	defaultAppPort                 = 8080
-	defaultAppShutdownTimeout      = 45 * time.Second
-	defaultDatabaseHost            = "127.0.0.1"
-	defaultDatabasePort            = 3306
-	defaultSessionCookieName       = "admin_session"
-	defaultSessionLifetime         = 24 * time.Hour
-	defaultSessionRememberLifetime = 30 * 24 * time.Hour
-	defaultFincloudHTTPTimeout     = 30 * time.Second
+	defaultAppName                  = "Go Admin"
+	defaultAppEnvironment           = "development"
+	defaultAppURL                   = "http://localhost:8080"
+	defaultAppBindHost              = "127.0.0.1"
+	defaultAppPort                  = 8080
+	defaultAppShutdownTimeout       = 45 * time.Second
+	defaultDatabaseHost             = "127.0.0.1"
+	defaultDatabasePort             = 3306
+	defaultSessionCookieName        = "admin_session"
+	defaultSessionLifetime          = 24 * time.Hour
+	defaultSessionRememberLifetime  = 30 * 24 * time.Hour
+	defaultFincloudHTTPTimeout      = 30 * time.Second
+	defaultReportConnectTimeout     = 5 * time.Second
+	defaultReportInteractiveTimeout = 20 * time.Second
+	defaultReportExportTimeout      = 30 * time.Minute
+	defaultReportRetention          = 24 * time.Hour
+	defaultReportCleanupInterval    = time.Hour
+	defaultReportHeartbeatInterval  = 2 * time.Second
+	defaultReportStaleAfter         = 30 * time.Second
+	defaultReportOrphanGrace        = time.Hour
+	defaultReportDownloadTimeout    = 10 * time.Minute
 )
 
 type Config struct {
@@ -39,7 +49,27 @@ type Config struct {
 // instead, so migrations and administrator bootstrap remain independent.
 type RuntimeConfig struct {
 	Config
-	Fincloud FincloudConfig
+	Fincloud  FincloudConfig
+	Reporting ReportingConfig
+}
+
+type ReportingConfig struct {
+	MasterKey               [32]byte
+	ExportDir               string
+	ConnectTimeout          time.Duration
+	InteractiveTimeout      time.Duration
+	ExportTimeout           time.Duration
+	DownloadTimeout         time.Duration
+	InteractiveMaxRows      int
+	InteractivePayloadBytes int64
+	CellPreviewBytes        int
+	MySQLMaxPacketBytes     int
+	MaxConcurrentExports    int
+	Retention               time.Duration
+	CleanupInterval         time.Duration
+	HeartbeatInterval       time.Duration
+	StaleAfter              time.Duration
+	OrphanGrace             time.Duration
 }
 
 type FincloudConfig struct {
@@ -119,7 +149,115 @@ func parseRuntime(lookup lookupEnv) (RuntimeConfig, error) {
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
-	return RuntimeConfig{Config: base, Fincloud: fincloudConfig}, nil
+	reportingConfig, err := parseReporting(lookup, base.App.Environment)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	return RuntimeConfig{Config: base, Fincloud: fincloudConfig, Reporting: reportingConfig}, nil
+}
+
+func parseReporting(lookup lookupEnv, environment string) (ReportingConfig, error) {
+	value := func(key, fallback string) string {
+		if result, ok := lookup(key); ok {
+			return result
+		}
+		return fallback
+	}
+	keyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value("REPORT_DATASOURCE_MASTER_KEY", "")))
+	if err != nil || len(keyBytes) != 32 {
+		return ReportingConfig{}, fmt.Errorf("REPORT_DATASOURCE_MASTER_KEY must be standard base64 encoding of exactly 32 bytes")
+	}
+	exportDir := strings.TrimSpace(value("REPORT_EXPORT_DIR", ""))
+	if exportDir == "" {
+		if environment == "production" {
+			return ReportingConfig{}, fmt.Errorf("REPORT_EXPORT_DIR must not be empty in production")
+		}
+		exportDir = "./var/report-exports"
+	}
+	duration := func(key string, fallback time.Duration) (time.Duration, error) {
+		return parseDuration(key, value(key, fallback.String()))
+	}
+	connectTimeout, err := duration("REPORT_CONNECT_TIMEOUT", defaultReportConnectTimeout)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	interactiveTimeout, err := duration("REPORT_INTERACTIVE_TIMEOUT", defaultReportInteractiveTimeout)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	exportTimeout, err := duration("REPORT_EXPORT_TIMEOUT", defaultReportExportTimeout)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	downloadTimeout, err := duration("REPORT_DOWNLOAD_TIMEOUT", defaultReportDownloadTimeout)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	retention, err := duration("REPORT_EXPORT_RETENTION", defaultReportRetention)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	cleanupInterval, err := duration("REPORT_EXPORT_CLEANUP_INTERVAL", defaultReportCleanupInterval)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	heartbeatInterval, err := duration("REPORT_EXPORT_HEARTBEAT_INTERVAL", defaultReportHeartbeatInterval)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	staleAfter, err := duration("REPORT_EXPORT_STALE_AFTER", defaultReportStaleAfter)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	orphanGrace, err := duration("REPORT_EXPORT_ORPHAN_GRACE", defaultReportOrphanGrace)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	positive := func(key string, fallback int) (int, error) {
+		parsed, err := strconv.Atoi(value(key, strconv.Itoa(fallback)))
+		if err != nil || parsed <= 0 {
+			return 0, fmt.Errorf("%s must be a positive integer", key)
+		}
+		return parsed, nil
+	}
+	maxRows, err := positive("REPORT_INTERACTIVE_MAX_ROWS", 10000)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	payloadBytes, err := positive("REPORT_INTERACTIVE_PAYLOAD_BYTES", 8<<20)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	if payloadBytes < 4096 {
+		return ReportingConfig{}, fmt.Errorf("REPORT_INTERACTIVE_PAYLOAD_BYTES must be at least 4096")
+	}
+	cellBytes, err := positive("REPORT_CELL_PREVIEW_BYTES", 16<<10)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	packetBytes, err := positive("REPORT_MYSQL_MAX_PACKET_BYTES", 64<<20)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	maxExports, err := positive("REPORT_MAX_CONCURRENT_EXPORTS", 2)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	if heartbeatInterval >= staleAfter {
+		return ReportingConfig{}, fmt.Errorf("REPORT_EXPORT_HEARTBEAT_INTERVAL must be shorter than REPORT_EXPORT_STALE_AFTER")
+	}
+	if orphanGrace <= exportTimeout {
+		return ReportingConfig{}, fmt.Errorf("REPORT_EXPORT_ORPHAN_GRACE must be longer than REPORT_EXPORT_TIMEOUT")
+	}
+	var masterKey [32]byte
+	copy(masterKey[:], keyBytes)
+	return ReportingConfig{
+		MasterKey: masterKey, ExportDir: exportDir, ConnectTimeout: connectTimeout,
+		InteractiveTimeout: interactiveTimeout, ExportTimeout: exportTimeout, DownloadTimeout: downloadTimeout,
+		InteractiveMaxRows: maxRows, InteractivePayloadBytes: int64(payloadBytes), CellPreviewBytes: cellBytes,
+		MySQLMaxPacketBytes: packetBytes, MaxConcurrentExports: maxExports, Retention: retention,
+		CleanupInterval: cleanupInterval, HeartbeatInterval: heartbeatInterval, StaleAfter: staleAfter, OrphanGrace: orphanGrace,
+	}, nil
 }
 
 func parseFincloud(lookup lookupEnv) (FincloudConfig, error) {

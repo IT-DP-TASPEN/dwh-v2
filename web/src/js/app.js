@@ -7,14 +7,19 @@ import {
   CircleCheckBig,
   createIcons,
   Database,
+  FileCode,
+  FileDown,
   History,
   LayoutDashboard,
   LogOut,
   Menu,
   PanelLeftClose,
   ScrollText,
+  Server,
+  Settings,
   ShieldCheck,
   Shield,
+  Table2,
   Users,
   UserRound,
   X,
@@ -157,6 +162,36 @@ Alpine.data("copyDiagnostic", () => ({
   },
 }));
 
+Alpine.data("reportResult", (elementID) => ({
+  result: { columns: [], rows: [] },
+  page: 1,
+  pageSize: 50,
+  init() {
+    const element = document.getElementById(elementID);
+    if (element) this.result = JSON.parse(element.textContent || "{}");
+    this.result.columns ||= [];
+    this.result.rows ||= [];
+  },
+  get pages() {
+    return Math.max(1, Math.ceil(this.result.rows.length / this.pageSize));
+  },
+  get pageRows() {
+    const start = (this.page - 1) * this.pageSize;
+    return this.result.rows.slice(start, start + this.pageSize);
+  },
+  get pageLabel() {
+    if (!this.result.rows.length) return "0 rows";
+    const first = (this.page - 1) * this.pageSize + 1;
+    return `${first}–${Math.min(first + this.pageSize - 1, this.result.rows.length)} of ${this.result.rows.length}`;
+  },
+  previous() {
+    if (this.page > 1) this.page--;
+  },
+  next() {
+    if (this.page < this.pages) this.page++;
+  },
+}));
+
 document.addEventListener("submit", (event) => {
   const form = event.target;
   if (!(form instanceof HTMLFormElement) || !form.matches("[data-confirm]") || form.dataset.confirmed === "true") return;
@@ -166,7 +201,7 @@ document.addEventListener("submit", (event) => {
 
 const initializeIcons = () =>
   createIcons({
-    icons: { Activity, CalendarClock, ChevronDown, CircleCheckBig, Database, History, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Shield, ShieldCheck, UserRound, Users, X },
+    icons: { Activity, CalendarClock, ChevronDown, CircleCheckBig, Database, FileCode, FileDown, History, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Server, Settings, Shield, ShieldCheck, Table2, UserRound, Users, X },
   });
 
 document.addEventListener("DOMContentLoaded", initializeIcons);

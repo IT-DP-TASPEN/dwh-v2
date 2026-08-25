@@ -31,14 +31,28 @@ const (
 	ActionAdminBootstrap                 Action = "admin.bootstrap"
 	ActionIngestionCancellationRequested Action = "ingestion.cancellation_requested"
 	ActionIngestionAbandonedRecovered    Action = "ingestion.abandoned_recovered"
+	ActionReportDatasourceCreated        Action = "report_datasource.created"
+	ActionReportDatasourceUpdated        Action = "report_datasource.updated"
+	ActionReportDatasourceStateChanged   Action = "report_datasource.state_changed"
+	ActionReportDatasourceTested         Action = "report_datasource.tested"
+	ActionReportTemplateCreated          Action = "report_template.created"
+	ActionReportTemplateUpdated          Action = "report_template.updated"
+	ActionReportTemplateStateChanged     Action = "report_template.state_changed"
+	ActionReportTemplateAccessChanged    Action = "report_template.access_changed"
+	ActionReportExecuted                 Action = "report.executed"
+	ActionReportExportSubmitted          Action = "report_export.submitted"
+	ActionReportExportDownloaded         Action = "report_export.downloaded"
 )
 
 type ResourceType string
 
 const (
-	ResourceUser         ResourceType = "user"
-	ResourceRole         ResourceType = "role"
-	ResourceIngestionRun ResourceType = "ingestion_run"
+	ResourceUser             ResourceType = "user"
+	ResourceRole             ResourceType = "role"
+	ResourceIngestionRun     ResourceType = "ingestion_run"
+	ResourceReportDatasource ResourceType = "report_datasource"
+	ResourceReportTemplate   ResourceType = "report_template"
+	ResourceReportExport     ResourceType = "report_export"
 )
 
 type Identity struct {
@@ -82,6 +96,19 @@ type ImpersonationStartedMetadata struct {
 
 func (ImpersonationStartedMetadata) auditMetadata() {}
 
+type AccessChangeMetadata struct {
+	UserID  uint64 `json:"user_id"`
+	Granted bool   `json:"granted"`
+}
+
+func (AccessChangeMetadata) auditMetadata() {}
+
+type OutcomeMetadata struct {
+	Outcome string `json:"outcome"`
+}
+
+func (OutcomeMetadata) auditMetadata() {}
+
 type Event struct {
 	Attribution Attribution
 	Action      Action
@@ -109,7 +136,8 @@ func Append(ctx context.Context, executor sqlx.ExtContext, event Event) error {
 	if (event.Resource == "") != (event.ResourceID == 0) {
 		return fmt.Errorf("audit resource type and ID must be set together")
 	}
-	if event.Resource != "" && event.Resource != ResourceUser && event.Resource != ResourceRole && event.Resource != ResourceIngestionRun {
+	if event.Resource != "" && event.Resource != ResourceUser && event.Resource != ResourceRole && event.Resource != ResourceIngestionRun &&
+		event.Resource != ResourceReportDatasource && event.Resource != ResourceReportTemplate && event.Resource != ResourceReportExport {
 		return fmt.Errorf("unknown audit resource type %q", event.Resource)
 	}
 	if event.CreatedAt.IsZero() {
@@ -183,7 +211,18 @@ func knownAction(action Action) bool {
 		ActionRolePermissionsUpdated,
 		ActionAdminBootstrap,
 		ActionIngestionCancellationRequested,
-		ActionIngestionAbandonedRecovered:
+		ActionIngestionAbandonedRecovered,
+		ActionReportDatasourceCreated,
+		ActionReportDatasourceUpdated,
+		ActionReportDatasourceStateChanged,
+		ActionReportDatasourceTested,
+		ActionReportTemplateCreated,
+		ActionReportTemplateUpdated,
+		ActionReportTemplateStateChanged,
+		ActionReportTemplateAccessChanged,
+		ActionReportExecuted,
+		ActionReportExportSubmitted,
+		ActionReportExportDownloaded:
 		return true
 	default:
 		return false

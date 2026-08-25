@@ -15,6 +15,9 @@ func TestStableActionsAreUnique(t *testing.T) {
 		ActionUserActivated, ActionUserDeactivated, ActionUserPasswordReset,
 		ActionRoleCreated, ActionRoleUpdated, ActionRoleDeleted, ActionRolePermissionsUpdated,
 		ActionAdminBootstrap,
+		ActionReportDatasourceCreated, ActionReportDatasourceUpdated, ActionReportDatasourceStateChanged, ActionReportDatasourceTested,
+		ActionReportTemplateCreated, ActionReportTemplateUpdated, ActionReportTemplateStateChanged, ActionReportTemplateAccessChanged,
+		ActionReportExecuted, ActionReportExportSubmitted, ActionReportExportDownloaded,
 	}
 	seen := make(map[Action]bool, len(actions))
 	for _, action := range actions {
