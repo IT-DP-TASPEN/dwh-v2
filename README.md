@@ -161,6 +161,13 @@ go test -race ./...
 make verify
 ```
 
+Run the permanent browser regression suite after installing its Chromium build:
+
+```sh
+npx playwright install chromium
+npm run test:browser
+```
+
 Real MySQL tests are opt-in:
 
 ```sh

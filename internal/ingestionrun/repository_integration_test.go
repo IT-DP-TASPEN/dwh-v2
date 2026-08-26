@@ -249,8 +249,8 @@ func TestTransactionalSuccessfulFinishMatchesCanonicalFinish(t *testing.T) {
 	if err := repository.RecoverAbandoned(context.Background(), transactionalID, owner, heartbeat, "late recovery", securityctx.Requester{}); !errors.Is(err, ErrTransition) {
 		t.Fatalf("late recovery error=%v", err)
 	}
-	if err := repository.RequestCancellation(context.Background(), transactionalID, "late cancellation", securityctx.Requester{}); err != nil {
-		t.Fatal(err)
+	if applied, err := repository.RequestCancellation(context.Background(), transactionalID, "late cancellation", securityctx.Requester{}); err != nil || applied {
+		t.Fatalf("late cancellation applied=%v error=%v", applied, err)
 	}
 	type terminalState struct {
 		Status, Owner, Snapshot, Step, SkipReason, PreviousOwner, Mapper string
@@ -374,15 +374,15 @@ func TestDurableQueueRunAllAndTerminalCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.RequestCancellation(context.Background(), journalID, "must roll back", securityctx.Requester{}); err == nil {
-		t.Fatal("cancellation without durable actor attribution succeeded")
+	if applied, err := repository.RequestCancellation(context.Background(), journalID, "must roll back", securityctx.Requester{}); err == nil || applied {
+		t.Fatalf("cancellation without durable actor attribution applied=%v error=%v", applied, err)
 	}
 	journal, _ := repository.Get(context.Background(), journalID)
 	if journal.Status != StatusQueued || journal.CancelRequested {
 		t.Fatalf("failed cancellation audit did not roll back: %+v", journal)
 	}
-	if err := repository.RequestCancellation(context.Background(), journalID, "operator cancelled", requester); err != nil {
-		t.Fatal(err)
+	if applied, err := repository.RequestCancellation(context.Background(), journalID, "operator cancelled", requester); err != nil || !applied {
+		t.Fatalf("cancellation applied=%v error=%v", applied, err)
 	}
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, journalID)
@@ -424,8 +424,8 @@ func TestDurableQueueRunAllAndTerminalCAS(t *testing.T) {
 	if err := repository.Finish(context.Background(), first.ID, owner, StatusSucceeded, SafeError{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.RequestCancellation(context.Background(), first.ID, "late", requester); err != nil {
-		t.Fatal(err)
+	if applied, err := repository.RequestCancellation(context.Background(), first.ID, "late", requester); err != nil || applied {
+		t.Fatalf("late cancellation applied=%v error=%v", applied, err)
 	}
 	finished, _ := repository.Get(context.Background(), first.ID)
 	if finished.Status != StatusSucceeded || finished.CancelRequested {
@@ -453,8 +453,8 @@ func TestDurableQueueRunAllAndTerminalCAS(t *testing.T) {
 	if err := repository.Finish(context.Background(), second.ID, owner, StatusSucceeded, SafeError{}); !errors.Is(err, ErrTransition) {
 		t.Fatalf("worker overwrote abandoned run: %v", err)
 	}
-	if err := repository.RequestCancellation(context.Background(), parentID, "test cleanup", requester); err != nil {
-		t.Fatal(err)
+	if applied, err := repository.RequestCancellation(context.Background(), parentID, "test cleanup", requester); err != nil || !applied {
+		t.Fatalf("parent cancellation applied=%v error=%v", applied, err)
 	}
 	if changed, err = repository.ReconcileOneParent(context.Background()); err != nil || !changed {
 		t.Fatalf("cancelled parent reconciliation changed=%v error=%v", changed, err)

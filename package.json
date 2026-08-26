@@ -5,6 +5,7 @@
     "build": "npm run build:css && npm run build:js",
     "build:css": "tailwindcss -i ./web/src/css/app.css -o ./web/static/css/app.css --minify",
     "build:js": "esbuild ./web/src/js/app.js --bundle --minify --target=es2020 --outfile=./web/static/js/app.js",
+    "test:browser": "playwright test",
     "watch:css": "tailwindcss -i ./web/src/css/app.css -o ./web/static/css/app.css --watch=always",
     "watch:js": "esbuild ./web/src/js/app.js --bundle --sourcemap --target=es2020 --outfile=./web/static/js/app.js --watch=forever"
   },
@@ -14,6 +15,7 @@
     "lucide": "^1.31.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/cli": "^4.3.3",
     "esbuild": "^0.28.2",
     "tailwindcss": "^4.3.3"

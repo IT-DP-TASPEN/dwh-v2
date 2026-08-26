@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -160,14 +161,20 @@ func (handler *Handler) RunStatus(writer http.ResponseWriter, request *http.Requ
 	}
 	detail.CanCancel = principal.Can(PermissionCancel) && !detail.Run.Terminal
 	detail.CanRecover = principal.Can(PermissionRecoverAbandoned) && detail.Run.Kind != string(ingestionrun.KindRunAllParent) && detail.Run.Status.Key == string(ingestionrun.StatusRunning)
+	detail.SwapCancelAction = actionCapabilityChanged(request.URL.Query().Get("can_cancel"), detail.CanCancel)
+	detail.SwapRecoverAction = actionCapabilityChanged(request.URL.Query().Get("can_recover"), detail.CanRecover)
 	pageData, ok := handler.admin.PageData(request, "Run Details", detail)
 	if !ok {
 		handler.admin.Internal(writer, request, "prepare run status", errors.New("principal missing"))
 		return
 	}
-	if err := handler.admin.RenderPartial(writer, http.StatusOK, "features/ingestion/show", "run-status", pageData); err != nil {
+	if err := handler.admin.RenderPartial(writer, http.StatusOK, "features/ingestion/show", "run-status-poll", pageData); err != nil {
 		handler.admin.Internal(writer, request, "render run status", err)
 	}
+}
+
+func actionCapabilityChanged(rendered string, current bool) bool {
+	return rendered != strconv.FormatBool(current)
 }
 
 func (handler *Handler) RunAllPage(writer http.ResponseWriter, request *http.Request) {

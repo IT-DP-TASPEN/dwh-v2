@@ -4,6 +4,7 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,8 +13,31 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
+	"github.com/ibldzn/go-admin/internal/securityctx"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 )
+
+func TestCancelMapsTerminalNoOpToTransition(t *testing.T) {
+	db := integrationdb.Open(t)
+	catalog, _ := ingestion.NewCatalog()
+	runs, err := ingestionrun.NewRepository(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.Exec(`INSERT INTO ingestion_runs
+		(kind,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,finished_at)
+		VALUES ('job','cif_detail','succeeded','detail_live_snapshot_v1',1,JSON_OBJECT(),UNHEX(REPEAT('00',32)),'direct',UTC_TIMESTAMP(6))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, id) })
+
+	coordinator := &Coordinator{runs: runs}
+	if err := coordinator.Cancel(context.Background(), uint64(id), "late", securityctx.Requester{}); !errors.Is(err, ingestionrun.ErrTransition) {
+		t.Fatalf("terminal cancellation error=%v", err)
+	}
+}
 
 func TestPeriodicRecoverySweepDrainsManyStaleRunsAndReleasesJobs(t *testing.T) {
 	db := integrationdb.Open(t)

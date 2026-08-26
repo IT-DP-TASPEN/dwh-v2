@@ -110,7 +110,11 @@ func (coordinator *Coordinator) registerParent(ctx context.Context, id uint64) {
 }
 
 func (coordinator *Coordinator) Cancel(ctx context.Context, runID uint64, reason string, requester securityctx.Requester) error {
-	return coordinator.runs.RequestCancellation(ctx, runID, reason, requester)
+	applied, err := coordinator.runs.RequestCancellation(ctx, runID, reason, requester)
+	if err == nil && !applied {
+		return ingestionrun.ErrTransition
+	}
+	return err
 }
 
 func (coordinator *Coordinator) RecoverAbandoned(ctx context.Context, runID uint64, expectedOwner string, expectedHeartbeat time.Time, reason string, requester securityctx.Requester) error {

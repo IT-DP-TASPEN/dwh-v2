@@ -1,46 +1,85 @@
-{{define "run-status"}}
-<div id="run-status" {{if .Data.Polling}}hx-get="/runs/{{.Data.Run.ID}}/status" hx-trigger="every 3s" hx-swap="outerHTML"{{end}} class="space-y-6" aria-live="polite">
+{{define "run-live-state"}}
+<div id="run-live-state" {{if .Data.Polling}}hx-get="/runs/{{.Data.Run.ID}}/status?can_cancel={{.Data.CanCancel}}&amp;can_recover={{.Data.CanRecover}}" hx-trigger="every 3s" hx-swap="outerHTML"{{end}} class="space-y-6" aria-live="polite">
   <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><article class="rounded-xl border bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Status</p><p class="mt-2"><span class="rounded-full px-2 py-1 text-sm {{.Data.Run.Status.Class}}">{{.Data.Run.Status.Label}}</span></p>{{if .Data.Run.Status.Description}}<p class="mt-2 text-xs">{{.Data.Run.Status.Description}}</p>{{end}}</article><article class="rounded-xl border bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Progress</p><p class="mt-2 font-semibold">{{.Data.Run.ProgressSucceeded}} / {{.Data.Run.ProgressTotal}} {{.Data.Run.ProgressUnit}}</p><p class="text-xs">{{.Data.Run.ProgressFailed}} failed · {{.Data.Run.Rows}} rows</p></article><article class="rounded-xl border bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Started / finished</p><p class="mt-2 text-sm">{{if .Data.Run.StartedAt}}{{.Data.Run.StartedAt}}{{else}}—{{end}}</p><p class="text-sm">{{if .Data.Run.FinishedAt}}{{.Data.Run.FinishedAt}}{{else}}—{{end}}</p></article><article class="rounded-xl border bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Current step</p><p class="mt-2 text-sm">{{if .Data.Run.CurrentStep}}{{.Data.Run.CurrentStep}}{{else}}—{{end}}</p></article></div>
   {{if .Data.Run.ErrorMessage}}<div role="alert" class="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-100"><strong>{{.Data.Run.ErrorClass}}</strong> — {{.Data.Run.ErrorMessage}}{{if .Data.Run.ErrorStep}} ({{.Data.Run.ErrorStep}}){{end}}</div>{{end}}
-  <details class="rounded-xl border bg-white dark:border-slate-800 dark:bg-slate-900" {{if .Data.TechnicalErrors}}open{{end}}>
-    <summary class="cursor-pointer px-5 py-4 font-semibold">Technical Details <span class="ml-1 text-xs font-normal text-slate-500">({{len .Data.TechnicalErrors}} events)</span></summary>
-    <div class="border-t p-5 dark:border-slate-800">
-      {{if .Data.TechnicalErrors}}
-      <ol class="space-y-4">
-        {{range .Data.TechnicalErrors}}
-        <li class="rounded-lg border p-4 dark:border-slate-700" x-data="copyDiagnostic">
-          <div data-diagnostic-copy>
-            <div class="flex flex-wrap items-center gap-2 text-sm">
-              <time class="font-mono text-xs text-slate-500">{{.OccurredAt}}</time>
-              <strong class="uppercase">{{.Class}} / {{.Step}}</strong>
-              <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs uppercase dark:bg-slate-800">{{.Severity}}</span>
-              <span class="text-xs text-slate-500">{{.EventKind}}{{if .Terminal}} · terminal{{end}}{{if .RecoveryState}} · {{.RecoveryState}}{{end}}</span>
-            </div>
-            <dl class="mt-3 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-3">
-              <div><dt class="text-xs text-slate-500">Operation</dt><dd class="font-mono">{{.Operation}}</dd></div>
-              {{if .ItemIdentifier}}<div><dt class="text-xs text-slate-500">Item</dt><dd class="font-mono break-all">{{.ItemIdentifier}}</dd></div>{{end}}
-              {{if .MemberKey}}<div><dt class="text-xs text-slate-500">Member</dt><dd class="font-mono break-all">{{.MemberKey}}</dd></div>{{end}}
-              {{if .Attempt}}<div><dt class="text-xs text-slate-500">Attempt</dt><dd>{{.Attempt}}</dd></div>{{end}}
-              {{if .AggregationScope}}<div><dt class="text-xs text-slate-500">Affected items</dt><dd>{{.AffectedItems}} · {{.CapturedExamples}} examples · {{.OmittedExamples}} omitted</dd></div><div><dt class="text-xs text-slate-500">First / last occurrence</dt><dd>{{.OccurredAt}} / {{.LastOccurredAt}}</dd></div>{{end}}
-              {{if .ErrorType}}<div><dt class="text-xs text-slate-500">Error type</dt><dd class="font-mono break-all">{{.ErrorType}}</dd></div>{{end}}
-            </dl>
-            {{if .ErrorMessage}}<p class="mt-3 break-words text-sm">{{.ErrorMessage}}</p>{{end}}
-            {{if .Samples}}<div class="mt-3"><p class="text-xs font-medium text-slate-500">Representative samples</p><ul class="mt-1 space-y-1 font-mono text-xs">{{range .Samples}}<li>{{if .ItemIdentifier}}item={{.ItemIdentifier}}{{end}}{{if .MemberKey}} member={{.MemberKey}}{{end}}{{if .Attempt}} attempt={{.Attempt}}{{end}} · {{.OccurredAt}}</li>{{end}}</ul></div>{{end}}
-            {{if .Details}}<div class="mt-3"><p class="mb-1 text-xs font-medium text-slate-500">Structured evidence</p><pre class="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-950 p-3 text-xs text-slate-100">{{.Details}}</pre></div>{{end}}
-            {{if .Body}}<div class="mt-3"><p class="mb-1 text-xs font-medium text-slate-500">Response body · {{if eq .BodyEncoding "base64"}}Binary/base64{{else}}UTF-8{{end}}</p><pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-950 p-3 text-xs text-slate-100">{{.Body}}</pre></div>{{end}}
-          </div>
-          <button type="button" class="mt-3 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" @click="copy()" x-text="copied ? 'Copied' : 'Copy diagnostic'">Copy diagnostic</button>
-        </li>
-        {{end}}
-      </ol>
-      {{else}}<p class="text-sm text-slate-500">No detailed diagnostic was captured for this run.</p>{{end}}
-      {{with .Data.MapperDiagnostics}}<div class="mt-5 border-t pt-4 dark:border-slate-800"><h3 class="text-sm font-semibold">Mapper summary</h3><p class="mt-1 text-sm">{{.TotalCount}} affected items · {{.OverflowCount}} omitted from distinct groups</p><ul class="mt-2 space-y-1 text-sm">{{range .Groups}}<li><span class="font-mono">{{.Field}} / {{.Category}} / {{.Reason}}</span> — {{.SafeMessage}} ({{.Count}})</li>{{end}}</ul></div>{{end}}
+</div>
+{{end}}
+
+{{define "run-technical-content"}}
+{{if .Data.TechnicalErrors}}
+<ol class="space-y-4">
+  {{range .Data.TechnicalErrors}}
+  <li class="rounded-lg border p-4 dark:border-slate-700" x-data="copyDiagnostic">
+    <div data-diagnostic-copy>
+      <div class="flex flex-wrap items-center gap-2 text-sm">
+        <time class="font-mono text-xs text-slate-500">{{.OccurredAt}}</time>
+        <strong class="uppercase">{{.Class}} / {{.Step}}</strong>
+        <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs uppercase dark:bg-slate-800">{{.Severity}}</span>
+        <span class="text-xs text-slate-500">{{.EventKind}}{{if .Terminal}} · terminal{{end}}{{if .RecoveryState}} · {{.RecoveryState}}{{end}}</span>
+      </div>
+      <dl class="mt-3 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-3">
+        <div><dt class="text-xs text-slate-500">Operation</dt><dd class="font-mono">{{.Operation}}</dd></div>
+        {{if .ItemIdentifier}}<div><dt class="text-xs text-slate-500">Item</dt><dd class="font-mono break-all">{{.ItemIdentifier}}</dd></div>{{end}}
+        {{if .MemberKey}}<div><dt class="text-xs text-slate-500">Member</dt><dd class="font-mono break-all">{{.MemberKey}}</dd></div>{{end}}
+        {{if .Attempt}}<div><dt class="text-xs text-slate-500">Attempt</dt><dd>{{.Attempt}}</dd></div>{{end}}
+        {{if .AggregationScope}}<div><dt class="text-xs text-slate-500">Affected items</dt><dd>{{.AffectedItems}} · {{.CapturedExamples}} examples · {{.OmittedExamples}} omitted</dd></div><div><dt class="text-xs text-slate-500">First / last occurrence</dt><dd>{{.OccurredAt}} / {{.LastOccurredAt}}</dd></div>{{end}}
+        {{if .ErrorType}}<div><dt class="text-xs text-slate-500">Error type</dt><dd class="font-mono break-all">{{.ErrorType}}</dd></div>{{end}}
+      </dl>
+      {{if .ErrorMessage}}<p class="mt-3 break-words text-sm">{{.ErrorMessage}}</p>{{end}}
+      {{if .Samples}}<div class="mt-3"><p class="text-xs font-medium text-slate-500">Representative samples</p><ul class="mt-1 space-y-1 font-mono text-xs">{{range .Samples}}<li>{{if .ItemIdentifier}}item={{.ItemIdentifier}}{{end}}{{if .MemberKey}} member={{.MemberKey}}{{end}}{{if .Attempt}} attempt={{.Attempt}}{{end}} · {{.OccurredAt}}</li>{{end}}</ul></div>{{end}}
+      {{if .Details}}<div class="mt-3"><p class="mb-1 text-xs font-medium text-slate-500">Structured evidence</p><pre class="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-950 p-3 text-xs text-slate-100">{{.Details}}</pre></div>{{end}}
+      {{if .Body}}<div class="mt-3"><p class="mb-1 text-xs font-medium text-slate-500">Response body · {{if eq .BodyEncoding "base64"}}Binary/base64{{else}}UTF-8{{end}}</p><pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-950 p-3 text-xs text-slate-100">{{.Body}}</pre></div>{{end}}
     </div>
-  </details>
-  <section class="rounded-xl border bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><h2 class="font-semibold">Parameters</h2><dl class="mt-3 grid gap-3 sm:grid-cols-2">{{range .Data.Run.Parameters}}<div><dt class="text-xs text-slate-500">{{.Label}}</dt><dd>{{.Value}}</dd></div>{{end}}</dl>{{if .Data.Run.SnapshotDate}}<p class="mt-3 text-sm">{{if or (eq .Data.Run.JobKey "cif_detail") (eq .Data.Run.JobKey "saving_detail") (eq .Data.Run.JobKey "time_deposit_detail") (eq .Data.Run.JobKey "loan_detail")}}Execution date (Asia/Jakarta){{else}}Snapshot date{{end}}: {{.Data.Run.SnapshotDate}}</p>{{end}}</section>
-  {{with .Data.Scheduler}}<section class="rounded-xl border bg-white p-5 text-sm dark:border-slate-800 dark:bg-slate-900"><h2 class="font-semibold">Scheduler provenance</h2><p class="mt-2"><a href="/schedules/{{.ScheduleID}}" class="text-emerald-700 hover:underline dark:text-emerald-400">{{.ScheduleName}}</a> · occurrence <a href="/schedules/{{.ScheduleID}}/occurrences/{{.OccurrenceID}}" class="underline">#{{.OccurrenceID}}</a> · attempt {{.AttemptNo}}</p></section>{{end}}
-  {{if .Data.Children}}<section><h2 class="mb-3 text-lg font-semibold">Run All children</h2><div class="overflow-x-auto rounded-xl border bg-white dark:border-slate-800 dark:bg-slate-900"><table class="min-w-full text-left text-sm"><thead><tr><th class="px-4 py-3">Position</th><th class="px-4 py-3">Job</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Progress</th></tr></thead><tbody>{{range .Data.Children}}<tr class="border-t dark:border-slate-800"><td class="px-4 py-3">{{.ChildPosition}}</td><td class="px-4 py-3"><a href="/runs/{{.ID}}" class="text-emerald-700 hover:underline dark:text-emerald-400">{{.JobName}}</a></td><td class="px-4 py-3">{{.Status.Label}}{{if .SkipReason}} — {{.SkipReason}}{{end}}</td><td class="px-4 py-3">{{.ProgressSucceeded}} / {{.ProgressTotal}}</td></tr>{{end}}</tbody></table></div></section>{{end}}
+    <button type="button" class="mt-3 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" @click="copy()" x-text="copied ? 'Copied' : 'Copy diagnostic'">Copy diagnostic</button>
+  </li>
+  {{end}}
+</ol>
+{{else}}<p class="text-sm text-slate-500">No detailed diagnostic was captured for this run.</p>{{end}}
+{{with .Data.MapperDiagnostics}}<div class="mt-5 border-t pt-4 dark:border-slate-800"><h3 class="text-sm font-semibold">Mapper summary</h3><p class="mt-1 text-sm">{{.TotalCount}} affected items · {{.OverflowCount}} omitted from distinct groups</p><ul class="mt-2 space-y-1 text-sm">{{range .Groups}}<li><span class="font-mono">{{.Field}} / {{.Category}} / {{.Reason}}</span> — {{.SafeMessage}} ({{.Count}})</li>{{end}}</ul></div>{{end}}
+{{end}}
+
+{{define "run-technical-details"}}
+<details id="run-technical-details" class="rounded-xl border bg-white dark:border-slate-800 dark:bg-slate-900" {{if .Data.TechnicalErrors}}open{{end}}>
+  <summary class="cursor-pointer px-5 py-4 font-semibold">Technical Details <span id="run-technical-count" class="ml-1 text-xs font-normal text-slate-500">({{len .Data.TechnicalErrors}} events)</span></summary>
+  <div id="run-technical-content" class="border-t p-5 dark:border-slate-800">{{template "run-technical-content" .}}</div>
+</details>
+{{end}}
+
+{{define "run-children-content"}}
+{{if .Data.Children}}<section><h2 class="mb-3 text-lg font-semibold">Run All children</h2><div class="overflow-x-auto rounded-xl border bg-white dark:border-slate-800 dark:bg-slate-900"><table class="min-w-full text-left text-sm"><thead><tr><th class="px-4 py-3">Position</th><th class="px-4 py-3">Job</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Progress</th></tr></thead><tbody>{{range .Data.Children}}<tr class="border-t dark:border-slate-800"><td class="px-4 py-3">{{.ChildPosition}}</td><td class="px-4 py-3"><a href="/runs/{{.ID}}" class="text-emerald-700 hover:underline dark:text-emerald-400">{{.JobName}}</a></td><td class="px-4 py-3">{{.Status.Label}}{{if .SkipReason}} — {{.SkipReason}}{{end}}</td><td class="px-4 py-3">{{.ProgressSucceeded}} / {{.ProgressTotal}}</td></tr>{{end}}</tbody></table></div></section>{{end}}
+{{end}}
+
+{{define "run-cancel-action"}}
+<div id="run-cancel-action" {{if .Data.SwapCancelAction}}hx-swap-oob="outerHTML"{{end}}{{if not .Data.CanCancel}} hidden{{end}}>
   {{if .Data.CanCancel}}<form method="post" action="/runs/{{.Data.Run.ID}}/cancel" class="rounded-xl border border-orange-200 p-4 dark:border-orange-900"><label class="block text-sm">Cancellation reason (optional)<input name="reason" maxlength="255" class="mt-1 w-full rounded-lg border bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-900"></label><button class="mt-3 rounded-lg bg-orange-600 px-4 py-2 text-sm font-semibold text-white">Request cancellation</button></form>{{end}}
+</div>
+{{end}}
+
+{{define "run-recover-action"}}
+<div id="run-recover-action" {{if .Data.SwapRecoverAction}}hx-swap-oob="outerHTML"{{end}}{{if not .Data.CanRecover}} hidden{{end}}>
   {{if .Data.CanRecover}}<form method="post" action="/runs/{{.Data.Run.ID}}/recover-abandoned" class="rounded-xl border border-violet-300 p-4 dark:border-violet-900"><h2 class="font-semibold">Recover abandoned execution</h2><p class="mt-1 text-sm">Owner <span class="font-mono">{{.Data.Run.OwnerID}}</span> · heartbeat {{.Data.Run.HeartbeatAt}}. Heartbeat age alone is not proof.</p><input type="hidden" name="expected_owner" value="{{.Data.Run.OwnerID}}"><input type="hidden" name="expected_heartbeat" value="{{.Data.Run.HeartbeatEvidence}}"><label class="mt-3 block text-sm">Required reason<textarea name="reason" required maxlength="500" class="mt-1 w-full rounded-lg border bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-900"></textarea></label><label class="mt-3 flex gap-2 text-sm"><input type="checkbox" name="confirm_worker_stopped" value="yes" required> I verified the owning worker process is permanently stopped.</label><button class="mt-3 rounded-lg bg-violet-700 px-4 py-2 text-sm font-semibold text-white">Mark abandoned</button></form>{{end}}
 </div>
+{{end}}
+
+{{define "run-status"}}
+<div class="space-y-6">
+  {{template "run-live-state" .}}
+  {{template "run-technical-details" .}}
+  <section class="rounded-xl border bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><h2 class="font-semibold">Parameters</h2><dl class="mt-3 grid gap-3 sm:grid-cols-2">{{range .Data.Run.Parameters}}<div><dt class="text-xs text-slate-500">{{.Label}}</dt><dd>{{.Value}}</dd></div>{{end}}</dl>{{if .Data.Run.SnapshotDate}}<p class="mt-3 text-sm">{{if or (eq .Data.Run.JobKey "cif_detail") (eq .Data.Run.JobKey "saving_detail") (eq .Data.Run.JobKey "time_deposit_detail") (eq .Data.Run.JobKey "loan_detail")}}Execution date (Asia/Jakarta){{else}}Snapshot date{{end}}: {{.Data.Run.SnapshotDate}}</p>{{end}}</section>
+  {{with .Data.Scheduler}}<section class="rounded-xl border bg-white p-5 text-sm dark:border-slate-800 dark:bg-slate-900"><h2 class="font-semibold">Scheduler provenance</h2><p class="mt-2"><a href="/schedules/{{.ScheduleID}}" class="text-emerald-700 hover:underline dark:text-emerald-400">{{.ScheduleName}}</a> · occurrence <a href="/schedules/{{.ScheduleID}}/occurrences/{{.OccurrenceID}}" class="underline">#{{.OccurrenceID}}</a> · attempt {{.AttemptNo}}</p></section>{{end}}
+  <div id="run-children">{{template "run-children-content" .}}</div>
+  <div id="run-actions" class="space-y-6">
+    {{template "run-cancel-action" .}}
+    {{template "run-recover-action" .}}
+  </div>
+</div>
+{{end}}
+
+{{define "run-status-poll"}}
+{{template "run-live-state" .}}
+<span id="run-technical-count" hx-swap-oob="outerHTML" class="ml-1 text-xs font-normal text-slate-500">({{len .Data.TechnicalErrors}} events)</span>
+<div id="run-technical-content" hx-swap-oob="outerHTML" class="border-t p-5 dark:border-slate-800">{{template "run-technical-content" .}}</div>
+<div id="run-children" hx-swap-oob="outerHTML">{{template "run-children-content" .}}</div>
+{{if .Data.SwapCancelAction}}{{template "run-cancel-action" .}}{{end}}
+{{if .Data.SwapRecoverAction}}{{template "run-recover-action" .}}{{end}}
 {{end}}

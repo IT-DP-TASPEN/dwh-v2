@@ -129,6 +129,8 @@ type RunDetail struct {
 	TechnicalErrors       []TechnicalEventView
 	MapperDiagnostics     *ingestionrun.MapperDiagnostics
 	CanCancel, CanRecover bool
+	SwapCancelAction      bool
+	SwapRecoverAction     bool
 	Polling               bool
 }
 

@@ -469,9 +469,11 @@ func (repository *Repository) ensureRunAllChildren(ctx context.Context, tx *sqlx
 	return nil
 }
 
-func (repository *Repository) RequestCancellation(ctx context.Context, runID uint64, reason string, requester securityctx.Requester) error {
+func (repository *Repository) RequestCancellation(ctx context.Context, runID uint64, reason string, requester securityctx.Requester) (bool, error) {
 	reason = safeText(reason, 255)
+	applied := false
 	_, err := databasepkg.RetryReplaySafeTx(ctx, repository.db, func(tx *sqlx.Tx) error {
+		applied = false
 		var row struct {
 			Kind   Kind   `db:"kind"`
 			Status Status `db:"status"`
@@ -506,9 +508,13 @@ func (repository *Repository) RequestCancellation(ctx context.Context, runID uin
 		if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionCancellationRequested, runID, nil); err != nil {
 			return err
 		}
+		applied = true
 		return nil
 	})
-	return err
+	if err != nil {
+		return false, err
+	}
+	return applied, nil
 }
 
 func (repository *Repository) RecoverAbandoned(ctx context.Context, runID uint64, expectedOwner string, expectedHeartbeat time.Time, reason string, requester securityctx.Requester) error {
