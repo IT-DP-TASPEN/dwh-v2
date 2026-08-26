@@ -7563,6 +7563,100 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
       if (this.page < this.pages) this.page++;
     }
   }));
+  module_default.data("reportTemplateEditor", () => ({
+    parameters: [],
+    nextID: 1,
+    init() {
+      const parsedDefinitions = this.parse(this.$refs.parametersJSON.value, []);
+      const parsedTestValues = this.parse(this.$refs.testValuesJSON.value, {});
+      const definitions = Array.isArray(parsedDefinitions) ? parsedDefinitions : [];
+      const testValues = parsedTestValues && typeof parsedTestValues === "object" && !Array.isArray(parsedTestValues) ? parsedTestValues : {};
+      this.parameters = definitions.map((definition) => this.parameter(definition, testValues));
+    },
+    parse(value, fallback) {
+      try {
+        return JSON.parse(value || "") ?? fallback;
+      } catch {
+        return fallback;
+      }
+    },
+    parameter(definition = {}, testValues = {}) {
+      const type = ["text", "integer", "decimal", "date", "datetime", "boolean", "single_option", "multiple_option"].includes(definition.type) ? definition.type : "text";
+      const hasTestValue = Object.prototype.hasOwnProperty.call(testValues, definition.key);
+      return {
+        id: this.nextID++,
+        key: definition.key || "",
+        label: definition.label || "",
+        type,
+        previousType: type,
+        required: Boolean(definition.required),
+        defaultValue: this.controlValue(type, definition.default),
+        testValue: this.controlValue(type, hasTestValue ? testValues[definition.key] : definition.default),
+        testTouched: hasTestValue,
+        options: (definition.options || []).map((option) => ({ id: this.nextID++, value: option.value || "", label: option.label || "" }))
+      };
+    },
+    controlValue(type, value) {
+      if (type === "multiple_option") return Array.isArray(value) ? value.map(String) : value == null ? [] : [String(value)];
+      if (value == null || Array.isArray(value)) return "";
+      return String(value);
+    },
+    addParameter() {
+      this.parameters.push(this.parameter());
+    },
+    removeParameter(index) {
+      this.parameters.splice(index, 1);
+    },
+    move(list, index, offset) {
+      const target = index + offset;
+      if (target < 0 || target >= list.length) return;
+      list.splice(target, 0, list.splice(index, 1)[0]);
+    },
+    typeChanged(parameter) {
+      const wasOption = parameter.previousType === "single_option" || parameter.previousType === "multiple_option";
+      const isOption = parameter.type === "single_option" || parameter.type === "multiple_option";
+      if (!wasOption || !isOption) parameter.options = [];
+      parameter.defaultValue = parameter.type === "multiple_option" ? [] : "";
+      parameter.testValue = parameter.type === "multiple_option" ? [] : "";
+      parameter.testTouched = false;
+      parameter.previousType = parameter.type;
+    },
+    syncDefault(parameter) {
+      if (!parameter.testTouched) parameter.testValue = Array.isArray(parameter.defaultValue) ? [...parameter.defaultValue] : parameter.defaultValue;
+    },
+    addOption(parameter) {
+      parameter.options.push({ id: this.nextID++, value: "", label: "" });
+    },
+    removeOption(parameter, index) {
+      const [removed] = parameter.options.splice(index, 1);
+      if (!removed) return;
+      if (Array.isArray(parameter.defaultValue)) parameter.defaultValue = parameter.defaultValue.filter((value) => value !== removed.value);
+      if (Array.isArray(parameter.testValue)) parameter.testValue = parameter.testValue.filter((value) => value !== removed.value);
+      if (parameter.defaultValue === removed.value) parameter.defaultValue = "";
+      if (parameter.testValue === removed.value) parameter.testValue = "";
+    },
+    encodedValue(parameter, value) {
+      if (parameter.type === "multiple_option") return value;
+      if (value === "") return null;
+      if (parameter.type === "boolean") return value === "true";
+      return value;
+    },
+    serialize() {
+      this.$refs.parametersJSON.value = JSON.stringify(this.parameters.map((parameter) => ({
+        key: parameter.key,
+        label: parameter.label,
+        type: parameter.type,
+        required: parameter.required,
+        default: this.encodedValue(parameter, parameter.defaultValue),
+        ...parameter.type === "single_option" || parameter.type === "multiple_option" ? { options: parameter.options.map(({ value, label }) => ({ value, label })) } : {}
+      })));
+      const testValues = {};
+      for (const parameter of this.parameters) {
+        if (parameter.key && parameter.testTouched) testValues[parameter.key] = this.encodedValue(parameter, parameter.testValue);
+      }
+      this.$refs.testValuesJSON.value = JSON.stringify(testValues);
+    }
+  }));
   document.addEventListener("submit", (event) => {
     const form = event.target;
     if (!(form instanceof HTMLFormElement) || !form.matches("[data-confirm]") || form.dataset.confirmed === "true") return;

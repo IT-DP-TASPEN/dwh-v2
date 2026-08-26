@@ -303,13 +303,13 @@ type parameterForm struct {
 	Type     string          `json:"type"`
 	Required bool            `json:"required"`
 	Default  json.RawMessage `json:"default"`
-	Order    uint16          `json:"order"`
+	Order    uint16          `json:"order,omitempty"`
 	Options  []optionForm    `json:"options,omitempty"`
 }
 type optionForm struct {
 	Value string `json:"value"`
 	Label string `json:"label"`
-	Order uint16 `json:"order"`
+	Order uint16 `json:"order,omitempty"`
 }
 
 func decodeParameters(value string) ([]reporting.Parameter, error) {
@@ -317,13 +317,19 @@ func decodeParameters(value string) ([]reporting.Parameter, error) {
 	decoder.DisallowUnknownFields()
 	var forms []parameterForm
 	if err := decoder.Decode(&forms); err != nil {
-		return nil, fmt.Errorf("Parameters must be valid JSON: %v", err)
+		return nil, errors.New("Parameter definitions could not be processed.")
+	}
+	if len(forms) > 1<<16 {
+		return nil, errors.New("Too many parameters.")
 	}
 	result := make([]reporting.Parameter, len(forms))
 	for index, form := range forms {
-		result[index] = reporting.Parameter{Key: form.Key, Label: form.Label, Type: reporting.ParameterType(form.Type), Required: form.Required, DefaultValue: form.Default, DisplayOrder: form.Order}
-		for _, option := range form.Options {
-			result[index].Options = append(result[index].Options, reporting.ParameterOption{Value: option.Value, Label: option.Label, DisplayOrder: option.Order})
+		if len(form.Options) > 1<<16 {
+			return nil, fmt.Errorf("Parameter %q has too many options.", form.Key)
+		}
+		result[index] = reporting.Parameter{Key: form.Key, Label: form.Label, Type: reporting.ParameterType(form.Type), Required: form.Required, DefaultValue: form.Default, DisplayOrder: uint16(index)}
+		for optionIndex, option := range form.Options {
+			result[index].Options = append(result[index].Options, reporting.ParameterOption{Value: option.Value, Label: option.Label, DisplayOrder: uint16(optionIndex)})
 		}
 	}
 	return result, reporting.ValidateParameters(result)
@@ -332,9 +338,9 @@ func decodeParameters(value string) ([]reporting.Parameter, error) {
 func encodeParameters(parameters []reporting.Parameter) string {
 	forms := make([]parameterForm, len(parameters))
 	for index, parameter := range parameters {
-		forms[index] = parameterForm{Key: parameter.Key, Label: parameter.Label, Type: string(parameter.Type), Required: parameter.Required, Default: parameter.DefaultValue, Order: parameter.DisplayOrder}
+		forms[index] = parameterForm{Key: parameter.Key, Label: parameter.Label, Type: string(parameter.Type), Required: parameter.Required, Default: parameter.DefaultValue}
 		for _, option := range parameter.Options {
-			forms[index].Options = append(forms[index].Options, optionForm{Value: option.Value, Label: option.Label, Order: option.DisplayOrder})
+			forms[index].Options = append(forms[index].Options, optionForm{Value: option.Value, Label: option.Label})
 		}
 	}
 	encoded, _ := json.MarshalIndent(forms, "", "  ")
@@ -349,7 +355,7 @@ func decodeTestValues(value string) (map[string]reporting.InputValue, error) {
 	decoder.UseNumber()
 	var raw map[string]any
 	if err := decoder.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("Test values must be valid JSON: %v", err)
+		return nil, errors.New("Test values could not be processed.")
 	}
 	result := make(map[string]reporting.InputValue, len(raw))
 	for key, value := range raw {
