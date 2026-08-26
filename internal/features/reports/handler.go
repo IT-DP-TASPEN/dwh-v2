@@ -105,12 +105,29 @@ func (handler *Handler) Show(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (handler *Handler) Run(writer http.ResponseWriter, request *http.Request) {
-	report, principal, ok := handler.authorized(writer, request)
-	if !ok || !webutil.ParseForm(writer, request, 2<<20) {
+	id, ok := idParam(request)
+	if !ok {
+		handler.admin.NotFound(writer, request)
 		return
 	}
-	input := formInput(request, report.Parameters)
-	result, err := handler.service.Run(request.Context(), principal.SecurityContext(), report.ID, input)
+	if !webutil.ParseForm(writer, request, 2<<20) {
+		return
+	}
+	principal, _ := browserauth.CurrentPrincipal(request.Context())
+	input := formInput(request, nil)
+	report, result, err := handler.service.Run(request.Context(), principal.SecurityContext(), id, input)
+	if errors.Is(err, reporting.ErrNotFound) {
+		handler.admin.NotFound(writer, request)
+		return
+	}
+	if report.ID == 0 {
+		handler.admin.Internal(writer, request, "run report", err)
+		return
+	}
+	if errors.Is(err, reporting.ErrForbidden) || errors.Is(err, reporting.ErrInactive) {
+		handler.admin.RenderPage(writer, request, http.StatusForbidden, "forbidden", "Forbidden", nil)
+		return
+	}
 	if err != nil {
 		handler.render(writer, request, 422, report, input, map[string]string{"form": publicError(err)}, true, principal.Can(PermissionExport))
 		return
@@ -201,7 +218,7 @@ func (handler *Handler) Download(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	defer file.Close()
-	if err := handler.exports.RecordDownload(request.Context(), principal.SecurityContext(), id, time.Now().UTC()); err != nil {
+	if err := handler.exports.RecordDownload(request.Context(), principal.SecurityContext(), job, time.Now().UTC()); err != nil {
 		handler.admin.Internal(writer, request, "audit report download", err)
 		return
 	}

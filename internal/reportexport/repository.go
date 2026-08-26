@@ -57,7 +57,13 @@ func (repository *Repository) Submit(ctx context.Context, requester securityctx.
 		return Job{}, fmt.Errorf("submit report export: %w", err)
 	}
 	id, _ := result.LastInsertId()
-	if err := appendAudit(ctx, tx, requester, audit.ActionReportExportSubmitted, uint64(id), now); err != nil {
+	metadata := audit.ReportExportSubmittedMetadata{
+		ReportIdentityMetadata: reporting.AuditIdentity(report),
+		ExportJobID:            uint64(id),
+		Parameters:             reporting.AuditParameters(report.Parameters, normalized),
+		Outcome:                "submitted",
+	}
+	if err := appendAudit(ctx, tx, requester, audit.ActionReportExportSubmitted, uint64(id), metadata, now); err != nil {
 		return Job{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -224,12 +230,24 @@ func (repository *Repository) MarkArtifactDeleted(ctx context.Context, id uint64
 	return err
 }
 
-func (repository *Repository) RecordDownload(ctx context.Context, requester securityctx.Requester, id uint64, now time.Time) error {
-	return appendAudit(ctx, repository.database, requester, audit.ActionReportExportDownloaded, id, now)
+func (repository *Repository) RecordDownload(ctx context.Context, requester securityctx.Requester, job Job, now time.Time) error {
+	metadata := audit.ReportExportDownloadedMetadata{
+		ReportTemplateID: job.ReportID,
+		ReportName:       job.ReportName,
+		DatasourceID:     job.DatasourceID,
+		ExportJobID:      job.ID,
+	}
+	if job.ArtifactName != nil {
+		metadata.ArtifactName = *job.ArtifactName
+	}
+	if job.ArtifactType != nil {
+		metadata.ArtifactType = *job.ArtifactType
+	}
+	return appendAudit(ctx, repository.database, requester, audit.ActionReportExportDownloaded, job.ID, metadata, now)
 }
 
-func appendAudit(ctx context.Context, executor sqlx.ExtContext, requester securityctx.Requester, action audit.Action, id uint64, now time.Time) error {
+func appendAudit(ctx context.Context, executor sqlx.ExtContext, requester securityctx.Requester, action audit.Action, id uint64, metadata audit.Metadata, now time.Time) error {
 	actor := audit.Identity{UserID: requester.Actor.UserID, Username: requester.Actor.Username}
 	effective := audit.Identity{UserID: requester.Effective.UserID, Username: requester.Effective.Username}
-	return audit.Append(ctx, executor, audit.Event{Attribution: audit.Attribution{Actor: &actor, Effective: &effective}, Action: action, Resource: audit.ResourceReportExport, ResourceID: id, CreatedAt: now.UTC()})
+	return audit.Append(ctx, executor, audit.Event{Attribution: audit.Attribution{Actor: &actor, Effective: &effective}, Action: action, Resource: audit.ResourceReportExport, ResourceID: id, Metadata: metadata, CreatedAt: now.UTC()})
 }

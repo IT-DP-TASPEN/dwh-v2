@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -152,23 +153,23 @@ func optionParameters(options []OptionItem) []ParameterOption {
 
 func (service *Service) resolveAll(ctx context.Context, database *sql.DB, parameters []Parameter, input map[string]InputValue, mode SQLMode) (map[string]NormalizedValue, error) {
 	if err := ValidateParameters(parameters); err != nil {
-		return nil, err
+		return nil, withFailureStage(failureStageParameterValidation, err)
 	}
 	if err := validateKnownInput(parameters, input); err != nil {
-		return nil, err
+		return nil, withFailureStage(failureStageParameterValidation, err)
 	}
 	normalized := make(map[string]NormalizedValue, len(parameters))
 	for _, index := range parameterIndexesByDisplayOrder(parameters) {
 		parameter := parameters[index]
 		values, fromDefault, err := parameterValues(parameter, input[parameter.Key])
 		if err != nil {
-			return nil, err
+			return normalized, withFailureStage(failureStageParameterValidation, err)
 		}
 		var value NormalizedValue
 		if effectiveOptionSource(parameter) == OptionSourceDynamic {
 			if dynamicValuesUnset(parameter, values) {
 				if parameter.Required {
-					return nil, fmt.Errorf("%w: %s is required", ErrInvalid, parameter.Label)
+					return normalized, withFailureStage(failureStageParameterValidation, fmt.Errorf("%w: %s is required", ErrInvalid, parameter.Label))
 				}
 				value, err = normalizeDynamicSnapshot(parameter, values)
 				normalized[parameter.Key] = value
@@ -176,23 +177,23 @@ func (service *Service) resolveAll(ctx context.Context, database *sql.DB, parame
 			}
 			options, err := RunDynamicOptions(ctx, service.engine, database, parameter.DynamicOptionSQL, parameters, normalized, service.config.DynamicOptionMaxRows, service.config.DynamicOptionPayloadBytes)
 			if err != nil {
-				return nil, fmt.Errorf("dynamic options for %s: %w", parameter.Label, err)
+				return normalized, withFailureStage(failureStageDynamicOptionResolution, fmt.Errorf("dynamic options for %s: %w", parameter.Label, err))
 			}
 			value, err = normalizeWithOptions(parameter, values, options)
 			if err != nil && fromDefault && !parameter.Required {
 				value, err = NormalizedValue{}, nil
 			}
 			if err != nil {
-				return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err)
+				return normalized, withFailureStage(failureStageParameterValidation, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err))
 			}
 		} else {
 			value, err = normalizeParameter(parameter, values)
 			if err != nil {
-				return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err)
+				return normalized, withFailureStage(failureStageParameterValidation, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err))
 			}
 		}
 		if parameter.Required && value.Scalar == nil && len(value.Multi) == 0 {
-			return nil, fmt.Errorf("%w: %s is required", ErrInvalid, parameter.Label)
+			return normalized, withFailureStage(failureStageParameterValidation, fmt.Errorf("%w: %s is required", ErrInvalid, parameter.Label))
 		}
 		normalized[parameter.Key] = value
 	}
@@ -241,51 +242,62 @@ func (service *Service) LoadOptions(ctx context.Context, requester securityctx.R
 	return service.loadTargetOptions(runContext, database, report.Parameters, target, input, mode)
 }
 
-func (service *Service) TestOptions(ctx context.Context, requester securityctx.Requester, savedReportID uint64, draft TemplateInput, target int, input map[string]InputValue) (OptionLoad, error) {
+func (service *Service) TestOptions(ctx context.Context, requester securityctx.Requester, savedReportID uint64, draft TemplateInput, target int, input map[string]InputValue) (result OptionLoad, err error) {
+	started := time.Now()
 	saved, err := service.repository.FindTemplate(ctx, savedReportID)
 	if err != nil {
-		return OptionLoad{}, err
+		return result, err
 	}
+	var normalized map[string]NormalizedValue
+	defer func() {
+		err = errors.Join(err, service.appendOptionsTestAudit(ctx, requester, saved, draft, target, normalized, result, err, time.Since(started)))
+	}()
 	allowed, err := service.repository.HasAccess(ctx, savedReportID, requester.Effective.UserID)
-	if err != nil || !allowed {
-		if err != nil {
-			return OptionLoad{}, err
-		}
-		return OptionLoad{}, ErrForbidden
+	if err != nil {
+		return result, withFailureStage(failureStageAuthorization, err)
+	}
+	if !allowed {
+		return result, withFailureStage(failureStageAuthorization, ErrForbidden)
 	}
 	if err := validateTemplateInput(draft); err != nil {
-		return OptionLoad{}, err
+		return result, withFailureStage(failureStageParameterValidation, err)
 	}
 	if target < 0 || target >= len(draft.Parameters) || effectiveOptionSource(draft.Parameters[target]) != OptionSourceDynamic {
-		return OptionLoad{}, fmt.Errorf("%w: choose a dynamic option parameter", ErrInvalid)
+		return result, withFailureStage(failureStageParameterValidation, fmt.Errorf("%w: choose a dynamic option parameter", ErrInvalid))
 	}
 	datasource, err := service.repository.FindDatasource(ctx, saved.DatasourceID)
 	if err != nil {
-		return OptionLoad{}, err
+		return result, withFailureStage(failureStageQueryExecution, err)
 	}
 	if datasource.Status != StatusActive {
-		return OptionLoad{}, ErrInactive
+		return result, withFailureStage(failureStageAuthorization, ErrInactive)
 	}
 	database, err := service.pools.Database(ctx, datasource, false)
 	if err != nil {
-		return OptionLoad{}, err
+		return result, withFailureStage(failureStageQueryExecution, err)
 	}
 	runContext, cancel := context.WithTimeout(ctx, service.config.InteractiveTimeout)
 	defer cancel()
 	mode, err := service.engine.SQLMode(runContext, database)
 	if err != nil {
-		return OptionLoad{}, err
+		return result, withFailureStage(failureStageQueryExecution, err)
 	}
-	return service.loadTargetOptions(runContext, database, draft.Parameters, target, input, mode)
+	result, normalized, err = service.loadTargetOptionsWithAudit(runContext, database, draft.Parameters, target, input, mode)
+	return result, err
 }
 
 func (service *Service) loadTargetOptions(ctx context.Context, database *sql.DB, parameters []Parameter, target int, input map[string]InputValue, mode SQLMode) (OptionLoad, error) {
+	result, _, err := service.loadTargetOptionsWithAudit(ctx, database, parameters, target, input, mode)
+	return result, err
+}
+
+func (service *Service) loadTargetOptionsWithAudit(ctx context.Context, database *sql.DB, parameters []Parameter, target int, input map[string]InputValue, mode SQLMode) (OptionLoad, map[string]NormalizedValue, error) {
 	if err := validateKnownInput(parameters, input); err != nil {
-		return OptionLoad{}, err
+		return OptionLoad{}, nil, withFailureStage(failureStageParameterValidation, err)
 	}
 	direct, needed, err := dependencyClosure(parameters, target, input, mode)
 	if err != nil {
-		return OptionLoad{}, err
+		return OptionLoad{}, nil, withFailureStage(failureStageParameterValidation, err)
 	}
 	if direct == nil {
 		direct = []string{}
@@ -299,16 +311,16 @@ func (service *Service) loadTargetOptions(ctx context.Context, database *sql.DB,
 		}
 		values, fromDefault, err := parameterValues(parameter, input[parameter.Key])
 		if err != nil {
-			return OptionLoad{}, err
+			return OptionLoad{}, normalized, withFailureStage(failureStageParameterValidation, err)
 		}
 		if parameter.Required && dynamicValuesUnset(parameter, values) {
-			return OptionLoad{State: "waiting", Dependencies: direct, WaitingFor: parameter.Key}, nil
+			return OptionLoad{State: "waiting", Dependencies: direct, WaitingFor: parameter.Key}, normalized, nil
 		}
 		var value NormalizedValue
 		if effectiveOptionSource(parameter) == OptionSourceDynamic && !dynamicValuesUnset(parameter, values) {
 			options, err := RunDynamicOptions(ctx, service.engine, database, parameter.DynamicOptionSQL, parameters, normalized, service.config.DynamicOptionMaxRows, service.config.DynamicOptionPayloadBytes)
 			if err != nil {
-				return OptionLoad{}, fmt.Errorf("dynamic options for %s: %w", parameter.Label, err)
+				return OptionLoad{}, normalized, withFailureStage(failureStageDynamicOptionResolution, fmt.Errorf("dynamic options for %s: %w", parameter.Label, err))
 			}
 			value, err = normalizeWithOptions(parameter, values, options)
 		} else if effectiveOptionSource(parameter) == OptionSourceDynamic {
@@ -318,23 +330,23 @@ func (service *Service) loadTargetOptions(ctx context.Context, database *sql.DB,
 		}
 		if err != nil && fromDefault && effectiveOptionSource(parameter) == OptionSourceDynamic {
 			if parameter.Required {
-				return OptionLoad{State: "waiting", Dependencies: direct, WaitingFor: parameter.Key}, nil
+				return OptionLoad{State: "waiting", Dependencies: direct, WaitingFor: parameter.Key}, normalized, nil
 			}
 			value, err = NormalizedValue{}, nil
 			warning = "An upstream saved default is not available; it was left unset."
 		}
 		if err != nil {
-			return OptionLoad{}, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err)
+			return OptionLoad{}, normalized, withFailureStage(failureStageParameterValidation, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err))
 		}
 		if parameter.Required && value.Scalar == nil && len(value.Multi) == 0 {
-			return OptionLoad{State: "waiting", Dependencies: direct, WaitingFor: parameter.Key}, nil
+			return OptionLoad{State: "waiting", Dependencies: direct, WaitingFor: parameter.Key}, normalized, nil
 		}
 		normalized[parameter.Key] = value
 	}
 	targetParameter := parameters[target]
 	options, err := RunDynamicOptions(ctx, service.engine, database, targetParameter.DynamicOptionSQL, parameters, normalized, service.config.DynamicOptionMaxRows, service.config.DynamicOptionPayloadBytes)
 	if err != nil {
-		return OptionLoad{}, fmt.Errorf("dynamic options for %s: %w", targetParameter.Label, err)
+		return OptionLoad{}, normalized, withFailureStage(failureStageDynamicOptionResolution, fmt.Errorf("dynamic options for %s: %w", targetParameter.Label, err))
 	}
 	result := OptionLoad{State: "ready", Dependencies: direct, Options: options, Warning: warning}
 	if len(targetParameter.DefaultValue) != 0 && !bytes.Equal(targetParameter.DefaultValue, []byte("null")) {
@@ -346,7 +358,7 @@ func (service *Service) loadTargetOptions(ctx context.Context, database *sql.DB,
 			result.Warning = "Saved default is not available. Choose a current option."
 		}
 	}
-	return result, nil
+	return result, normalized, nil
 }
 
 func dependencyClosure(parameters []Parameter, target int, input map[string]InputValue, mode SQLMode) ([]string, map[int]bool, error) {

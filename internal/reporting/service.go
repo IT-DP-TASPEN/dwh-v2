@@ -126,66 +126,75 @@ func (service *Service) UpdateTemplate(ctx context.Context, requester securityct
 	return service.repository.UpdateTemplate(ctx, requester, id, revision, input, time.Now().UTC())
 }
 
-func (service *Service) Run(ctx context.Context, requester securityctx.Requester, reportID uint64, input map[string]InputValue) (InteractiveResult, error) {
+func (service *Service) Run(ctx context.Context, requester securityctx.Requester, reportID uint64, input map[string]InputValue) (report Template, result InteractiveResult, err error) {
+	started := time.Now()
 	runContext, cancel := context.WithTimeout(ctx, service.config.InteractiveTimeout)
 	defer cancel()
-	report, database, normalized, err := service.prepare(runContext, requester, reportID, input)
-	if err == nil {
-		var result InteractiveResult
-		result, err = RunInteractiveNormalized(runContext, service.engine, database, report.SQLText, report.Parameters, normalized, service.config.InteractiveMaxRows, service.config.InteractivePayloadBytes, service.config.CellPreviewBytes)
-		if auditErr := service.auditExecution(ctx, requester, reportID, err); auditErr != nil {
-			err = errors.Join(err, auditErr)
-		}
-		return result, err
+	var database *sql.DB
+	var normalized map[string]NormalizedValue
+	report, database, normalized, err = service.prepare(runContext, requester, reportID, input)
+	if report.ID == 0 {
+		return report, result, err
 	}
-	if report.ID != 0 {
-		err = errors.Join(err, service.auditExecution(ctx, requester, reportID, err))
+	defer func() {
+		err = errors.Join(err, service.appendExecutionAudit(ctx, requester, audit.ActionReportExecuted, "interactive", false, report, report.Parameters, normalized, result, err, time.Since(started)))
+	}()
+	if err != nil {
+		return report, result, err
 	}
-	return InteractiveResult{}, err
+	result, err = RunInteractiveNormalized(runContext, service.engine, database, report.SQLText, report.Parameters, normalized, service.config.InteractiveMaxRows, service.config.InteractivePayloadBytes, service.config.CellPreviewBytes)
+	err = withFailureStage(failureStageQueryExecution, err)
+	return report, result, err
 }
 
-func (service *Service) TestQuery(ctx context.Context, requester securityctx.Requester, savedReportID uint64, draft TemplateInput, input map[string]InputValue) (InteractiveResult, error) {
+func (service *Service) TestQuery(ctx context.Context, requester securityctx.Requester, savedReportID uint64, draft TemplateInput, input map[string]InputValue) (result InteractiveResult, err error) {
+	started := time.Now()
 	saved, err := service.repository.FindTemplate(ctx, savedReportID)
 	if err != nil {
-		return InteractiveResult{}, err
+		return result, err
 	}
+	var normalized map[string]NormalizedValue
+	defer func() {
+		err = errors.Join(err, service.appendExecutionAudit(ctx, requester, audit.ActionReportTemplateQueryTested, "test_query", true, saved, draft.Parameters, normalized, result, err, time.Since(started)))
+	}()
 	allowed, err := service.repository.HasAccess(ctx, savedReportID, requester.Effective.UserID)
 	if err != nil {
-		return InteractiveResult{}, err
+		return result, withFailureStage(failureStageAuthorization, err)
 	}
 	if !allowed {
-		return InteractiveResult{}, ErrForbidden
+		return result, withFailureStage(failureStageAuthorization, ErrForbidden)
 	}
 	if err := validateTemplateInput(draft); err != nil {
-		return InteractiveResult{}, err
+		return result, withFailureStage(failureStageParameterValidation, err)
 	}
 	datasource, err := service.repository.FindDatasource(ctx, saved.DatasourceID)
 	if err != nil {
-		return InteractiveResult{}, err
+		return result, withFailureStage(failureStageQueryExecution, err)
 	}
 	if datasource.Status != StatusActive {
-		return InteractiveResult{}, ErrInactive
+		return result, withFailureStage(failureStageAuthorization, ErrInactive)
 	}
 	database, err := service.pools.Database(ctx, datasource, false)
 	if err != nil {
-		return InteractiveResult{}, err
+		return result, withFailureStage(failureStageQueryExecution, err)
 	}
 	runContext, cancel := context.WithTimeout(ctx, service.config.InteractiveTimeout)
 	defer cancel()
 	mode, err := service.engine.SQLMode(runContext, database)
 	if err == nil {
 		err = ValidateTemplateBinding(draft.SQLText, draft.Parameters, mode)
+		if err != nil {
+			err = withFailureStage(failureStageParameterValidation, err)
+		}
+	} else {
+		err = withFailureStage(failureStageQueryExecution, err)
 	}
-	var normalized map[string]NormalizedValue
 	if err == nil {
 		normalized, err = service.resolveAll(runContext, database, draft.Parameters, input, mode)
 	}
-	var result InteractiveResult
 	if err == nil {
 		result, err = RunInteractiveNormalized(runContext, service.engine, database, draft.SQLText, draft.Parameters, normalized, service.config.InteractiveMaxRows, service.config.InteractivePayloadBytes, service.config.CellPreviewBytes)
-	}
-	if auditErr := service.auditExecution(ctx, requester, savedReportID, err); auditErr != nil {
-		err = errors.Join(err, auditErr)
+		err = withFailureStage(failureStageQueryExecution, err)
 	}
 	return result, err
 }
@@ -203,40 +212,30 @@ func (service *Service) prepare(ctx context.Context, requester securityctx.Reque
 		return Template{}, nil, nil, err
 	}
 	if report.Status != StatusActive || report.DatasourceStatus != StatusActive {
-		return Template{}, nil, nil, ErrInactive
+		return report, nil, nil, withFailureStage(failureStageAuthorization, ErrInactive)
 	}
 	allowed, err := service.repository.HasAccess(ctx, reportID, requester.Effective.UserID)
 	if err != nil {
-		return Template{}, nil, nil, err
+		return report, nil, nil, withFailureStage(failureStageAuthorization, err)
 	}
 	if !allowed {
-		return Template{}, nil, nil, ErrForbidden
+		return report, nil, nil, withFailureStage(failureStageAuthorization, ErrForbidden)
 	}
 	datasource, err := service.repository.FindDatasource(ctx, report.DatasourceID)
 	if err != nil {
-		return Template{}, nil, nil, err
+		return report, nil, nil, withFailureStage(failureStageQueryExecution, err)
 	}
 	database, err := service.pools.Database(ctx, datasource, false)
 	if err != nil {
-		return Template{}, nil, nil, err
+		return report, nil, nil, withFailureStage(failureStageQueryExecution, err)
 	}
 	mode, err := service.engine.SQLMode(ctx, database)
 	if err != nil {
-		return Template{}, nil, nil, err
+		return report, database, nil, withFailureStage(failureStageQueryExecution, err)
 	}
 	normalized, err := service.resolveAll(ctx, database, report.Parameters, input, mode)
 	if err != nil {
-		return report, database, nil, err
+		return report, database, normalized, err
 	}
 	return report, database, normalized, nil
-}
-
-func (service *Service) auditExecution(ctx context.Context, requester securityctx.Requester, reportID uint64, runErr error) error {
-	outcome := "succeeded"
-	if runErr != nil {
-		outcome = "failed"
-	}
-	auditContext, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-	defer auditCancel()
-	return service.repository.AppendEvent(auditContext, requester, audit.ActionReportExecuted, audit.ResourceReportTemplate, reportID, audit.OutcomeMetadata{Outcome: outcome}, time.Now().UTC())
 }

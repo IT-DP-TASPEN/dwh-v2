@@ -65,12 +65,20 @@ func (coordinator *Coordinator) Submit(ctx context.Context, jobKey string, param
 	return coordinator.runs.Submit(ctx, jobKey, parameters, trigger, reference, requester)
 }
 
+func (coordinator *Coordinator) SubmitManual(ctx context.Context, jobKey string, parameters ingestionrun.Parameters, trigger ingestionrun.Trigger, reference string, requester securityctx.Requester) (uint64, error) {
+	return coordinator.runs.SubmitManual(ctx, jobKey, parameters, trigger, reference, requester)
+}
+
 func (coordinator *Coordinator) SubmitInTx(ctx context.Context, tx *sqlx.Tx, jobKey string, parameters ingestionrun.Parameters, trigger ingestionrun.Trigger, reference string, requester *uint64) (uint64, error) {
 	return coordinator.runs.SubmitInTx(ctx, tx, jobKey, parameters, trigger, reference, requester)
 }
 
 func (coordinator *Coordinator) SubmitRunAll(ctx context.Context, from, to ingestion.CalendarDate, trigger ingestionrun.Trigger, reference string, requester *uint64) (uint64, error) {
 	return coordinator.runs.CreateRunAll(ctx, from, to, trigger, reference, requester)
+}
+
+func (coordinator *Coordinator) SubmitRunAllManual(ctx context.Context, from, to ingestion.CalendarDate, trigger ingestionrun.Trigger, reference string, requester securityctx.Requester) (uint64, error) {
+	return coordinator.runs.CreateRunAllManual(ctx, from, to, trigger, reference, requester)
 }
 
 func (coordinator *Coordinator) Cancel(ctx context.Context, runID uint64, reason string, requester securityctx.Requester) error {

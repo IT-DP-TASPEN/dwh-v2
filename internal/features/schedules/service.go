@@ -14,6 +14,7 @@ import (
 	core "github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/platform/pagination"
 	domain "github.com/ibldzn/go-admin/internal/scheduler"
+	"github.com/ibldzn/go-admin/internal/securityctx"
 )
 
 const scheduleSelect = `SELECT s.id,s.name,s.job_key,s.cron_expression,s.timezone,s.policy_kind,s.enabled,s.next_run_at,s.revision,
@@ -101,11 +102,11 @@ func (service *Service) FindOccurrence(ctx context.Context, scheduleID, occurren
 	return occurrence(row), attempts, nil
 }
 
-func (service *Service) Create(ctx context.Context, form FormData, actor uint64) (domain.Schedule, error) {
-	return service.domain.Create(ctx, domain.CreateInput{Definition: service.definition(form), Enabled: form.Enabled, ActorID: &actor})
+func (service *Service) Create(ctx context.Context, form FormData, actor uint64, requesters ...securityctx.Requester) (domain.Schedule, error) {
+	return service.domain.Create(ctx, domain.CreateInput{Definition: service.definition(form), Enabled: form.Enabled, ActorID: &actor, Requester: requester(requesters)})
 }
 
-func (service *Service) CreateMany(ctx context.Context, form BulkFormData, actor uint64) (BulkResultData, error) {
+func (service *Service) CreateMany(ctx context.Context, form BulkFormData, actor uint64, requesters ...securityctx.Requester) (BulkResultData, error) {
 	cronExpression, timezone := strings.TrimSpace(form.CronExpression), strings.TrimSpace(form.Timezone)
 	if timezone == "" {
 		timezone = domain.DefaultTimezone
@@ -118,7 +119,7 @@ func (service *Service) CreateMany(ctx context.Context, form BulkFormData, actor
 		}
 		inputs[index] = domain.CreateInput{Definition: service.definition(FormData{
 			Name: job.Name, JobKey: job.Key, CronExpression: cronExpression, Timezone: timezone,
-		}), Enabled: form.Enabled, ActorID: &actor}
+		}), Enabled: form.Enabled, ActorID: &actor, Requester: requester(requesters)}
 	}
 	created, err := service.domain.CreateMany(ctx, inputs)
 	if err != nil {
@@ -149,18 +150,25 @@ func (service *Service) CreateMany(ctx context.Context, form BulkFormData, actor
 	return result, nil
 }
 
-func (service *Service) Update(ctx context.Context, id uint64, form FormData, actor uint64) (domain.Schedule, error) {
-	return service.domain.Update(ctx, id, domain.UpdateInput{Definition: service.definition(form), ExpectedRevision: form.ExpectedRevision, ActorID: &actor})
+func (service *Service) Update(ctx context.Context, id uint64, form FormData, actor uint64, requesters ...securityctx.Requester) (domain.Schedule, error) {
+	return service.domain.Update(ctx, id, domain.UpdateInput{Definition: service.definition(form), ExpectedRevision: form.ExpectedRevision, ActorID: &actor, Requester: requester(requesters)})
 }
 
-func (service *Service) Enable(ctx context.Context, id, revision, actor uint64) (domain.Schedule, error) {
-	return service.domain.Enable(ctx, id, revision, &actor)
+func (service *Service) Enable(ctx context.Context, id, revision, actor uint64, requesters ...securityctx.Requester) (domain.Schedule, error) {
+	return service.domain.Enable(ctx, id, revision, &actor, requester(requesters))
 }
-func (service *Service) Disable(ctx context.Context, id, revision, actor uint64) (domain.Schedule, error) {
-	return service.domain.Disable(ctx, id, revision, &actor)
+func (service *Service) Disable(ctx context.Context, id, revision, actor uint64, requesters ...securityctx.Requester) (domain.Schedule, error) {
+	return service.domain.Disable(ctx, id, revision, &actor, requester(requesters))
 }
-func (service *Service) Archive(ctx context.Context, id, revision, actor uint64) (domain.Schedule, error) {
-	return service.domain.Archive(ctx, id, revision, &actor)
+func (service *Service) Archive(ctx context.Context, id, revision, actor uint64, requesters ...securityctx.Requester) (domain.Schedule, error) {
+	return service.domain.Archive(ctx, id, revision, &actor, requester(requesters))
+}
+
+func requester(values []securityctx.Requester) *securityctx.Requester {
+	if len(values) == 0 {
+		return nil
+	}
+	return &values[0]
 }
 
 func (service *Service) definition(form FormData) domain.Definition {

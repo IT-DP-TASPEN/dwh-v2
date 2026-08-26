@@ -15,6 +15,7 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
+	"github.com/ibldzn/go-admin/internal/securityctx"
 )
 
 const (
@@ -46,8 +47,9 @@ type Definition struct {
 
 type CreateInput struct {
 	Definition
-	Enabled bool
-	ActorID *uint64
+	Enabled   bool
+	ActorID   *uint64
+	Requester *securityctx.Requester
 }
 
 type CreateManyResult struct {
@@ -59,6 +61,7 @@ type UpdateInput struct {
 	Definition
 	ExpectedRevision uint64
 	ActorID          *uint64
+	Requester        *securityctx.Requester
 }
 
 type Schedule struct {

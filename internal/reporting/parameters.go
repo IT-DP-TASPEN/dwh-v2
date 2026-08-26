@@ -229,16 +229,18 @@ func normalizeParameter(parameter Parameter, values []string) (NormalizedValue, 
 		options := append([]ParameterOption(nil), parameter.Options...)
 		sort.Slice(options, func(i, j int) bool { return options[i].DisplayOrder < options[j].DisplayOrder })
 		multi := make([]any, 0, len(selected))
+		labels := make(map[string]string, len(selected))
 		for _, option := range options {
 			if _, found := selected[option.Value]; found {
 				multi = append(multi, option.Value)
+				labels[option.Value] = option.Label
 				delete(selected, option.Value)
 			}
 		}
 		if len(selected) != 0 {
 			return NormalizedValue{}, fmt.Errorf("invalid option")
 		}
-		return NormalizedValue{Multi: multi}, nil
+		return NormalizedValue{Multi: multi, OptionLabels: labels}, nil
 	}
 	if len(values) > 1 {
 		return NormalizedValue{}, fmt.Errorf("accepts one value")
@@ -304,7 +306,7 @@ func normalizeParameter(parameter Parameter, values []string) (NormalizedValue, 
 	case ParameterSingleOption:
 		for _, option := range parameter.Options {
 			if value == option.Value {
-				return NormalizedValue{Scalar: value}, nil
+				return NormalizedValue{Scalar: value, OptionLabels: map[string]string{value: option.Label}}, nil
 			}
 		}
 		return NormalizedValue{}, fmt.Errorf("invalid option")

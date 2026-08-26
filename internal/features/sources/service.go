@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
+	"github.com/ibldzn/go-admin/internal/audit"
 	core "github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
+	"github.com/ibldzn/go-admin/internal/securityctx"
 )
 
 var ErrConflict = errors.New("source state changed")
@@ -30,16 +33,21 @@ type sourceState struct {
 }
 
 type Service struct {
-	db      *sqlx.DB
-	catalog core.Catalog
+	db          *sqlx.DB
+	catalog     core.Catalog
+	appendAudit audit.AppendFunc
 }
 
-func NewService(db *sqlx.DB) (*Service, error) {
+func NewService(db *sqlx.DB, appenders ...audit.AppendFunc) (*Service, error) {
 	catalog, err := core.NewCatalog()
 	if err != nil {
 		return nil, err
 	}
-	return &Service{db: db, catalog: catalog}, nil
+	appender := audit.Append
+	if len(appenders) != 0 {
+		appender = appenders[0]
+	}
+	return &Service{db: db, catalog: catalog, appendAudit: appender}, nil
 }
 
 func (service *Service) List(ctx context.Context, includeActiveRuns bool) ([]Source, error) {
@@ -90,11 +98,16 @@ func (service *Service) List(ctx context.Context, includeActiveRuns bool) ([]Sou
 
 func (service *Service) Find(key string) (core.JobDefinition, bool) { return service.catalog.Find(key) }
 
-func (service *Service) SetEnabled(ctx context.Context, key string, expected, enabled bool, actor uint64) error {
+func (service *Service) SetEnabled(ctx context.Context, key string, expected, enabled bool, actor uint64, requesters ...securityctx.Requester) error {
 	if _, found := service.catalog.Find(key); !found {
 		return sql.ErrNoRows
 	}
-	result, err := service.db.ExecContext(ctx, `UPDATE source_settings SET enabled=?,updated_by_user_id=?
+	tx, err := service.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE source_settings SET enabled=?,updated_by_user_id=?
 		WHERE source_id=? AND enabled=?`, enabled, actor, key, expected)
 	if err != nil {
 		return err
@@ -106,7 +119,26 @@ func (service *Service) SetEnabled(ctx context.Context, key string, expected, en
 	if changed != 1 {
 		return ErrConflict
 	}
-	return nil
+	if len(requesters) != 0 {
+		requester := requesters[0]
+		actorIdentity := audit.Identity{UserID: requester.Actor.UserID, Username: requester.Actor.Username}
+		effective := audit.Identity{UserID: requester.Effective.UserID, Username: requester.Effective.Username}
+		state := func(value bool) string {
+			if value {
+				return "enabled"
+			}
+			return "disabled"
+		}
+		if err := service.appendAudit(ctx, tx, audit.Event{
+			Attribution: audit.Attribution{Actor: &actorIdentity, Effective: &effective},
+			Action:      audit.ActionSourceStateChanged,
+			Metadata:    audit.SourceStateChangeMetadata{SourceKey: key, From: state(expected), To: state(enabled)},
+			CreatedAt:   time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func categoryLabel(category core.JobCategory) string {

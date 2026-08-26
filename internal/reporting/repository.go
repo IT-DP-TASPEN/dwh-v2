@@ -124,7 +124,7 @@ func (repository *Repository) UpdateDatasource(ctx context.Context, requester se
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return Datasource{}, ErrConflict
 	}
-	if err := appendAudit(ctx, tx, requester, audit.ActionReportDatasourceUpdated, audit.ResourceReportDatasource, id, nil, now); err != nil {
+	if err := appendAudit(ctx, tx, requester, audit.ActionReportDatasourceUpdated, audit.ResourceReportDatasource, id, audit.DatasourceUpdatedMetadata{CredentialsChanged: input.Password != ""}, now); err != nil {
 		return Datasource{}, err
 	}
 	if err := tx.Commit(); err != nil {

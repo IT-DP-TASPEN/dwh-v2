@@ -15,6 +15,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/webutil"
+	"github.com/ibldzn/go-admin/internal/securityctx"
 )
 
 const maxFormBody = 32 << 10
@@ -22,11 +23,11 @@ const maxFormBody = 32 << 10
 type sourceService interface {
 	List(context.Context, bool) ([]Source, error)
 	Find(string) (core.JobDefinition, bool)
-	SetEnabled(context.Context, string, bool, bool, uint64) error
+	SetEnabled(context.Context, string, bool, bool, uint64, ...securityctx.Requester) error
 }
 
 type submitter interface {
-	Submit(context.Context, string, ingestionrun.Parameters, ingestionrun.Trigger, string, *uint64) (uint64, error)
+	SubmitManual(context.Context, string, ingestionrun.Parameters, ingestionrun.Trigger, string, securityctx.Requester) (uint64, error)
 }
 
 type Handler struct {
@@ -97,8 +98,7 @@ func (handler *Handler) Submit(writer http.ResponseWriter, request *http.Request
 	if !ok {
 		return
 	}
-	actor := principal.Actor.UserID
-	id, err := handler.coordinator.Submit(request.Context(), job.Key, parameters, ingestionrun.TriggerDirect, "web:"+middleware.GetReqID(request.Context()), &actor)
+	id, err := handler.coordinator.SubmitManual(request.Context(), job.Key, parameters, ingestionrun.TriggerDirect, "web:"+middleware.GetReqID(request.Context()), principal.SecurityContext())
 	if errors.Is(err, ingestionrun.ErrJobBusy) || errors.Is(err, ingestionrun.ErrSourceDisabled) {
 		http.Error(writer, err.Error(), http.StatusConflict)
 		return
@@ -127,7 +127,7 @@ func (handler *Handler) setEnabled(writer http.ResponseWriter, request *http.Req
 	if !ok {
 		return
 	}
-	if err := handler.service.SetEnabled(request.Context(), job.Key, expected, enabled, principal.Actor.UserID); err != nil {
+	if err := handler.service.SetEnabled(request.Context(), job.Key, expected, enabled, principal.Actor.UserID, principal.SecurityContext()); err != nil {
 		if errors.Is(err, ErrConflict) {
 			http.Error(writer, "Source state changed; reload and try again.", http.StatusConflict)
 			return

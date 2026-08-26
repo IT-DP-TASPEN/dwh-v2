@@ -4,11 +4,13 @@ package reportexport_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/ibldzn/go-admin/internal/app"
+	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/features/reports"
 	"github.com/ibldzn/go-admin/internal/reportexport"
 	"github.com/ibldzn/go-admin/internal/reporting"
@@ -42,8 +44,13 @@ func TestExportAuthorizationClaimFencingAndDownloadRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report := reporting.Template{ID: uint64(reportID), Name: "test", SQLText: "SELECT 1", DatasourceID: uint64(datasourceID), Revision: 1}
-	job, err := repository.Submit(context.Background(), requester, report, map[string]reporting.NormalizedValue{}, now)
+	report := reporting.Template{ID: uint64(reportID), Name: "test", SQLText: "SELECT 1", DatasourceID: uint64(datasourceID), DatasourceName: "test", Revision: 1,
+		Parameters: []reporting.Parameter{{Key: "branch", Label: "Branch", Type: reporting.ParameterSingleOption, Options: []reporting.ParameterOption{{Value: "001", Label: "KC Jakarta"}}}}}
+	normalized, err := reporting.NormalizeParameters(report.Parameters, map[string]reporting.InputValue{"branch": {Present: true, Values: []string{"001"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := repository.Submit(context.Background(), requester, report, normalized, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,10 +66,17 @@ func TestExportAuthorizationClaimFencingAndDownloadRules(t *testing.T) {
 	if err != nil || !succeeded {
 		t.Fatalf("succeeded=%v error=%v", succeeded, err)
 	}
+	completed, err := repository.Find(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.RecordDownload(context.Background(), requester, completed, now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := database.Exec(`UPDATE report_datasources SET status='disabled' WHERE id=?`, datasourceID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.Submit(context.Background(), requester, report, map[string]reporting.NormalizedValue{}, now); !errors.Is(err, reporting.ErrForbidden) {
+	if _, err := repository.Submit(context.Background(), requester, report, normalized, now); !errors.Is(err, reporting.ErrForbidden) {
 		t.Fatalf("disabled datasource submission error=%v", err)
 	}
 	if _, allowed, err := repository.Downloadable(context.Background(), job.ID, user.ID); err != nil || !allowed {
@@ -84,13 +98,13 @@ func TestExportAuthorizationClaimFencingAndDownloadRules(t *testing.T) {
 	if _, err := database.Exec(`UPDATE report_templates SET status='disabled' WHERE id=?`, reportID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.Submit(context.Background(), requester, report, map[string]reporting.NormalizedValue{}, now); !errors.Is(err, reporting.ErrForbidden) {
+	if _, err := repository.Submit(context.Background(), requester, report, normalized, now); !errors.Is(err, reporting.ErrForbidden) {
 		t.Fatalf("disabled report submission error=%v", err)
 	}
 	if _, err := database.Exec(`UPDATE report_templates SET status='active' WHERE id=?`, reportID); err != nil {
 		t.Fatal(err)
 	}
-	second, err := repository.Submit(context.Background(), requester, report, map[string]reporting.NormalizedValue{}, now.Add(4*time.Second))
+	second, err := repository.Submit(context.Background(), requester, report, normalized, now.Add(4*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +125,31 @@ func TestExportAuthorizationClaimFencingAndDownloadRules(t *testing.T) {
 	owned, err = repository.Heartbeat(context.Background(), second.ID, owner('b'), 1, now.Add(6*time.Second))
 	if err != nil || owned {
 		t.Fatalf("lost claim owned=%v error=%v", owned, err)
+	}
+
+	var audits []struct {
+		Action   string `db:"action"`
+		Metadata []byte `db:"metadata"`
+	}
+	if err := database.Select(&audits, `SELECT action,metadata FROM audit_logs WHERE resource_type='report_export' AND resource_id IN (?,?) ORDER BY id`, job.ID, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) != 3 || audits[0].Action != string(audit.ActionReportExportSubmitted) || audits[1].Action != string(audit.ActionReportExportDownloaded) || audits[2].Action != string(audit.ActionReportExportSubmitted) {
+		t.Fatalf("export audit actions=%+v", audits)
+	}
+	var submitted audit.ReportExportSubmittedMetadata
+	if err := json.Unmarshal(audits[0].Metadata, &submitted); err != nil {
+		t.Fatal(err)
+	}
+	if submitted.ExportJobID != job.ID || submitted.ReportTemplateID != uint64(reportID) || len(submitted.Parameters.Items) != 1 || submitted.Parameters.Items[0].Values[0].Value != "001" || submitted.Parameters.Items[0].Values[0].Label != "KC Jakarta" {
+		t.Fatalf("submit metadata=%+v", submitted)
+	}
+	var downloaded audit.ReportExportDownloadedMetadata
+	if err := json.Unmarshal(audits[1].Metadata, &downloaded); err != nil {
+		t.Fatal(err)
+	}
+	if downloaded.ArtifactName != "test.xlsx" || downloaded.ExportJobID != job.ID || downloaded.ReportTemplateID != uint64(reportID) {
+		t.Fatalf("download metadata=%+v", downloaded)
 	}
 }
 

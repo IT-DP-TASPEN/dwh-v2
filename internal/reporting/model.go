@@ -115,8 +115,9 @@ type InputValue struct {
 }
 
 type NormalizedValue struct {
-	Scalar any
-	Multi  []any
+	Scalar       any
+	Multi        []any
+	OptionLabels map[string]string
 }
 
 type Column struct {

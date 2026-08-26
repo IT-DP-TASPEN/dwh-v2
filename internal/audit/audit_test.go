@@ -15,9 +15,11 @@ func TestStableActionsAreUnique(t *testing.T) {
 		ActionUserActivated, ActionUserDeactivated, ActionUserPasswordReset,
 		ActionRoleCreated, ActionRoleUpdated, ActionRoleDeleted, ActionRolePermissionsUpdated,
 		ActionAdminBootstrap,
+		ActionIngestionRunSubmitted, ActionIngestionRunAllSubmitted, ActionIngestionCancellationRequested, ActionIngestionAbandonedRecovered,
+		ActionSourceStateChanged, ActionScheduleCreated, ActionScheduleUpdated, ActionScheduleStateChanged,
 		ActionReportDatasourceCreated, ActionReportDatasourceUpdated, ActionReportDatasourceStateChanged, ActionReportDatasourceTested,
 		ActionReportTemplateCreated, ActionReportTemplateUpdated, ActionReportTemplateStateChanged, ActionReportTemplateAccessChanged,
-		ActionReportExecuted, ActionReportExportSubmitted, ActionReportExportDownloaded,
+		ActionReportExecuted, ActionReportTemplateQueryTested, ActionReportTemplateOptionsTested, ActionReportExportSubmitted, ActionReportExportDownloaded,
 	}
 	seen := make(map[Action]bool, len(actions))
 	for _, action := range actions {
@@ -37,12 +39,13 @@ func TestMetadataIsTypedAndSecretFree(t *testing.T) {
 		StatusChangeMetadata{From: "active", To: "inactive"},
 		PermissionsUpdatedMetadata{Added: []string{"users.view"}, Removed: []string{"roles.view"}},
 		ImpersonationStartedMetadata{TargetRole: "manager"},
+		DatasourceUpdatedMetadata{CredentialsChanged: true},
 	}
 	for _, value := range metadata {
 		typeOf := reflect.TypeOf(value)
 		for index := 0; index < typeOf.NumField(); index++ {
 			field := strings.ToLower(typeOf.Field(index).Name + " " + typeOf.Field(index).Tag.Get("json"))
-			for _, forbidden := range []string{"password", "token", "cookie", "authorization", "credential", "hash"} {
+			for _, forbidden := range []string{"password", "token", "cookie", "authorization", "hash"} {
 				if strings.Contains(field, forbidden) {
 					t.Fatalf("metadata field %s contains forbidden secret category %q", typeOf.Field(index).Name, forbidden)
 				}

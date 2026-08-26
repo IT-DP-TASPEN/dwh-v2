@@ -68,7 +68,7 @@ func (handler *Handler) Create(writer http.ResponseWriter, request *http.Request
 	if !ok {
 		return
 	}
-	value, err := handler.service.Create(request.Context(), form, principal.Actor.UserID)
+	value, err := handler.service.Create(request.Context(), form, principal.Actor.UserID, principal.SecurityContext())
 	if handler.mutationError(writer, request, err, "features/schedules/new", "New schedule", form) {
 		return
 	}
@@ -88,7 +88,7 @@ func (handler *Handler) BulkCreate(writer http.ResponseWriter, request *http.Req
 	if !ok {
 		return
 	}
-	result, err := handler.service.CreateMany(request.Context(), form, principal.Actor.UserID)
+	result, err := handler.service.CreateMany(request.Context(), form, principal.Actor.UserID, principal.SecurityContext())
 	if err != nil {
 		if errors.Is(err, domain.ErrInvalidDefinition) {
 			form.Errors["form"] = strings.TrimPrefix(err.Error(), domain.ErrInvalidDefinition.Error()+": ")
@@ -155,7 +155,7 @@ func (handler *Handler) Update(writer http.ResponseWriter, request *http.Request
 	if !ok {
 		return
 	}
-	_, err := handler.service.Update(request.Context(), id, form, principal.Actor.UserID)
+	_, err := handler.service.Update(request.Context(), id, form, principal.Actor.UserID, principal.SecurityContext())
 	if handler.mutationError(writer, request, err, "features/schedules/edit", "Edit schedule", form) {
 		return
 	}
@@ -195,11 +195,11 @@ func (handler *Handler) state(writer http.ResponseWriter, request *http.Request,
 		return
 	}
 	if action == "enable" {
-		_, err = handler.service.Enable(request.Context(), id, revision, principal.Actor.UserID)
+		_, err = handler.service.Enable(request.Context(), id, revision, principal.Actor.UserID, principal.SecurityContext())
 	} else if action == "disable" {
-		_, err = handler.service.Disable(request.Context(), id, revision, principal.Actor.UserID)
+		_, err = handler.service.Disable(request.Context(), id, revision, principal.Actor.UserID, principal.SecurityContext())
 	} else {
-		_, err = handler.service.Archive(request.Context(), id, revision, principal.Actor.UserID)
+		_, err = handler.service.Archive(request.Context(), id, revision, principal.Actor.UserID, principal.SecurityContext())
 	}
 	if err != nil {
 		if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrBacklog) || errors.Is(err, domain.ErrArchived) {

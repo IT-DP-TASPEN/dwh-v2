@@ -118,6 +118,53 @@ func TestMySQLCanonicalParametersAndAllRunAllChildren(t *testing.T) {
 	}
 }
 
+func TestManualSubmissionsCreateOnlyUserAuditEvents(t *testing.T) {
+	db := integrationdb.Open(t)
+	if err := access.Bootstrap(context.Background(), db, nil, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	role := integrationdb.Role(t, db, access.AdminRoleSlug)
+	user := integrationdb.User(t, db, fmt.Sprintf("manualaudit%d", time.Now().UnixNano()), role.ID, true)
+	requester := integrationdb.Requester(user, role)
+	catalog, _ := ingestion.NewCatalog()
+	repository, err := NewRepository(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wasEnabled bool
+	if err := db.Get(&wasEnabled, `SELECT enabled FROM source_settings WHERE source_id='cif_detail'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE source_settings SET enabled=TRUE WHERE source_id='cif_detail'`); err != nil {
+		t.Fatal(err)
+	}
+	parameters, _ := NewLiveSnapshotExecution("cif_detail")
+	runID, err := repository.SubmitManual(context.Background(), "cif_detail", parameters, TriggerDirect, "web:test", requester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, _ := ingestion.ParseCalendarDate("2026-08-25")
+	parentID, err := repository.CreateRunAllManual(context.Background(), from, from, TriggerDirect, "web:test-all", requester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE parent_run_id=?`, parentID)
+		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id IN (?,?)`, runID, parentID)
+		_, _ = db.Exec(`UPDATE source_settings SET enabled=? WHERE source_id='cif_detail'`, wasEnabled)
+		_, _ = db.Exec(`DELETE FROM users WHERE id=?`, user.ID)
+	})
+	var events []struct {
+		Action, Metadata string
+	}
+	if err := db.Select(&events, `SELECT action,CAST(metadata AS CHAR) metadata FROM audit_logs WHERE actor_user_id=? AND action IN ('ingestion.run_submitted','ingestion.run_all_submitted') ORDER BY id`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Action != "ingestion.run_submitted" || events[0].Metadata != `{"job_key":"cif_detail"}` || events[1].Action != "ingestion.run_all_submitted" || events[1].Metadata != `{"from":"2026-08-25","to":"2026-08-25"}` {
+		t.Fatalf("manual audit events=%+v", events)
+	}
+}
+
 func TestDirectMaintenanceFailureDoesNotRetryAndCanBeResubmitted(t *testing.T) {
 	db := integrationdb.Open(t)
 	catalog, _ := ingestion.NewCatalog()

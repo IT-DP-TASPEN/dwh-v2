@@ -48,14 +48,28 @@ func (repository *Repository) RuntimeSettings(ctx context.Context) (RuntimeSetti
 }
 
 func (repository *Repository) Submit(ctx context.Context, jobKey string, parameters Parameters, trigger Trigger, reference string, requester *uint64) (uint64, error) {
+	return repository.submit(ctx, jobKey, parameters, trigger, reference, requester, nil)
+}
+
+func (repository *Repository) SubmitManual(ctx context.Context, jobKey string, parameters Parameters, trigger Trigger, reference string, requester securityctx.Requester) (uint64, error) {
+	actor := requester.Actor.UserID
+	return repository.submit(ctx, jobKey, parameters, trigger, reference, &actor, &requester)
+}
+
+func (repository *Repository) submit(ctx context.Context, jobKey string, parameters Parameters, trigger Trigger, reference string, requestedBy *uint64, auditRequester *securityctx.Requester) (uint64, error) {
 	tx, err := repository.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	id, err := repository.SubmitInTx(ctx, tx, jobKey, parameters, trigger, reference, requester)
+	id, err := repository.SubmitInTx(ctx, tx, jobKey, parameters, trigger, reference, requestedBy)
 	if err != nil {
 		return 0, err
+	}
+	if auditRequester != nil {
+		if err := appendRunAudit(ctx, tx, *auditRequester, audit.ActionIngestionRunSubmitted, id, audit.IngestionSubmissionMetadata{JobKey: jobKey}); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -98,6 +112,15 @@ func (repository *Repository) SubmitInTx(ctx context.Context, tx *sqlx.Tx, jobKe
 }
 
 func (repository *Repository) CreateRunAll(ctx context.Context, from, to ingestion.CalendarDate, trigger Trigger, reference string, requester *uint64) (uint64, error) {
+	return repository.createRunAll(ctx, from, to, trigger, reference, requester, nil)
+}
+
+func (repository *Repository) CreateRunAllManual(ctx context.Context, from, to ingestion.CalendarDate, trigger Trigger, reference string, requester securityctx.Requester) (uint64, error) {
+	actor := requester.Actor.UserID
+	return repository.createRunAll(ctx, from, to, trigger, reference, &actor, &requester)
+}
+
+func (repository *Repository) createRunAll(ctx context.Context, from, to ingestion.CalendarDate, trigger Trigger, reference string, requestedBy *uint64, auditRequester *securityctx.Requester) (uint64, error) {
 	parentParameters, err := NewRunAllRange(from, to)
 	if err != nil {
 		return 0, err
@@ -107,7 +130,7 @@ func (repository *Repository) CreateRunAll(ctx context.Context, from, to ingesti
 		return 0, err
 	}
 	defer tx.Rollback()
-	result, err := insertRun(ctx, tx, KindRunAllParent, nil, nil, "", StatusRunning, parentParameters, trigger, reference, requester)
+	result, err := insertRun(ctx, tx, KindRunAllParent, nil, nil, "", StatusRunning, parentParameters, trigger, reference, requestedBy)
 	if err != nil {
 		return 0, err
 	}
@@ -118,7 +141,13 @@ func (repository *Repository) CreateRunAll(ctx context.Context, from, to ingesti
 			return 0, err
 		}
 		parent, position := uint64(parentID), uint16(index+1)
-		if _, err := insertRun(ctx, tx, KindRunAllChild, &parent, &position, job.Key, StatusPlanned, parameters, TriggerRunAll, fmt.Sprint(parentID), requester); err != nil {
+		if _, err := insertRun(ctx, tx, KindRunAllChild, &parent, &position, job.Key, StatusPlanned, parameters, TriggerRunAll, fmt.Sprint(parentID), requestedBy); err != nil {
+			return 0, err
+		}
+	}
+	if auditRequester != nil {
+		metadata := audit.IngestionSubmissionMetadata{From: from.String(), To: to.String()}
+		if err := appendRunAudit(ctx, tx, *auditRequester, audit.ActionIngestionRunAllSubmitted, uint64(parentID), metadata); err != nil {
 			return 0, err
 		}
 	}
@@ -313,7 +342,7 @@ func (repository *Repository) RequestCancellation(ctx context.Context, runID uin
 			return err
 		}
 	}
-	if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionCancellationRequested, runID); err != nil {
+	if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionCancellationRequested, runID, nil); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -338,18 +367,18 @@ func (repository *Repository) RecoverAbandoned(ctx context.Context, runID uint64
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrTransition
 	}
-	if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionAbandonedRecovered, runID); err != nil {
+	if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionAbandonedRecovered, runID, nil); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func appendRunAudit(ctx context.Context, executor sqlx.ExtContext, requester securityctx.Requester, action audit.Action, runID uint64) error {
+func appendRunAudit(ctx context.Context, executor sqlx.ExtContext, requester securityctx.Requester, action audit.Action, runID uint64, metadata audit.Metadata) error {
 	actor := audit.Identity{UserID: requester.Actor.UserID, Username: requester.Actor.Username}
 	effective := audit.Identity{UserID: requester.Effective.UserID, Username: requester.Effective.Username}
 	return audit.Append(ctx, executor, audit.Event{
 		Attribution: audit.Attribution{Actor: &actor, Effective: &effective},
-		Action:      action, Resource: audit.ResourceIngestionRun, ResourceID: runID, CreatedAt: time.Now().UTC(),
+		Action:      action, Resource: audit.ResourceIngestionRun, ResourceID: runID, Metadata: metadata, CreatedAt: time.Now().UTC(),
 	})
 }
 

@@ -12,8 +12,10 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
+	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
+	"github.com/ibldzn/go-admin/internal/securityctx"
 )
 
 const (
@@ -58,6 +60,9 @@ func (service *Service) Create(ctx context.Context, input CreateInput) (Schedule
 	}
 	created, err := insertSchedule(ctx, tx, prepared)
 	if err != nil {
+		return Schedule{}, err
+	}
+	if err := appendScheduleAudit(ctx, tx, prepared.requester, audit.ActionScheduleCreated, created.ID, nil, now); err != nil {
 		return Schedule{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -127,6 +132,9 @@ func (service *Service) CreateMany(ctx context.Context, inputs []CreateInput) (C
 		if err != nil {
 			return CreateManyResult{}, err
 		}
+		if err := appendScheduleAudit(ctx, tx, value.requester, audit.ActionScheduleCreated, created.ID, nil, now); err != nil {
+			return CreateManyResult{}, err
+		}
 		result.Created = append(result.Created, created)
 	}
 	if err := tx.Commit(); err != nil {
@@ -139,6 +147,7 @@ type preparedCreate struct {
 	definition Definition
 	enabled    bool
 	actorID    *uint64
+	requester  *securityctx.Requester
 	nextRunAt  *time.Time
 }
 
@@ -158,7 +167,7 @@ func (service *Service) prepareCreate(input CreateInput, now time.Time) (prepare
 		}
 		next = &value
 	}
-	return preparedCreate{definition: definition, enabled: input.Enabled, actorID: input.ActorID, nextRunAt: next}, nil
+	return preparedCreate{definition: definition, enabled: input.Enabled, actorID: input.ActorID, requester: input.Requester, nextRunAt: next}, nil
 }
 
 func insertSchedule(ctx context.Context, tx *sqlx.Tx, input preparedCreate) (Schedule, error) {
@@ -237,13 +246,16 @@ func (service *Service) Update(ctx context.Context, id uint64, input UpdateInput
 	if err := requireOne(result); err != nil {
 		return Schedule{}, err
 	}
+	if err := appendScheduleAudit(ctx, tx, input.Requester, audit.ActionScheduleUpdated, id, nil, now); err != nil {
+		return Schedule{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Schedule{}, err
 	}
 	return service.Get(ctx, id)
 }
 
-func (service *Service) Enable(ctx context.Context, id, expectedRevision uint64, actor *uint64) (Schedule, error) {
+func (service *Service) Enable(ctx context.Context, id, expectedRevision uint64, actor *uint64, requesters ...*securityctx.Requester) (Schedule, error) {
 	tx, err := service.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return Schedule{}, err
@@ -283,21 +295,25 @@ func (service *Service) Enable(ctx context.Context, id, expectedRevision uint64,
 	if err := requireOne(result); err != nil {
 		return Schedule{}, err
 	}
+	metadata := audit.StatusChangeMetadata{From: scheduleStateName(row), To: "enabled"}
+	if err := appendScheduleAudit(ctx, tx, firstRequester(requesters), audit.ActionScheduleStateChanged, id, metadata, now); err != nil {
+		return Schedule{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Schedule{}, err
 	}
 	return service.Get(ctx, id)
 }
 
-func (service *Service) Disable(ctx context.Context, id, expectedRevision uint64, actor *uint64) (Schedule, error) {
-	return service.stop(ctx, id, expectedRevision, actor, false)
+func (service *Service) Disable(ctx context.Context, id, expectedRevision uint64, actor *uint64, requesters ...*securityctx.Requester) (Schedule, error) {
+	return service.stop(ctx, id, expectedRevision, actor, false, firstRequester(requesters))
 }
 
-func (service *Service) Archive(ctx context.Context, id, expectedRevision uint64, actor *uint64) (Schedule, error) {
-	return service.stop(ctx, id, expectedRevision, actor, true)
+func (service *Service) Archive(ctx context.Context, id, expectedRevision uint64, actor *uint64, requesters ...*securityctx.Requester) (Schedule, error) {
+	return service.stop(ctx, id, expectedRevision, actor, true, firstRequester(requesters))
 }
 
-func (service *Service) stop(ctx context.Context, id, expectedRevision uint64, actor *uint64, archive bool) (Schedule, error) {
+func (service *Service) stop(ctx context.Context, id, expectedRevision uint64, actor *uint64, archive bool, requester *securityctx.Requester) (Schedule, error) {
 	tx, err := service.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return Schedule{}, err
@@ -341,10 +357,46 @@ func (service *Service) stop(ctx context.Context, id, expectedRevision uint64, a
 	if err := requireOne(result); err != nil {
 		return Schedule{}, err
 	}
+	to := "disabled"
+	if archive {
+		to = "archived"
+	}
+	if err := appendScheduleAudit(ctx, tx, requester, audit.ActionScheduleStateChanged, id, audit.StatusChangeMetadata{From: scheduleStateName(row), To: to}, now); err != nil {
+		return Schedule{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Schedule{}, err
 	}
 	return service.Get(ctx, id)
+}
+
+func firstRequester(requesters []*securityctx.Requester) *securityctx.Requester {
+	if len(requesters) == 0 {
+		return nil
+	}
+	return requesters[0]
+}
+
+func scheduleStateName(row scheduleRow) string {
+	if row.ArchivedAt.Valid {
+		return "archived"
+	}
+	if row.Enabled {
+		return "enabled"
+	}
+	return "disabled"
+}
+
+func appendScheduleAudit(ctx context.Context, executor sqlx.ExtContext, requester *securityctx.Requester, action audit.Action, id uint64, metadata audit.Metadata, now time.Time) error {
+	if requester == nil {
+		return nil
+	}
+	actor := audit.Identity{UserID: requester.Actor.UserID, Username: requester.Actor.Username}
+	effective := audit.Identity{UserID: requester.Effective.UserID, Username: requester.Effective.Username}
+	return audit.Append(ctx, executor, audit.Event{
+		Attribution: audit.Attribution{Actor: &actor, Effective: &effective},
+		Action:      action, Resource: audit.ResourceSchedule, ResourceID: id, Metadata: metadata, CreatedAt: now.UTC(),
+	})
 }
 
 func (service *Service) Sweep(ctx context.Context) error {

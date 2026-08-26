@@ -31,7 +31,7 @@ type runService interface {
 }
 
 type coordinator interface {
-	SubmitRunAll(context.Context, core.CalendarDate, core.CalendarDate, ingestionrun.Trigger, string, *uint64) (uint64, error)
+	SubmitRunAllManual(context.Context, core.CalendarDate, core.CalendarDate, ingestionrun.Trigger, string, securityctx.Requester) (uint64, error)
 	Cancel(context.Context, uint64, string, securityctx.Requester) error
 	RecoverAbandoned(context.Context, uint64, string, time.Time, string, securityctx.Requester) error
 }
@@ -198,8 +198,7 @@ func (handler *Handler) SubmitRunAll(writer http.ResponseWriter, request *http.R
 	if !ok {
 		return
 	}
-	actor := principal.Actor.UserID
-	id, err := handler.coordinator.SubmitRunAll(request.Context(), from, to, ingestionrun.TriggerDirect, "web:"+middleware.GetReqID(request.Context()), &actor)
+	id, err := handler.coordinator.SubmitRunAllManual(request.Context(), from, to, ingestionrun.TriggerDirect, "web:"+middleware.GetReqID(request.Context()), principal.SecurityContext())
 	if err != nil {
 		handler.admin.Internal(writer, request, "submit Run All", err)
 		return

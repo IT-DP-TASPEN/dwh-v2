@@ -2,6 +2,7 @@ package auditlogs
 
 import (
 	"context"
+	"encoding/json"
 	"html/template"
 	"io"
 	"log/slog"
@@ -33,6 +34,49 @@ type fakeStore struct {
 	records    []Record
 	found      Record
 	findErr    error
+}
+
+func TestReportingMetadataRendersHumanReadableParameters(t *testing.T) {
+	metadata := audit.ReportExecutionMetadata{
+		ReportIdentityMetadata: audit.ReportIdentityMetadata{ReportTemplateID: 7, ReportName: "Daily balances", ReportRevision: 3, DatasourceID: 4, DatasourceName: "Core banking"},
+		ExecutionMode:          "interactive", Outcome: "succeeded", ExecutionDuration: 42,
+		Parameters: audit.ReportParametersMetadata{Complete: true, OriginalCount: 3, IncludedCount: 3, Items: []audit.ReportParameterMetadata{
+			{Key: "branch", Label: "Branch", Type: "single_option", Values: []audit.ReportParameterValueMetadata{{Value: "001", Label: "KC Jakarta"}}, OriginalCount: 1, IncludedCount: 1},
+			{Key: "products", Label: "Products", Type: "multiple_option", Values: []audit.ReportParameterValueMetadata{{Value: "TAB001", Label: "Tabungan A"}, {Value: "TAB002", Label: "Tabungan B"}}, OriginalCount: 2, IncludedCount: 2},
+			{Key: "optional", Label: "Optional", Type: "text", Unset: true, Values: []audit.ReportParameterValueMetadata{}},
+		}},
+	}
+	rows, truncated := 2, false
+	metadata.ReturnedRowCount, metadata.ResultTruncated = &rows, &truncated
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := Record{ID: 9, Action: string(audit.ActionReportExecuted), Metadata: encoded, CreatedAt: time.Now().UTC()}
+	view := record.Reporting()
+	if view == nil || view.ReportTemplateID != 7 || view.ResultState != "Complete" || len(view.Parameters.Items) != 3 {
+		t.Fatalf("view=%+v", view)
+	}
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	if err := renderer.RenderPartial(response, http.StatusOK, "features/auditlogs/show", "content", render.PageData{Data: record}); err != nil {
+		t.Fatal(err)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{"Daily balances", "Core banking", "KC Jakarta (001)", "Tabungan A (TAB001)", "Tabungan B (TAB002)", "Any / Not set", "Technical details", "dark:bg-slate-900"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("render missing %q: %s", expected, body)
+		}
+	}
+	if strings.Contains(body, ">Metadata<") {
+		t.Fatal("reporting event fell back to raw metadata view")
+	}
+	if legacy := (Record{Action: string(audit.ActionReportExecuted), Metadata: []byte(`{"outcome":"succeeded"}`)}).Reporting(); legacy != nil {
+		t.Fatalf("legacy event did not retain raw fallback: %+v", legacy)
+	}
 }
 
 func (store *fakeStore) Count(_ context.Context, action string) (int64, error) {
