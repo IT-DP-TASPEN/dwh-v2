@@ -42,6 +42,8 @@ var (
 	ErrJobBusy               = errors.New("job already queued or running")
 	ErrSourceDisabled        = errors.New("source is disabled")
 	ErrTransition            = errors.New("run state transition rejected")
+	ErrOwnershipLost         = errors.New("ingestion run ownership lost")
+	ErrLeaseUnproven         = errors.New("ingestion run ownership could not be proven")
 	ErrCancellationRequested = errors.New("durable run cancellation requested")
 	ErrCoordinatorShutdown   = errors.New("ingestion coordinator shutting down")
 )
@@ -63,6 +65,19 @@ type Run struct {
 	CancelRequested   bool
 	Progress          Progress
 	MapperDiagnostics *MapperDiagnostics
+}
+
+type HeartbeatResult struct {
+	Owned, CancelRequested bool
+}
+
+type Recovery struct {
+	RunID, ParentRunID uint64
+	Kind               Kind
+	JobKey             string
+	PreviousOwner      string
+	PreviousHeartbeat  time.Time
+	NewOwner           string
 }
 
 type Progress struct {

@@ -15,7 +15,9 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
+	databasepkg "github.com/ibldzn/go-admin/internal/database"
 	"github.com/ibldzn/go-admin/internal/ingestion"
+	"github.com/ibldzn/go-admin/internal/ingestionrun"
 )
 
 const defaultMaintenanceLockTimeout = 30 * time.Second
@@ -35,9 +37,22 @@ func NewMaintenanceRepository(db *sqlx.DB) *MaintenanceRepository {
 	return &MaintenanceRepository{db: db, lockTimeout: defaultMaintenanceLockTimeout}
 }
 
-func (repository *MaintenanceRepository) SaveSnapshot(ctx context.Context, snapshot MaintenanceSnapshot) (err error) {
+func (repository *MaintenanceRepository) SaveSnapshot(ctx context.Context, runID uint64, ownerID string, snapshot MaintenanceSnapshot) error {
+	return repository.saveSnapshot(ctx, runID, ownerID, snapshot, true)
+}
+
+// saveSnapshotWithoutRunFence exercises storage replacement independently in
+// integration tests. Production publication must use SaveSnapshot.
+func (repository *MaintenanceRepository) saveSnapshotWithoutRunFence(ctx context.Context, snapshot MaintenanceSnapshot) error {
+	return repository.saveSnapshot(ctx, 0, "", snapshot, false)
+}
+
+func (repository *MaintenanceRepository) saveSnapshot(ctx context.Context, runID uint64, ownerID string, snapshot MaintenanceSnapshot, fenced bool) (err error) {
 	if repository == nil || repository.db == nil {
 		return fmt.Errorf("maintenance repository is not configured")
+	}
+	if fenced && (runID == 0 || ownerID == "") {
+		return fmt.Errorf("complete maintenance publication ownership is required")
 	}
 	definition := snapshot.Parsed.Definition
 	if snapshot.RequestedDate.IsZero() || snapshot.FileName == "" || snapshot.Parsed.AsOfDate != snapshot.RequestedDate || definition.SchemaMode != ingestion.DynamicAdditive || len(snapshot.Parsed.Columns) == 0 {
@@ -80,10 +95,24 @@ func (repository *MaintenanceRepository) SaveSnapshot(ctx context.Context, snaps
 			err = errors.Join(err, fmt.Errorf("release maintenance schema lock was uncertain: result=%v error=%w", released, releaseErr), discardErr)
 		}
 	}()
-	if err := syncMaintenanceSchema(ctx, connection, databaseName, snapshot); err != nil {
+	proveOwnership := func() error {
+		if !fenced {
+			return nil
+		}
+		var owned bool
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ingestion_runs
+			WHERE id=? AND status='running' AND owner_id=? AND cancel_requested_at IS NULL)`, runID, ownerID).Scan(&owned); err != nil {
+			return fmt.Errorf("check maintenance ownership: %w", err)
+		}
+		if !owned {
+			return ingestionrun.ErrOwnershipLost
+		}
+		return nil
+	}
+	if err := syncMaintenanceSchema(ctx, connection, databaseName, snapshot, proveOwnership); err != nil {
 		return err
 	}
-	return replaceMaintenanceSnapshot(ctx, connection, snapshot)
+	return replaceMaintenanceSnapshot(ctx, connection, runID, ownerID, snapshot, fenced)
 }
 
 func maintenanceLockName(databaseName, tableName string) string {
@@ -108,7 +137,7 @@ type physicalColumn struct {
 	Nullable   string `db:"IS_NULLABLE"`
 }
 
-func syncMaintenanceSchema(ctx context.Context, connection *sql.Conn, databaseName string, snapshot MaintenanceSnapshot) error {
+func syncMaintenanceSchema(ctx context.Context, connection *sql.Conn, databaseName string, snapshot MaintenanceSnapshot, proveOwnership func() error) error {
 	registered := map[string]string{}
 	rows, err := connection.QueryContext(ctx, `SELECT physical_column, original_header FROM dynamic_csv_source_columns WHERE source_id = ?`, snapshot.Parsed.Definition.Key)
 	if err != nil {
@@ -139,6 +168,11 @@ func syncMaintenanceSchema(ctx context.Context, connection *sql.Conn, databaseNa
 		if err != nil {
 			return err
 		}
+		// MySQL DDL may implicitly commit. It is additive, idempotent and
+		// non-destructive; an already-started CREATE may finish after lease loss.
+		if err := proveOwnership(); err != nil {
+			return err
+		}
 		if _, err := connection.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("create maintenance table: %w", err)
 		}
@@ -159,6 +193,11 @@ func syncMaintenanceSchema(ctx context.Context, connection *sql.Conn, databaseNa
 	}
 	if len(missing) > 0 {
 		quotedTable, _ := quoteIdentifier(snapshot.Parsed.Definition.TableName)
+		// Same MySQL DDL fencing limit as CREATE above. Authoritative snapshot
+		// data and success remain protected by the later transactional fence.
+		if err := proveOwnership(); err != nil {
+			return err
+		}
 		if _, err := connection.ExecContext(ctx, "ALTER TABLE "+quotedTable+" "+strings.Join(missing, ", ")); err != nil {
 			return fmt.Errorf("add maintenance columns: %w", err)
 		}
@@ -315,47 +354,47 @@ func createMaintenanceTableSQL(parsed ingestion.ParsedMaintenanceCSV) (string, e
 	return "CREATE TABLE " + quotedTable + " (" + strings.Join(definitions, ",") + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci", nil
 }
 
-func replaceMaintenanceSnapshot(ctx context.Context, connection *sql.Conn, snapshot MaintenanceSnapshot) error {
-	tx, err := connection.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin maintenance snapshot: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
+func replaceMaintenanceSnapshot(ctx context.Context, connection *sql.Conn, runID uint64, ownerID string, snapshot MaintenanceSnapshot, fenced bool) error {
+	_, err := databasepkg.RetryReplaySafeConnTx(ctx, connection, func(tx *sql.Tx) error {
+		table, _ := quoteIdentifier(snapshot.Parsed.Definition.TableName)
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE as_of_date = ?", snapshot.RequestedDate.String()); err != nil {
+			return fmt.Errorf("delete maintenance snapshot: %w", err)
 		}
-	}()
-	table, _ := quoteIdentifier(snapshot.Parsed.Definition.TableName)
-	if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE as_of_date = ?", snapshot.RequestedDate.String()); err != nil {
-		return fmt.Errorf("delete maintenance snapshot: %w", err)
-	}
-	columns := []string{"requested_date", "as_of_date", "source_file_name", "source_row_number", "source_row_checksum", "business_key_hash"}
-	for _, column := range snapshot.Parsed.Columns {
-		columns = append(columns, column.PhysicalName)
-	}
-	values := make([][]any, len(snapshot.Parsed.Rows))
-	for index, row := range snapshot.Parsed.Rows {
-		businessKey := any(nil)
-		if row.BusinessKeyHash != "" {
-			businessKey = row.BusinessKeyHash
+		columns := []string{"requested_date", "as_of_date", "source_file_name", "source_row_number", "source_row_checksum", "business_key_hash"}
+		for _, column := range snapshot.Parsed.Columns {
+			columns = append(columns, column.PhysicalName)
 		}
-		values[index] = []any{snapshot.RequestedDate.String(), snapshot.RequestedDate.String(), snapshot.FileName, row.SourceRowNumber, row.RowChecksum, businessKey}
-		for _, value := range row.Values {
-			values[index] = append(values[index], value)
+		values := make([][]any, len(snapshot.Parsed.Rows))
+		for index, row := range snapshot.Parsed.Rows {
+			businessKey := any(nil)
+			if row.BusinessKeyHash != "" {
+				businessKey = row.BusinessKeyHash
+			}
+			values[index] = []any{snapshot.RequestedDate.String(), snapshot.RequestedDate.String(), snapshot.FileName, row.SourceRowNumber, row.RowChecksum, businessKey}
+			for _, value := range row.Values {
+				values[index] = append(values[index], value)
+			}
 		}
-	}
-	if err := insertRows(ctx, tx, snapshot.Parsed.Definition.TableName, columns, values); err != nil {
-		return err
-	}
-	if err := upsertDynamicRegistry(ctx, tx, snapshot); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit maintenance snapshot: %w", err)
-	}
-	committed = true
-	return nil
+		if err := insertRows(ctx, tx, snapshot.Parsed.Definition.TableName, columns, values); err != nil {
+			return err
+		}
+		if err := upsertDynamicRegistry(ctx, tx, snapshot); err != nil {
+			return err
+		}
+		if fenced {
+			result, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET heartbeat_at=CURRENT_TIMESTAMP(6)
+			WHERE id=? AND status='running' AND owner_id=? AND cancel_requested_at IS NULL`, runID, ownerID)
+			if err != nil {
+				return fmt.Errorf("fence maintenance publication: %w", err)
+			}
+			affected, err := result.RowsAffected()
+			if err != nil || affected != 1 {
+				return errors.Join(ingestionrun.ErrOwnershipLost, err)
+			}
+		}
+		return nil
+	})
+	return err
 }
 
 func upsertDynamicRegistry(ctx context.Context, tx *sql.Tx, snapshot MaintenanceSnapshot) error {

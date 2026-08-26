@@ -12,6 +12,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/ibldzn/go-admin/internal/audit"
+	databasepkg "github.com/ibldzn/go-admin/internal/database"
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/securityctx"
 )
@@ -135,6 +136,13 @@ func (repository *Repository) createRunAll(ctx context.Context, from, to ingesti
 		return 0, err
 	}
 	parentID, _ := result.LastInsertId()
+	parentOwner, err := NewOwnerID()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET owner_id=?,claimed_at=CURRENT_TIMESTAMP(6),heartbeat_at=CURRENT_TIMESTAMP(6),started_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='running'`, parentOwner, parentID); err != nil {
+		return 0, err
+	}
 	for index, job := range repository.catalog.Jobs() {
 		parameters, err := parametersForJob(job, from, to)
 		if err != nil {
@@ -221,17 +229,22 @@ func (repository *Repository) Claim(ctx context.Context, ownerID string) (*Run, 
 	return &run, nil
 }
 
-func (repository *Repository) HeartbeatAndCancellations(ctx context.Context, ownerID string) ([]uint64, error) {
-	if _, err := repository.db.ExecContext(ctx, `UPDATE ingestion_runs SET heartbeat_at=CURRENT_TIMESTAMP(6)
-		WHERE kind IN ('job','run_all_child') AND status='running' AND owner_id=?`, ownerID); err != nil {
-		return nil, err
+func (repository *Repository) Heartbeat(ctx context.Context, runID uint64, ownerID string) (HeartbeatResult, error) {
+	result, _, err := databasepkg.RetryReplaySafeExec(ctx, repository.db, `UPDATE ingestion_runs SET heartbeat_at=CURRENT_TIMESTAMP(6)
+		WHERE id=? AND kind IN ('job','run_all_child') AND status='running' AND owner_id=?`, runID, ownerID)
+	if err != nil {
+		return HeartbeatResult{}, err
 	}
-	ids := []uint64{}
-	if err := repository.db.SelectContext(ctx, &ids, `SELECT id FROM ingestion_runs WHERE kind IN ('job','run_all_child')
-		AND status='running' AND owner_id=? AND cancel_requested_at IS NOT NULL`, ownerID); err != nil {
-		return nil, err
+	if _, err := result.RowsAffected(); err != nil {
+		return HeartbeatResult{}, err
 	}
-	return ids, nil
+	var cancelled bool
+	err = repository.db.GetContext(ctx, &cancelled, `SELECT cancel_requested_at IS NOT NULL FROM ingestion_runs
+		WHERE id=? AND status='running' AND owner_id=?`, runID, ownerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return HeartbeatResult{}, nil
+	}
+	return HeartbeatResult{Owned: err == nil, CancelRequested: cancelled}, err
 }
 
 func (repository *Repository) UpdateProgress(ctx context.Context, runID uint64, ownerID string, progress Progress, diagnostics *MapperDiagnostics) error {
@@ -243,7 +256,7 @@ func (repository *Repository) UpdateProgress(ctx context.Context, runID uint64, 
 		}
 		encoded = string(data)
 	}
-	result, err := repository.db.ExecContext(ctx, `UPDATE ingestion_runs SET progress_total=?,progress_started=?,progress_succeeded=?,
+	result, _, err := databasepkg.RetryReplaySafeExec(ctx, repository.db, `UPDATE ingestion_runs SET progress_total=?,progress_started=?,progress_succeeded=?,
 		progress_failed=?,rows_processed=?,current_step=?,mapper_diagnostics=COALESCE(?,mapper_diagnostics)
 		WHERE id=? AND status='running' AND owner_id=?`,
 		progress.Total, progress.Started, progress.Succeeded, progress.Failed, progress.Rows, nullable(progress.Step), encoded, runID, ownerID)
@@ -251,7 +264,13 @@ func (repository *Repository) UpdateProgress(ctx context.Context, runID uint64, 
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return ErrTransition
+		var owned bool
+		if checkErr := repository.db.GetContext(ctx, &owned, `SELECT EXISTS(SELECT 1 FROM ingestion_runs WHERE id=? AND status='running' AND owner_id=?)`, runID, ownerID); checkErr != nil {
+			return checkErr
+		}
+		if !owned {
+			return ErrOwnershipLost
+		}
 	}
 	return nil
 }
@@ -260,13 +279,13 @@ func (repository *Repository) FreezeSnapshotDate(ctx context.Context, runID uint
 	if date.IsZero() {
 		return fmt.Errorf("snapshot date is required")
 	}
-	result, err := repository.db.ExecContext(ctx, `UPDATE ingestion_runs SET snapshot_date=?
+	result, _, err := databasepkg.RetryReplaySafeExec(ctx, repository.db, `UPDATE ingestion_runs SET snapshot_date=?
 		WHERE id=? AND status='running' AND owner_id=? AND snapshot_date IS NULL`, date.String(), runID, ownerID)
 	if err != nil {
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return ErrTransition
+		return ErrOwnershipLost
 	}
 	return nil
 }
@@ -275,7 +294,20 @@ func (repository *Repository) Finish(ctx context.Context, runID uint64, ownerID 
 	if status != StatusSucceeded && status != StatusFailed && status != StatusCancelled {
 		return fmt.Errorf("invalid executable terminal status %q", status)
 	}
-	return finish(ctx, repository.db, runID, ownerID, status, safeError)
+	condition := ""
+	if status == StatusSucceeded {
+		condition = " AND cancel_requested_at IS NULL"
+	}
+	result, _, err := databasepkg.RetryReplaySafeExec(ctx, repository.db, `UPDATE ingestion_runs SET status=?,error_class=?,error_message=?,error_step=?,
+		finished_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='running' AND owner_id=?`+condition, status,
+		nullable(safeError.Class), nullable(safeError.Message), nullable(safeError.Step), runID, ownerID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrTransition
+	}
+	return nil
 }
 
 // FinishSucceededInTx applies the canonical successful Finish transition inside
@@ -292,8 +324,12 @@ type finishExecutor interface {
 }
 
 func finish(ctx context.Context, executor finishExecutor, runID uint64, ownerID string, status Status, safeError SafeError) error {
+	condition := ""
+	if status == StatusSucceeded {
+		condition = " AND cancel_requested_at IS NULL"
+	}
 	result, err := executor.ExecContext(ctx, `UPDATE ingestion_runs SET status=?,error_class=?,error_message=?,error_step=?,
-		finished_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='running' AND owner_id=?`, status,
+		finished_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='running' AND owner_id=?`+condition, status,
 		nullable(safeError.Class), nullable(safeError.Message), nullable(safeError.Step), runID, ownerID)
 	if err != nil {
 		return err
@@ -304,48 +340,175 @@ func finish(ctx context.Context, executor finishExecutor, runID uint64, ownerID 
 	return nil
 }
 
-func (repository *Repository) RequestCancellation(ctx context.Context, runID uint64, reason string, requester securityctx.Requester) error {
-	reason = safeText(reason, 255)
-	tx, err := repository.db.BeginTxx(ctx, nil)
+func (repository *Repository) RecoverOneStale(ctx context.Context, lease time.Duration, replacementOwner string) (*Recovery, error) {
+	if lease <= 0 || len(replacementOwner) != 64 {
+		return nil, fmt.Errorf("lease and replacement owner are required")
+	}
+	for {
+		var recovered *Recovery
+		candidateSeen := false
+		_, err := databasepkg.RetryReplaySafeTx(ctx, repository.db, func(tx *sqlx.Tx) error {
+			recovered, candidateSeen = nil, false
+			var candidate struct {
+				ID          uint64         `db:"id"`
+				ParentRunID sql.NullInt64  `db:"parent_run_id"`
+				Kind        Kind           `db:"kind"`
+				JobKey      sql.NullString `db:"job_key"`
+				Owner       string         `db:"owner_id"`
+				Heartbeat   time.Time      `db:"heartbeat_at"`
+			}
+			err := tx.GetContext(ctx, &candidate, `SELECT id,parent_run_id,kind,job_key,owner_id,heartbeat_at FROM ingestion_runs
+			WHERE status='running' AND owner_id IS NOT NULL AND heartbeat_at IS NOT NULL
+			AND heartbeat_at<TIMESTAMPADD(MICROSECOND,-?,UTC_TIMESTAMP(6))
+			ORDER BY heartbeat_at,id LIMIT 1`, lease.Microseconds())
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			candidateSeen = true
+			result := Recovery{RunID: candidate.ID, Kind: candidate.Kind, JobKey: candidate.JobKey.String,
+				PreviousOwner: candidate.Owner, PreviousHeartbeat: candidate.Heartbeat}
+			if candidate.ParentRunID.Valid {
+				result.ParentRunID = uint64(candidate.ParentRunID.Int64)
+			}
+			if candidate.Kind == KindRunAllParent {
+				updated, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET owner_id=?,claimed_at=CURRENT_TIMESTAMP(6),heartbeat_at=CURRENT_TIMESTAMP(6)
+				WHERE id=? AND kind='run_all_parent' AND status='running' AND owner_id=? AND heartbeat_at=?
+				AND heartbeat_at<TIMESTAMPADD(MICROSECOND,-?,UTC_TIMESTAMP(6))`, replacementOwner, candidate.ID, candidate.Owner, candidate.Heartbeat, lease.Microseconds())
+				if err != nil {
+					return err
+				}
+				affected, err := updated.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if affected != 1 {
+					return nil
+				}
+				if err := repository.ensureRunAllChildren(ctx, tx, candidate.ID); err != nil {
+					return err
+				}
+				result.NewOwner = replacementOwner
+			} else {
+				updated, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET status='abandoned',error_class='abandoned',
+				error_message='Worker ownership expired; stale execution recovered automatically.',error_step='ownership_lease',
+				abandoned_previous_owner=owner_id,abandoned_previous_heartbeat=heartbeat_at,finished_at=CURRENT_TIMESTAMP(6)
+				WHERE id=? AND status='running' AND owner_id=? AND heartbeat_at=?
+				AND heartbeat_at<TIMESTAMPADD(MICROSECOND,-?,UTC_TIMESTAMP(6))`, candidate.ID, candidate.Owner, candidate.Heartbeat, lease.Microseconds())
+				if err != nil {
+					return err
+				}
+				affected, err := updated.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if affected != 1 {
+					return nil
+				}
+			}
+			recovered = &result
+			return nil
+		})
+		if err != nil || recovered != nil || !candidateSeen {
+			return recovered, err
+		}
+		// The observed heartbeat renewed or another actor won the exact CAS.
+		// Scan again so one race cannot hide other stale rows from this sweep.
+	}
+}
+
+func (repository *Repository) ensureRunAllChildren(ctx context.Context, tx *sqlx.Tx, parentID uint64) error {
+	parent, err := getRun(ctx, tx, parentID)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	var row struct {
-		Kind   Kind   `db:"kind"`
-		Status Status `db:"status"`
-	}
-	if err := tx.GetContext(ctx, &row, `SELECT kind,status FROM ingestion_runs WHERE id=? FOR UPDATE`, runID); err != nil {
+	rangeValue, err := DecodeRange(parent.Parameters)
+	if err != nil {
 		return err
 	}
-	if IsTerminal(row.Status) {
-		return tx.Commit()
+	requester := parent.RequestedByUserID
+	type identity struct {
+		Position uint16 `db:"child_position"`
+		JobKey   string `db:"job_key"`
 	}
-	if row.Kind == KindRunAllParent {
-		if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason=? WHERE id=?`, nullable(reason), runID); err != nil {
+	var existing []identity
+	if err := tx.SelectContext(ctx, &existing, `SELECT child_position,job_key FROM ingestion_runs WHERE parent_run_id=?`, parentID); err != nil {
+		return err
+	}
+	byPosition := make(map[uint16]string, len(existing))
+	byJob := make(map[string]uint16, len(existing))
+	jobs := repository.catalog.Jobs()
+	for _, child := range existing {
+		if child.Position == 0 || int(child.Position) > len(jobs) || jobs[child.Position-1].Key != child.JobKey {
+			return fmt.Errorf("Run All child identity position=%d job=%q is not canonical", child.Position, child.JobKey)
+		}
+		byPosition[child.Position], byJob[child.JobKey] = child.JobKey, child.Position
+	}
+	for index, job := range jobs {
+		position := uint16(index + 1)
+		if existingJob, found := byPosition[position]; found && existingJob != job.Key {
+			return fmt.Errorf("Run All child position %d is %q, want %q", position, existingJob, job.Key)
+		}
+		if existingPosition, found := byJob[job.Key]; found && existingPosition != position {
+			return fmt.Errorf("Run All child %q is position %d, want %d", job.Key, existingPosition, position)
+		}
+		if byPosition[position] == job.Key {
+			continue
+		}
+		parameters, err := parametersForJob(job, rangeValue.From, rangeValue.To)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET status='cancelled',finished_at=CURRENT_TIMESTAMP(6),cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason=?
+		parentRef := parentID
+		if _, err := insertRun(ctx, tx, KindRunAllChild, &parentRef, &position, job.Key, StatusPlanned, parameters, TriggerRunAll, fmt.Sprint(parentID), requester); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (repository *Repository) RequestCancellation(ctx context.Context, runID uint64, reason string, requester securityctx.Requester) error {
+	reason = safeText(reason, 255)
+	_, err := databasepkg.RetryReplaySafeTx(ctx, repository.db, func(tx *sqlx.Tx) error {
+		var row struct {
+			Kind   Kind   `db:"kind"`
+			Status Status `db:"status"`
+		}
+		if err := tx.GetContext(ctx, &row, `SELECT kind,status FROM ingestion_runs WHERE id=? FOR UPDATE`, runID); err != nil {
+			return err
+		}
+		if IsTerminal(row.Status) {
+			return nil
+		}
+		if row.Kind == KindRunAllParent {
+			if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason=? WHERE id=?`, nullable(reason), runID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET status='cancelled',finished_at=CURRENT_TIMESTAMP(6),cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason=?
 			WHERE parent_run_id=? AND status IN ('planned','queued')`, nullable(reason), runID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason=?
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason=?
 			WHERE parent_run_id=? AND status='running'`, nullable(reason), runID); err != nil {
+				return err
+			}
+		} else if row.Status == StatusPlanned || row.Status == StatusQueued {
+			if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET status='cancelled',cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason=?,finished_at=CURRENT_TIMESTAMP(6) WHERE id=?`, nullable(reason), runID); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason=? WHERE id=?`, nullable(reason), runID); err != nil {
+				return err
+			}
+		}
+		if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionCancellationRequested, runID, nil); err != nil {
 			return err
 		}
-	} else if row.Status == StatusPlanned || row.Status == StatusQueued {
-		if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET status='cancelled',cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason=?,finished_at=CURRENT_TIMESTAMP(6) WHERE id=?`, nullable(reason), runID); err != nil {
-			return err
-		}
-	} else {
-		if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET cancel_requested_at=CURRENT_TIMESTAMP(6),cancel_reason=? WHERE id=?`, nullable(reason), runID); err != nil {
-			return err
-		}
-	}
-	if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionCancellationRequested, runID, nil); err != nil {
-		return err
-	}
-	return tx.Commit()
+		return nil
+	})
+	return err
 }
 
 func (repository *Repository) RecoverAbandoned(ctx context.Context, runID uint64, expectedOwner string, expectedHeartbeat time.Time, reason string, requester securityctx.Requester) error {
@@ -353,24 +516,22 @@ func (repository *Repository) RecoverAbandoned(ctx context.Context, runID uint64
 	if expectedOwner == "" || expectedHeartbeat.IsZero() || reason == "" {
 		return fmt.Errorf("exact owner, heartbeat, and recovery reason are required")
 	}
-	tx, err := repository.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET status='abandoned',error_class='abandoned',error_message=?,
+	_, err := databasepkg.RetryReplaySafeTx(ctx, repository.db, func(tx *sqlx.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET status='abandoned',error_class='abandoned',error_message=?,
 		abandoned_previous_owner=owner_id,abandoned_previous_heartbeat=heartbeat_at,finished_at=CURRENT_TIMESTAMP(6)
 		WHERE id=? AND status='running' AND owner_id=? AND heartbeat_at=?`, reason, runID, expectedOwner, expectedHeartbeat)
-	if err != nil {
-		return err
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return ErrTransition
-	}
-	if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionAbandonedRecovered, runID, nil); err != nil {
-		return err
-	}
-	return tx.Commit()
+		if err != nil {
+			return err
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return ErrTransition
+		}
+		if err := appendRunAudit(ctx, tx, requester, audit.ActionIngestionAbandonedRecovered, runID, nil); err != nil {
+			return err
+		}
+		return nil
+	})
+	return err
 }
 
 func appendRunAudit(ctx context.Context, executor sqlx.ExtContext, requester securityctx.Requester, action audit.Action, runID uint64, metadata audit.Metadata) error {
@@ -383,19 +544,56 @@ func appendRunAudit(ctx context.Context, executor sqlx.ExtContext, requester sec
 }
 
 func (repository *Repository) ReconcileOneParent(ctx context.Context) (bool, error) {
-	tx, err := repository.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return false, err
+	return repository.reconcileParent(ctx, 0, "")
+}
+
+// ReconcileParent advances only the exact live Run All parent ownership
+// instance. A caller holding an expired token cannot queue or finish children.
+func (repository *Repository) ReconcileParent(ctx context.Context, parentID uint64, ownerID string) (bool, error) {
+	if parentID == 0 || len(ownerID) != 64 {
+		return false, fmt.Errorf("exact Run All parent ownership is required")
 	}
-	defer tx.Rollback()
-	var parentID uint64
-	err = tx.GetContext(ctx, &parentID, `SELECT parent.id FROM ingestion_runs parent WHERE parent.kind='run_all_parent' AND parent.status='running'
-		AND NOT EXISTS (SELECT 1 FROM ingestion_runs child WHERE child.parent_run_id=parent.id AND child.status IN ('queued','running'))
-		ORDER BY parent.id LIMIT 1 FOR UPDATE SKIP LOCKED`)
+	return repository.reconcileParent(ctx, parentID, ownerID)
+}
+
+func (repository *Repository) reconcileParent(ctx context.Context, exactID uint64, exactOwner string) (bool, error) {
+	var changed bool
+	_, err := databasepkg.RetryReplaySafeTx(ctx, repository.db, func(tx *sqlx.Tx) error {
+		var transactionErr error
+		changed, transactionErr = repository.reconcileParentTransaction(ctx, tx, exactID, exactOwner)
+		return transactionErr
+	})
+	return changed, err
+}
+
+func (repository *Repository) reconcileParentTransaction(ctx context.Context, tx *sqlx.Tx, exactID uint64, exactOwner string) (bool, error) {
+	var parent struct {
+		ID    uint64 `db:"id"`
+		Owner string `db:"owner_id"`
+	}
+	var err error
+	if exactID != 0 {
+		err = tx.GetContext(ctx, &parent, `SELECT id,COALESCE(owner_id,'') owner_id FROM ingestion_runs
+			WHERE id=? AND kind='run_all_parent' AND status='running' AND owner_id=? FOR UPDATE`, exactID, exactOwner)
+	} else {
+		err = tx.GetContext(ctx, &parent, `SELECT parent.id,COALESCE(parent.owner_id,'') owner_id FROM ingestion_runs parent WHERE parent.kind='run_all_parent' AND parent.status='running'
+			AND NOT EXISTS (SELECT 1 FROM ingestion_runs child WHERE child.parent_run_id=parent.id AND child.status IN ('queued','running'))
+			ORDER BY parent.id LIMIT 1 FOR UPDATE SKIP LOCKED`)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
+		if exactID != 0 {
+			return false, ErrOwnershipLost
+		}
 		return false, nil
 	}
 	if err != nil {
+		return false, err
+	}
+	parentID := parent.ID
+	if parent.Owner == "" {
+		return false, fmt.Errorf("Run All parent has no owner")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET heartbeat_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='running' AND owner_id=?`, parentID, parent.Owner); err != nil {
 		return false, err
 	}
 	var cancelled bool
@@ -407,14 +605,14 @@ func (repository *Repository) ReconcileOneParent(ctx context.Context) (bool, err
 		return false, err
 	}
 	if active > 0 {
-		return false, tx.Commit()
+		return false, nil
 	}
 	if cancelled {
-		_, err = tx.ExecContext(ctx, `UPDATE ingestion_runs SET status='cancelled',finished_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='running'`, parentID)
+		_, err = tx.ExecContext(ctx, `UPDATE ingestion_runs SET status='cancelled',finished_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='running' AND owner_id=?`, parentID, parent.Owner)
 		if err != nil {
 			return false, err
 		}
-		return true, tx.Commit()
+		return true, nil
 	}
 	var child struct {
 		ID     uint64 `db:"id"`
@@ -426,10 +624,10 @@ func (repository *Repository) ReconcileOneParent(ctx context.Context) (bool, err
 		if err != nil {
 			return false, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET status=?,finished_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='running'`, status, parentID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runs SET status=?,finished_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='running' AND owner_id=?`, status, parentID, parent.Owner); err != nil {
 			return false, err
 		}
-		return true, tx.Commit()
+		return true, nil
 	}
 	if err != nil {
 		return false, err
@@ -449,7 +647,7 @@ func (repository *Repository) ReconcileOneParent(ctx context.Context) (bool, err
 	if err != nil {
 		return false, err
 	}
-	return true, tx.Commit()
+	return true, nil
 }
 
 func aggregateParentStatus(ctx context.Context, tx *sqlx.Tx, parentID uint64) (Status, error) {

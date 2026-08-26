@@ -7,15 +7,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
+	"github.com/jmoiron/sqlx"
+
+	databasepkg "github.com/ibldzn/go-admin/internal/database"
 	"github.com/ibldzn/go-admin/internal/ingestion"
-	"github.com/ibldzn/go-admin/internal/ingestiondiag"
-	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 	"github.com/shopspring/decimal"
 )
@@ -41,7 +44,7 @@ func TestFixedCompleteSetPromotionAndStaleOrdering(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := repository.Promote(context.Background(), definition, load1); err != nil {
+	if err := repository.promoteWithoutRunFence(context.Background(), definition, load1); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.StageMember(context.Background(), definition, load1, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}}); err == nil {
@@ -54,7 +57,7 @@ func TestFixedCompleteSetPromotionAndStaleOrdering(t *testing.T) {
 	if err := repository.StageMember(context.Background(), definition, load2, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.Promote(context.Background(), definition, load2); err == nil {
+	if err := repository.promoteWithoutRunFence(context.Background(), definition, load2); err == nil {
 		t.Fatal("partial location set promoted")
 	}
 	var active uint64
@@ -73,7 +76,7 @@ func TestFixedCompleteSetPromotionAndStaleOrdering(t *testing.T) {
 	if _, err := db.Exec(`UPDATE stg_fincloud_balance_sheet_reports SET source_row_checksum=REPEAT('0',64) WHERE load_id=? LIMIT 1`, load3); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.Promote(context.Background(), definition, load3); err == nil {
+	if err := repository.promoteWithoutRunFence(context.Background(), definition, load3); err == nil {
 		t.Fatal("tampered staged member promoted")
 	}
 }
@@ -106,7 +109,7 @@ func TestFixedFirstPublicationRaceUsesMonotonicLoadID(t *testing.T) {
 	for index := range loads {
 		go func(index int) {
 			<-start
-			errorsByLoad[index] = repository.Promote(context.Background(), definition, loads[index])
+			errorsByLoad[index] = repository.promoteWithoutRunFence(context.Background(), definition, loads[index])
 			done <- index
 		}(index)
 	}
@@ -153,7 +156,7 @@ func TestFixedConcurrentStagingJoinsBeforeAtomicPromotion(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := repository.Promote(context.Background(), definition, loadID); err != nil {
+	if err := repository.promoteWithoutRunFence(context.Background(), definition, loadID); err != nil {
 		t.Fatal(err)
 	}
 	var status string
@@ -181,7 +184,7 @@ func TestFixedConcurrentStagingJoinsBeforeAtomicPromotion(t *testing.T) {
 		} else {
 			err = repository.StageMember(context.Background(), definition, candidate, plan.Members[0], []FixedSegment{{Index: -1, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}})
 		}
-		if err == nil || repository.Promote(context.Background(), definition, candidate) == nil {
+		if err == nil || repository.promoteWithoutRunFence(context.Background(), definition, candidate) == nil {
 			t.Fatalf("%s staging was publishable", mode)
 		}
 		if err := db.Get(&status, `SELECT status FROM fixed_report_loads WHERE id=?`, candidate); err != nil || status != fixedLoadPending {
@@ -243,7 +246,7 @@ func TestCoAConcurrentStagingUsesPendingMemberInvariant(t *testing.T) {
 		if err := db.Get(&stagedRows, `SELECT COUNT(*) FROM stg_fincloud_coa_movement_reports WHERE load_id=?`, loadID); err != nil || stagedRows != wantRows {
 			t.Fatalf("staged rows=%d want=%d error=%v", stagedRows, wantRows, err)
 		}
-		if err := repository.Promote(context.Background(), definition, loadID); err != nil {
+		if err := repository.promoteWithoutRunFence(context.Background(), definition, loadID); err != nil {
 			t.Fatal(err)
 		}
 		var active uint64
@@ -302,7 +305,7 @@ func TestCoAMemberReplacementAndSerialization(t *testing.T) {
 	if err := db.Get(&stagedRows, `SELECT COUNT(*) FROM stg_fincloud_coa_movement_reports WHERE load_id=? AND member_key=?`, loadID, plan.Members[0].MemberKey); err != nil || stagedRows != memberRows || (stagedRows != 5 && stagedRows != 9) {
 		t.Fatalf("staged rows=%d member rows=%d error=%v", stagedRows, memberRows, err)
 	}
-	if err := repository.Promote(context.Background(), definition, loadID); err != nil {
+	if err := repository.promoteWithoutRunFence(context.Background(), definition, loadID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -418,7 +421,7 @@ func TestDetailCurrentStatePublicationDeletionEmptyAndFailure(t *testing.T) {
 					t.Fatalf("unchanged %s timestamps=%d error=%v", child.table, preserved, err)
 				}
 			}
-			if err := repository.CleanupTerminal(context.Background(), 100); err != nil {
+			if _, err := repository.CleanupTerminal(context.Background(), 100); err != nil {
 				t.Fatal(err)
 			}
 			if err := db.Get(&staged, "SELECT COUNT(*) FROM `"+specification.stage+"` WHERE ingestion_run_id=?", secondID); err != nil || staged != 0 {
@@ -703,7 +706,7 @@ func TestGroupedDetailDecimalsPersistExactly(t *testing.T) {
 	assertDecimal(`SELECT CAST(outstanding_principal AS CHAR) FROM fincloud_loan_details WHERE account_no='GROUPED-L'`, "1234567.89")
 }
 
-func TestRetryTransactionRecoversFromRealMySQLDeadlock(t *testing.T) {
+func TestReplaySafeTransactionRecoversFromRealMySQL1213(t *testing.T) {
 	db := integrationdb.Open(t)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ingestion_deadlock_probe (id INT PRIMARY KEY, value INT NOT NULL) ENGINE=InnoDB`); err != nil {
 		t.Fatal(err)
@@ -716,25 +719,11 @@ func TestRetryTransactionRecoversFromRealMySQLDeadlock(t *testing.T) {
 	release := make(chan struct{})
 	errorsFound := make(chan error, 2)
 	var attempts [2]atomic.Int32
-	var diagnosticLock sync.Mutex
-	var diagnostics []ingestionrun.TechnicalEvent
 	for index := range 2 {
 		go func(index int) {
 			first, second := index+1, 2-index
-			ctx := ingestiondiag.WithRecorder(context.Background(), func(_ context.Context, event ingestionrun.TechnicalEvent, _ bool) {
-				diagnosticLock.Lock()
-				diagnostics = append(diagnostics, event)
-				diagnosticLock.Unlock()
-			}, 1, "deadlock_probe")
-			ctx = ingestiondiag.WithScope(ctx, ingestiondiag.Scope{Class: "persistence", Step: "deadlock_probe", Operation: "deadlock_probe"})
-			errorsFound <- retryTransaction(ctx, "deadlock_probe", func() error {
+			errorsFound <- retryReplaySafeTx(context.Background(), db, "deadlock_probe", func(tx *sqlx.Tx) error {
 				attempt := attempts[index].Add(1)
-				tx, err := db.BeginTxx(context.Background(), nil)
-				if err != nil {
-					return err
-				}
-				committed := false
-				defer rollbackUnlessCommitted(tx, &committed)
 				if _, err := tx.Exec(`UPDATE ingestion_deadlock_probe SET value=value+1 WHERE id=?`, first); err != nil {
 					return err
 				}
@@ -745,10 +734,6 @@ func TestRetryTransactionRecoversFromRealMySQLDeadlock(t *testing.T) {
 				if _, err := tx.Exec(`UPDATE ingestion_deadlock_probe SET value=value+1 WHERE id=?`, second); err != nil {
 					return err
 				}
-				if err := tx.Commit(); err != nil {
-					return err
-				}
-				committed = true
 				return nil
 			})
 		}(index)
@@ -764,8 +749,72 @@ func TestRetryTransactionRecoversFromRealMySQLDeadlock(t *testing.T) {
 	if total := attempts[0].Load() + attempts[1].Load(); total != 3 {
 		t.Fatalf("transaction attempts=%d want=3 (%d,%d)", total, attempts[0].Load(), attempts[1].Load())
 	}
-	if len(diagnostics) != 2 || diagnostics[0].EventKind != "retry" || diagnostics[1].EventKind != "recovery" || diagnostics[1].Recovered == nil || !*diagnostics[1].Recovered {
-		t.Fatalf("deadlock diagnostics=%+v", diagnostics)
+	var values []int
+	if err := db.Select(&values, `SELECT value FROM ingestion_deadlock_probe ORDER BY id`); err != nil || !reflect.DeepEqual(values, []int{2, 2}) {
+		t.Fatalf("deadlock retry leaked partial state: values=%v error=%v", values, err)
+	}
+}
+
+func TestReplaySafeTransactionRecoversFromRealMySQL1205WithoutPartialLeak(t *testing.T) {
+	db := integrationdb.Open(t)
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ingestion_lock_timeout_probe (id INT PRIMARY KEY, value INT NOT NULL) ENGINE=InnoDB`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DROP TABLE ingestion_lock_timeout_probe`) })
+	if _, err := db.Exec(`INSERT INTO ingestion_lock_timeout_probe VALUES (1,0),(2,0) ON DUPLICATE KEY UPDATE value=0`); err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := db.BeginTxx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`UPDATE ingestion_lock_timeout_probe SET value=value WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := db.DB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(context.Background(), `SET SESSION innodb_lock_wait_timeout=1`); err != nil {
+		t.Fatal(err)
+	}
+	timedOut := make(chan struct{})
+	done := make(chan error, 1)
+	var attempts, sourceFetches atomic.Int32
+	sourceFetches.Add(1) // fetched/prepared data stays outside the retry closure
+	go func() {
+		_, retryErr := databasepkg.RetryReplaySafeConnTx(context.Background(), connection, func(tx *sql.Tx) error {
+			attempts.Add(1)
+			if _, err := tx.Exec(`UPDATE ingestion_lock_timeout_probe SET value=value+1 WHERE id=2`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`UPDATE ingestion_lock_timeout_probe SET value=value+1 WHERE id=1`)
+			var mysqlError *mysql.MySQLError
+			if errors.As(err, &mysqlError) && mysqlError.Number == 1205 {
+				select {
+				case <-timedOut:
+				default:
+					close(timedOut)
+				}
+			}
+			return err
+		})
+		done <- retryErr
+	}()
+	<-timedOut
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var values []int
+	if err := db.Select(&values, `SELECT value FROM ingestion_lock_timeout_probe ORDER BY id`); err != nil || !reflect.DeepEqual(values, []int{1, 1}) {
+		t.Fatalf("1205 retry leaked partial state: values=%v error=%v", values, err)
+	}
+	if attempts.Load() != 2 || sourceFetches.Load() != 1 {
+		t.Fatalf("attempts=%d source_fetches=%d", attempts.Load(), sourceFetches.Load())
 	}
 }
 
@@ -804,14 +853,14 @@ func TestMaintenanceDynamicAdditiveRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := NewMaintenanceRepository(db)
-	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: parsed}); err != nil {
+	if err := repository.saveSnapshotWithoutRunFence(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: parsed}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec("CREATE TRIGGER phase3_fail_cbr_customer BEFORE INSERT ON `" + definition.TableName + "` FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='forced load failure'"); err != nil {
 		t.Fatal(err)
 	}
 	broken, _ := ingestion.ParseMaintenanceCSV(context.Background(), definition, date, "One|Two|Three\nc|d|e\n")
-	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: broken}); err == nil {
+	if err := repository.saveSnapshotWithoutRunFence(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: broken}); err == nil {
 		t.Fatal("broken load succeeded")
 	}
 	if _, err := db.Exec(`DROP TRIGGER phase3_fail_cbr_customer`); err != nil {
@@ -822,19 +871,19 @@ func TestMaintenanceDynamicAdditiveRetry(t *testing.T) {
 		t.Fatalf("additive DDL did not survive failed load: count=%d error=%v", newColumn, err)
 	}
 	valid, _ := ingestion.ParseMaintenanceCSV(context.Background(), definition, date, "One|Two|Three\nc|d|e\n")
-	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: valid}); err != nil {
+	if err := repository.saveSnapshotWithoutRunFence(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: valid}); err != nil {
 		t.Fatal(err)
 	}
 	otherDate, _ := ingestion.ParseCalendarDate("2026-08-11")
 	mismatched, _ := ingestion.ParseMaintenanceCSV(context.Background(), definition, otherDate, "One|Two|Three\nc|d|e\n")
-	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: mismatched}); err == nil {
+	if err := repository.saveSnapshotWithoutRunFence(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: mismatched}); err == nil {
 		t.Fatal("mismatched maintenance source date succeeded")
 	}
 	empty, err := ingestion.ParseMaintenanceCSV(context.Background(), definition, date, "One|Two|Three\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: empty}); err != nil {
+	if err := repository.saveSnapshotWithoutRunFence(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: empty}); err != nil {
 		t.Fatalf("valid empty maintenance snapshot: %v", err)
 	}
 	var rows int
@@ -903,7 +952,7 @@ func TestConcurrentMaintenanceSchemaEvolutionSerializes(t *testing.T) {
 			parsed, err := ingestion.ParseMaintenanceCSV(context.Background(), definition, date, header+"\nvalue\n")
 			if err == nil {
 				<-start
-				err = repository.SaveSnapshot(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: parsed})
+				err = repository.saveSnapshotWithoutRunFence(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: parsed})
 			}
 			errorsByHeader <- err
 		}(header)

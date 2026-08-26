@@ -24,6 +24,7 @@ type Executor struct {
 	detail            *ingestionstore.DetailRepository
 	maintenance       *ingestionstore.MaintenanceRepository
 	runs              *ingestionrun.Repository
+	updateProgress    func(context.Context, uint64, string, ingestionrun.Progress, *ingestionrun.MapperDiagnostics) error
 	catalog           ingestion.Catalog
 	fixedConcurrency  int
 	detailConcurrency int
@@ -67,7 +68,7 @@ func New(client *fincloud.Client, fixed *ingestionstore.FixedRepository, detail 
 	if client == nil || fixed == nil || detail == nil || maintenance == nil || runs == nil || fixedConcurrency < 1 || detailConcurrency < 1 || logger == nil {
 		return nil, fmt.Errorf("complete ingestion executor dependencies are required")
 	}
-	return &Executor{client: client, fixed: fixed, detail: detail, maintenance: maintenance, runs: runs, catalog: catalog,
+	return &Executor{client: client, fixed: fixed, detail: detail, maintenance: maintenance, runs: runs, updateProgress: runs.UpdateProgress, catalog: catalog,
 		fixedConcurrency: fixedConcurrency, detailConcurrency: detailConcurrency, now: time.Now, logger: logger}, nil
 }
 
@@ -100,7 +101,23 @@ func (executor *Executor) Execute(ctx context.Context, run ingestionrun.Run, own
 	return result
 }
 
+func (executor *Executor) persistProgress(ctx context.Context, run ingestionrun.Run, progress ingestionrun.Progress, diagnostics *ingestionrun.MapperDiagnostics, enabled *bool) error {
+	if !*enabled {
+		return nil
+	}
+	err := executor.updateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, diagnostics)
+	if err == nil || errors.Is(err, ingestionrun.ErrOwnershipLost) {
+		return err
+	}
+	*enabled = false
+	progressCtx := diagnosticScope(ctx, "persistence", "persist_run_progress", "persist_run_progress", "", "")
+	recordProgressDegraded(progressCtx, err)
+	executor.logger.Warn("progress persistence degraded; ingestion continues", "run_id", run.ID, "job_key", run.JobKey, "error", err)
+	return nil
+}
+
 func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
+	progressWrites := true
 	definition := *job.Fixed
 	var locations ingestion.FrozenLocations
 	var accounts ingestion.FrozenAccountCodes
@@ -158,9 +175,14 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 		return failed("persistence", "could not begin fixed report load", "begin_fixed_load", err)
 	}
 	progress := ingestionrun.Progress{Total: uint64(len(plan.Members)), Step: "fetch_members"}
-	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+	if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
+		return ownershipFailure(err, "persist_run_progress")
+	}
 	var first *fixedMemberResult
-	runFixedPool(ctx, plan.Members, executor.fixedConcurrency,
+	poolCtx, stopPool := context.WithCancel(ctx)
+	defer stopPool()
+	var progressFatal error
+	runFixedPool(poolCtx, plan.Members, executor.fixedConcurrency,
 		func(workCtx context.Context, descriptor ingestion.RequestDescriptor) fixedMemberResult {
 			result := executor.fetchAndStageFixedMember(workCtx, definition, loadID, descriptor)
 			result.memberKey = descriptor.MemberKey
@@ -169,7 +191,10 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 			progress.Started++
 			if result.err != nil {
 				if suppressCleanupCancellation(ctx, result.err) {
-					_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+					if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
+						progressFatal = err
+						stopPool()
+					}
 					return
 				}
 				firstFailure := first == nil
@@ -183,8 +208,14 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 				progress.Succeeded++
 				progress.Rows += result.rows
 			}
-			_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+			if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
+				progressFatal = err
+				stopPool()
+			}
 		})
+	if progressFatal != nil {
+		return ownershipFailure(progressFatal, "persist_run_progress")
+	}
 	if ctx.Err() != nil {
 		if result, cancelled := cancellationFailure(ctx, "fetch_members", ctx.Err()); cancelled {
 			return result
@@ -195,8 +226,10 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 		return fixedFailure(ctx, *first)
 	}
 	progress.Step = "promote"
-	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
-	if err := executor.fixed.Promote(diagnosticScope(ctx, "persistence", "promote_fixed_load", "promote_fixed_load", "", ""), definition, loadID); err != nil {
+	if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
+		return ownershipFailure(err, "persist_run_progress")
+	}
+	if err := executor.fixed.Promote(diagnosticScope(ctx, "persistence", "promote_fixed_load", "promote_fixed_load", "", ""), run.ID, run.OwnerID, definition, loadID); err != nil {
 		if result, cancelled := cancellationFailure(ctx, "promote_fixed_load", err); cancelled {
 			return result
 		}
@@ -294,6 +327,7 @@ func fixedFailure(ctx context.Context, result fixedMemberResult) Result {
 }
 
 func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
+	progressWrites := true
 	if err := executor.detail.PrepareRun(ctx, run.ID); err != nil {
 		return failed("persistence", "could not prepare Detail staging", "prepare_detail_staging", err)
 	}
@@ -306,15 +340,15 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 		return sourceFailure(ctx, err, "enumerate_identifiers")
 	}
 	progress := ingestionrun.Progress{Total: uint64(len(identifiers)), Step: "fetch_details"}
-	if err := executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil); err != nil {
-		return failed("persistence", "could not persist detail run progress", "persist_run_progress", err)
+	if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
+		return ownershipFailure(err, "persist_run_progress")
 	}
 	outcome := runDetailPool(ctx, identifiers, executor.detailConcurrency,
 		func(workCtx context.Context, identifier string) detailItemResult {
 			return executor.fetchAndStageDetail(workCtx, run.ID, job.Key, identifier)
 		},
 		func(progress ingestionrun.Progress, diagnostics *ingestionrun.MapperDiagnostics) error {
-			return executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, diagnostics)
+			return executor.persistProgress(ctx, run, progress, diagnostics, &progressWrites)
 		},
 	)
 	if outcome.progress.Started < outcome.progress.Total && ctx.Err() != nil {
@@ -334,8 +368,8 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 	if outcome.diagnostics.TotalCount > 0 {
 		diagnostics = &outcome.diagnostics
 	}
-	if err := executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, outcome.progress, diagnostics); err != nil {
-		return failed("persistence", "could not persist Detail publication progress", "persist_run_progress", err)
+	if err := executor.persistProgress(ctx, run, outcome.progress, diagnostics, &progressWrites); err != nil {
+		return ownershipFailure(err, "persist_run_progress")
 	}
 	domain, err := detailDomain(job.Key)
 	if err != nil {
@@ -572,12 +606,15 @@ func detailPersistenceFailure(err error) detailItemResult {
 }
 
 func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
+	progressWrites := true
 	series, err := ingestionrun.DecodeMaintenanceSeries(run.Parameters)
 	if err != nil {
 		return failed("contract", "invalid maintenance date series", "plan", err)
 	}
 	progress := ingestionrun.Progress{Total: uint64(len(series.Dates)), Step: "maintenance_dates"}
-	_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+	if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
+		return ownershipFailure(err, "persist_run_progress")
+	}
 	var first error
 	firstClass := ""
 	for _, requested := range series.Dates {
@@ -588,8 +625,11 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 			return sourceFailure(ctx, err, "maintenance_dates")
 		}
 		progress.Started++
-		rows, err := executor.fetchAndSaveMaintenance(ctx, *job.Maintenance, requested)
+		rows, err := executor.fetchAndSaveMaintenance(ctx, run, *job.Maintenance, requested)
 		if err != nil {
+			if errors.Is(err, ingestionrun.ErrOwnershipLost) {
+				return ownershipFailure(err, "persist_maintenance")
+			}
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return sourceFailure(ctx, err, "maintenance_dates")
 			}
@@ -603,7 +643,9 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 			if class == "source" {
 				sourceCtx := diagnosticScope(ctx, "source", "maintenance_dates", "maintenance_dates", requested.String(), "")
 				recordSourceDiagnostic(sourceCtx, err, true, false)
-				_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+				if progressErr := executor.persistProgress(ctx, run, progress, nil, &progressWrites); progressErr != nil {
+					return ownershipFailure(progressErr, "persist_run_progress")
+				}
 				return sourceFailure(ctx, err, "maintenance_dates")
 			}
 			if class == "source_contract" {
@@ -617,7 +659,9 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 			progress.Succeeded++
 			progress.Rows += rows
 		}
-		_ = executor.runs.UpdateProgress(context.WithoutCancel(ctx), run.ID, run.OwnerID, progress, nil)
+		if progressErr := executor.persistProgress(ctx, run, progress, nil, &progressWrites); progressErr != nil {
+			return ownershipFailure(progressErr, "persist_run_progress")
+		}
 	}
 	if first != nil {
 		return failed(firstClass, maintenanceFailureMessage(firstClass), "maintenance_dates", first)
@@ -625,7 +669,7 @@ func (executor *Executor) executeMaintenance(ctx context.Context, run ingestionr
 	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
 }
 
-func (executor *Executor) fetchAndSaveMaintenance(ctx context.Context, definition ingestion.MaintenanceDefinition, requested ingestion.CalendarDate) (uint64, error) {
+func (executor *Executor) fetchAndSaveMaintenance(ctx context.Context, run ingestionrun.Run, definition ingestion.MaintenanceDefinition, requested ingestion.CalendarDate) (uint64, error) {
 	if requested.IsZero() {
 		return 0, &maintenanceDateError{class: "contract", cause: fmt.Errorf("maintenance requested date is required")}
 	}
@@ -667,7 +711,7 @@ func (executor *Executor) fetchAndSaveMaintenance(ctx context.Context, definitio
 			return 0, &maintenanceDateError{class: "source_contract", cause: fmt.Errorf("maintenance report date does not match requested date %s", requested)}
 		}
 		persistCtx := diagnosticScope(ctx, "persistence", "persist_maintenance", "persist_maintenance", requested.String(), "")
-		if err := executor.maintenance.SaveSnapshot(persistCtx, ingestionstore.MaintenanceSnapshot{RequestedDate: requested, FileName: path.Base(sourcePath), Parsed: parsed}); err != nil {
+		if err := executor.maintenance.SaveSnapshot(persistCtx, run.ID, run.OwnerID, ingestionstore.MaintenanceSnapshot{RequestedDate: requested, FileName: path.Base(sourcePath), Parsed: parsed}); err != nil {
 			return 0, &maintenanceDateError{class: "persistence", cause: err}
 		}
 		return uint64(len(parsed.Rows)), nil
@@ -729,9 +773,16 @@ func cancellationFailure(ctx context.Context, step string, primary error) (Resul
 		return cancelled("run cancellation requested", step, errors.Join(primary, cause)), true
 	case errors.Is(cause, ingestionrun.ErrCoordinatorShutdown):
 		return cancelled("application shutdown cancelled the run", step, errors.Join(primary, cause)), true
+	case errors.Is(cause, ingestionrun.ErrOwnershipLost), errors.Is(cause, ingestionrun.ErrLeaseUnproven),
+		errors.Is(primary, ingestionrun.ErrOwnershipLost), errors.Is(primary, ingestionrun.ErrLeaseUnproven):
+		return ownershipFailure(errors.Join(primary, cause), step), true
 	default:
 		return Result{}, false
 	}
+}
+
+func ownershipFailure(err error, step string) Result {
+	return failed("ownership", "execution ownership was lost", step, err)
 }
 
 func suppressCleanupCancellation(ctx context.Context, err error) bool {

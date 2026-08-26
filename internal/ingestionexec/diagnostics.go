@@ -168,6 +168,17 @@ func recordPersistenceDiagnostic(ctx context.Context, err error, terminal bool) 
 	ingestiondiag.Record(ctx, event, false)
 }
 
+func recordProgressDegraded(ctx context.Context, err error) {
+	event := baseTechnicalEvent(ctx, err, false)
+	event.Severity = "warning"
+	event.Class, event.Step, event.Operation = "persistence", "persist_run_progress", "persist_run_progress"
+	event.ErrorMessage = "Progress persistence degraded; execution is continuing."
+	recovered := false
+	event.Recovered = &recovered
+	event.Details = marshalDetails(map[string]any{"database": ingestionstore.TechnicalDiagnostic(err)})
+	ingestiondiag.Record(ctx, event, false)
+}
+
 func recordParserDiagnostic(ctx context.Context, err error, terminal bool) {
 	event := baseTechnicalEvent(ctx, err, terminal)
 	event.Class = "source_contract"

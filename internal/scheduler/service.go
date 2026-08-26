@@ -13,6 +13,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/ibldzn/go-admin/internal/audit"
+	databasepkg "github.com/ibldzn/go-admin/internal/database"
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/securityctx"
@@ -23,6 +24,8 @@ const (
 	sweepLimit    = 100
 )
 
+// SubmitInTxFunc must perform only replay-safe DB work in the supplied
+// transaction; scheduler delivery may replay it after MySQL 1205/1213.
 type SubmitInTxFunc func(context.Context, *sqlx.Tx, string, ingestionrun.Parameters, ingestionrun.Trigger, string, *uint64) (uint64, error)
 
 // Every mutating path locks schedule -> occurrence -> attempt -> run.
@@ -437,11 +440,18 @@ func (service *Service) Run(ctx context.Context) {
 }
 
 func (service *Service) process(ctx context.Context, id uint64) (bool, error) {
-	tx, err := service.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
+	var changed bool
+	_, err := databasepkg.RetryReplaySafeTx(ctx, service.db, func(tx *sqlx.Tx) error {
+		var transactionErr error
+		changed, transactionErr = service.processTransaction(ctx, tx, id)
+		return transactionErr
+	})
+	return changed, err
+}
+
+// processTransaction is DB-only and replay-safe. Source fetching and other
+// irreversible effects must remain outside scheduler transaction retries.
+func (service *Service) processTransaction(ctx context.Context, tx *sqlx.Tx, id uint64) (bool, error) {
 	now, err := dbNow(ctx, tx)
 	if err != nil {
 		return false, err
@@ -550,7 +560,7 @@ func (service *Service) process(ctx context.Context, id uint64) (bool, error) {
 		if err := requireOne(result); err != nil {
 			return false, err
 		}
-		return true, tx.Commit()
+		return true, nil
 	}
 	if err != nil {
 		return false, err
@@ -575,7 +585,7 @@ func (service *Service) process(ctx context.Context, id uint64) (bool, error) {
 	if err := requireOne(result); err != nil {
 		return false, err
 	}
-	return true, tx.Commit()
+	return true, nil
 }
 
 func (service *Service) resolveSuccess(ctx context.Context, tx *sqlx.Tx, schedule scheduleRow, occurrence occurrenceRow, attempt attemptRow, run attemptRunRow, parsed cronDefinition, now time.Time) error {
@@ -609,7 +619,7 @@ func (service *Service) resolveSuccess(ctx context.Context, tx *sqlx.Tx, schedul
 	if err := requireOne(result); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (service *Service) recordBackoff(ctx context.Context, tx *sqlx.Tx, schedule scheduleRow, occurrence occurrenceRow, attempt attemptRow, run attemptRunRow) error {
@@ -634,7 +644,7 @@ func (service *Service) recordBackoff(ctx context.Context, tx *sqlx.Tx, schedule
 	if err := requireOne(result); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (service *Service) rejectInvalid(ctx context.Context, tx *sqlx.Tx, schedule scheduleRow, now time.Time, cause error) error {
@@ -682,7 +692,7 @@ func (service *Service) disableInvalid(ctx context.Context, tx *sqlx.Tx, schedul
 	if err := requireOne(result); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 const scheduleSelect = `SELECT id,name,job_key,cron_expression,timezone,policy_kind,policy_version,policy_json,policy_checksum,

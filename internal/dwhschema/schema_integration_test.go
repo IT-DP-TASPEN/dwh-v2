@@ -82,10 +82,20 @@ func TestDetailCurrentStateSchemaIdentityAndCascades(t *testing.T) {
 		"fk_stg_fincloud_cif_details_run", "fk_stg_fincloud_saving_details_run",
 		"fk_stg_fincloud_time_deposit_details_run", "fk_stg_fincloud_loan_details_run",
 	} {
+		var count int
+		if err := db.Get(&count, `SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS
+			WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME=?`, constraint); err != nil || count != 0 {
+			t.Fatalf("removed run-level staging constraint %s count=%d error=%v", constraint, count, err)
+		}
+	}
+	for _, constraint := range []string{
+		"fk_stg_fincloud_time_deposit_mutations_parent", "fk_stg_fincloud_loan_fees_parent",
+		"fk_stg_fincloud_loan_schedule_parent", "fk_stg_fincloud_loan_history_parent",
+	} {
 		var rule string
 		if err := db.Get(&rule, `SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
 			WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME=?`, constraint); err != nil || rule != "CASCADE" {
-			t.Fatalf("%s delete rule=%q error=%v", constraint, rule, err)
+			t.Fatalf("retained staging child constraint %s rule=%q error=%v", constraint, rule, err)
 		}
 	}
 }

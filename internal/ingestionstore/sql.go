@@ -3,20 +3,16 @@ package ingestionstore
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/shopspring/decimal"
 
-	"github.com/ibldzn/go-admin/internal/ingestiondiag"
-	"github.com/ibldzn/go-admin/internal/ingestionrun"
+	databasepkg "github.com/ibldzn/go-admin/internal/database"
 )
 
 const maxInsertParameters = 60000
@@ -203,12 +199,6 @@ func estimateRowBytes(row []any) int {
 	return bytes
 }
 
-func rollbackUnlessCommitted(tx *sqlx.Tx, committed *bool) {
-	if !*committed {
-		_ = tx.Rollback()
-	}
-}
-
 func lockRow(ctx context.Context, tx *sqlx.Tx, query string, args ...any) error {
 	var marker int
 	if err := tx.GetContext(ctx, &marker, query, args...); err != nil {
@@ -220,60 +210,10 @@ func lockRow(ctx context.Context, tx *sqlx.Tx, query string, args ...any) error 
 	return nil
 }
 
-func retryTransaction(ctx context.Context, operation string, transaction func() error) error {
-	const maxAttempts = 3
-	var lastDeadlock error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		err := transaction()
-		if err == nil {
-			if attempt > 1 {
-				recordRetry(ctx, "info", "recovery", operation, withDatabaseAttempt(lastDeadlock, operation, attempt-1, maxAttempts), attempt, true)
-			}
-			return nil
-		}
-		err = withDatabaseAttempt(err, operation, attempt, maxAttempts)
-		if !isMySQLDeadlock(err) || attempt == maxAttempts {
-			return err
-		}
-		lastDeadlock = err
-		recordRetry(ctx, "warning", "retry", operation, err, attempt, false)
-		delay := time.Duration(attempt*25+rand.IntN(26)) * time.Millisecond
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
+func retryReplaySafeTx(ctx context.Context, db *sqlx.DB, operation string, work func(*sqlx.Tx) error) error {
+	attempt, err := databasepkg.RetryReplaySafeTx(ctx, db, work)
+	if err == nil {
+		return nil
 	}
-	panic("unreachable")
-}
-
-func recordRetry(ctx context.Context, severity, kind, operation string, err error, attempt int, recovered bool) {
-	diagnostic := TechnicalDiagnostic(err)
-	diagnostic.TxAttempt = attempt
-	details, _ := json.Marshal(map[string]any{"database": diagnostic})
-	event := ingestiondiag.Event(ctx)
-	event.Severity, event.EventKind, event.Class, event.Operation = severity, kind, "persistence", operation
-	if event.Step == "" {
-		event.Step = operation
-	}
-	event.Attempt = uint16(attempt)
-	event.ErrorType = fmt.Sprintf("%T", errors.Unwrap(err))
-	event.ErrorMessage = diagnostic.Message
-	event.AggregationScope = "persistence_retry"
-	event.AggregationKey = ingestionrun.TechnicalFingerprint(operation, diagnostic.Table, fmt.Sprint(diagnostic.MySQLNumber), diagnostic.SQLState, fmt.Sprint(attempt), kind, fmt.Sprint(recovered))
-	event.Details = details
-	if kind == "recovery" {
-		event.Recovered = &recovered
-	}
-	ingestiondiag.Record(ctx, event, true)
-}
-
-func isMySQLDeadlock(err error) bool {
-	var mysqlError *mysql.MySQLError
-	return errors.As(err, &mysqlError) && mysqlError.Number == 1213
+	return withDatabaseAttempt(err, operation, attempt, databasepkg.ReplaySafeMaxAttempts)
 }

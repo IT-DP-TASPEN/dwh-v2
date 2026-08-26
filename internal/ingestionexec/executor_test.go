@@ -6,16 +6,53 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/ibldzn/go-admin/internal/fincloud"
 	"github.com/ibldzn/go-admin/internal/ingestion"
+	"github.com/ibldzn/go-admin/internal/ingestiondiag"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 )
+
+func TestProgressPersistenceFailureAndDiagnosticFailureAreNonFatal(t *testing.T) {
+	for _, number := range []uint16{1205, 1213} {
+		t.Run(fmt.Sprint(number), func(t *testing.T) {
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			calls := 0
+			executor := &Executor{logger: logger, updateProgress: func(context.Context, uint64, string, ingestionrun.Progress, *ingestionrun.MapperDiagnostics) error {
+				calls++
+				return &mysql.MySQLError{Number: number, Message: "transaction concurrency failure"}
+			}}
+			run := ingestionrun.Run{ID: 9, JobKey: "saving_detail", OwnerID: "owner"}
+			recorder := newRunDiagnosticRecorder(failingTechnicalWriter{err: errors.New("diagnostic persistence unavailable")}, logger, run.ID, run.JobKey)
+			ctx := ingestiondiag.WithRecorder(context.Background(), recorder.record, run.ID, run.JobKey)
+			enabled := true
+			if err := executor.persistProgress(ctx, run, ingestionrun.Progress{Total: 1}, nil, &enabled); err != nil || enabled {
+				t.Fatalf("first progress error=%v enabled=%v", err, enabled)
+			}
+			if err := executor.persistProgress(ctx, run, ingestionrun.Progress{Total: 1}, nil, &enabled); err != nil || calls != 1 {
+				t.Fatalf("degraded progress hammered persistence: calls=%d error=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestProgressOwnershipLossRemainsFatal(t *testing.T) {
+	executor := &Executor{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), updateProgress: func(context.Context, uint64, string, ingestionrun.Progress, *ingestionrun.MapperDiagnostics) error {
+		return ingestionrun.ErrOwnershipLost
+	}}
+	enabled := true
+	err := executor.persistProgress(context.Background(), ingestionrun.Run{ID: 1, OwnerID: "old"}, ingestionrun.Progress{}, nil, &enabled)
+	if !errors.Is(err, ingestionrun.ErrOwnershipLost) || !enabled {
+		t.Fatalf("ownership error=%v enabled=%v", err, enabled)
+	}
+}
 
 func TestMaintenanceUsesOnlyExactRequestedDirectoryAndPreservesFailureClass(t *testing.T) {
 	requested, _ := ingestion.ParseCalendarDate("2026-08-24")
@@ -69,7 +106,7 @@ func TestMaintenanceUsesOnlyExactRequestedDirectoryAndPreservesFailureClass(t *t
 				t.Fatal(err)
 			}
 			executor := &Executor{client: client}
-			_, err = executor.fetchAndSaveMaintenance(context.Background(), definition, requested)
+			_, err = executor.fetchAndSaveMaintenance(context.Background(), ingestionrun.Run{}, definition, requested)
 			if err == nil || maintenanceErrorClass(err) != test.class {
 				t.Fatalf("error=%v class=%s want=%s", err, maintenanceErrorClass(err), test.class)
 			}

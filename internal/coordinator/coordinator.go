@@ -26,9 +26,17 @@ type Coordinator struct {
 	workers  int
 	logger   *slog.Logger
 
-	mu    sync.Mutex
-	local map[uint64]context.CancelCauseFunc
+	mu      sync.Mutex
+	local   map[uint64]context.CancelCauseFunc
+	parents map[uint64]string
 }
+
+const (
+	ingestionHeartbeatInterval = 5 * time.Second
+	ingestionLease             = 2 * time.Minute
+	ingestionRecoveryInterval  = 40 * time.Second
+	ingestionRecoveryBatch     = 256
+)
 
 func New(ctx context.Context, db *sqlx.DB, client *fincloud.Client, logger *slog.Logger) (*Coordinator, error) {
 	if db == nil || client == nil || logger == nil {
@@ -56,7 +64,8 @@ func New(ctx context.Context, db *sqlx.DB, client *fincloud.Client, logger *slog
 	if err != nil {
 		return nil, err
 	}
-	return &Coordinator{runs: runs, executor: executor, details: details, ownerID: ownerID, workers: settings.MaxRunningJobs, logger: logger, local: map[uint64]context.CancelCauseFunc{}}, nil
+	return &Coordinator{runs: runs, executor: executor, details: details, ownerID: ownerID, workers: settings.MaxRunningJobs, logger: logger,
+		local: map[uint64]context.CancelCauseFunc{}, parents: map[uint64]string{}}, nil
 }
 
 func (coordinator *Coordinator) OwnerID() string { return coordinator.ownerID }
@@ -74,11 +83,30 @@ func (coordinator *Coordinator) SubmitInTx(ctx context.Context, tx *sqlx.Tx, job
 }
 
 func (coordinator *Coordinator) SubmitRunAll(ctx context.Context, from, to ingestion.CalendarDate, trigger ingestionrun.Trigger, reference string, requester *uint64) (uint64, error) {
-	return coordinator.runs.CreateRunAll(ctx, from, to, trigger, reference, requester)
+	id, err := coordinator.runs.CreateRunAll(ctx, from, to, trigger, reference, requester)
+	if err == nil {
+		coordinator.registerParent(ctx, id)
+	}
+	return id, err
 }
 
 func (coordinator *Coordinator) SubmitRunAllManual(ctx context.Context, from, to ingestion.CalendarDate, trigger ingestionrun.Trigger, reference string, requester securityctx.Requester) (uint64, error) {
-	return coordinator.runs.CreateRunAllManual(ctx, from, to, trigger, reference, requester)
+	id, err := coordinator.runs.CreateRunAllManual(ctx, from, to, trigger, reference, requester)
+	if err == nil {
+		coordinator.registerParent(ctx, id)
+	}
+	return id, err
+}
+
+func (coordinator *Coordinator) registerParent(ctx context.Context, id uint64) {
+	run, err := coordinator.runs.Get(ctx, id)
+	if err != nil || run.Kind != ingestionrun.KindRunAllParent || run.Status != ingestionrun.StatusRunning || run.OwnerID == "" {
+		coordinator.logger.Warn("register Run All parent ownership", "run_id", id, "error", err)
+		return
+	}
+	coordinator.mu.Lock()
+	coordinator.parents[id] = run.OwnerID
+	coordinator.mu.Unlock()
 }
 
 func (coordinator *Coordinator) Cancel(ctx context.Context, runID uint64, reason string, requester securityctx.Requester) error {
@@ -98,7 +126,7 @@ func (coordinator *Coordinator) Run(ctx context.Context) {
 		go func() { defer wait.Done(); coordinator.worker(ctx, executionCtx) }()
 	}
 	wait.Add(3)
-	go func() { defer wait.Done(); coordinator.supervise(ctx) }()
+	go func() { defer wait.Done(); coordinator.recoverStale(ctx) }()
 	go func() { defer wait.Done(); coordinator.reconcile(ctx) }()
 	go func() { defer wait.Done(); coordinator.cleanupDetailStaging(ctx) }()
 	<-ctx.Done()
@@ -110,8 +138,17 @@ func (coordinator *Coordinator) cleanupDetailStaging(ctx context.Context) {
 	cleanup := func() {
 		cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		if err := coordinator.details.CleanupTerminal(cleanupCtx, 100); err != nil && ctx.Err() == nil {
-			coordinator.logger.Warn("clean terminal Detail staging", "error", err)
+		for cleanupCtx.Err() == nil {
+			deleted, err := coordinator.details.CleanupTerminal(cleanupCtx, 100)
+			if err != nil {
+				if ctx.Err() == nil {
+					coordinator.logger.Warn("clean terminal Detail staging", "error", err)
+				}
+				return
+			}
+			if deleted == 0 {
+				return
+			}
 		}
 	}
 	cleanup()
@@ -129,7 +166,13 @@ func (coordinator *Coordinator) cleanupDetailStaging(ctx context.Context) {
 
 func (coordinator *Coordinator) worker(ctx, executionCtx context.Context) {
 	for ctx.Err() == nil {
-		run, err := coordinator.runs.Claim(ctx, coordinator.ownerID)
+		attemptOwner, ownerErr := ingestionrun.NewOwnerID()
+		if ownerErr != nil {
+			coordinator.logger.Error("create ingestion owner", "error", ownerErr)
+			wait(ctx, time.Second)
+			continue
+		}
+		run, err := coordinator.runs.Claim(ctx, attemptOwner)
 		if err != nil {
 			if ctx.Err() == nil {
 				coordinator.logger.Error("claim ingestion run", "error", err)
@@ -145,14 +188,26 @@ func (coordinator *Coordinator) worker(ctx, executionCtx context.Context) {
 		coordinator.mu.Lock()
 		coordinator.local[run.ID] = cancel
 		coordinator.mu.Unlock()
-		result := coordinator.executor.Execute(runCtx, *run, coordinator.ownerID)
+		heartbeatDone := make(chan struct{})
+		go coordinator.heartbeat(runCtx, cancel, *run, heartbeatDone)
+		result := coordinator.executor.Execute(runCtx, *run, attemptOwner)
 		coordinator.mu.Lock()
 		delete(coordinator.local, run.ID)
 		coordinator.mu.Unlock()
-		cancel(nil)
 		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		err = coordinator.runs.Finish(finishCtx, run.ID, coordinator.ownerID, result.Status, result.Error)
+		err = coordinator.runs.Finish(finishCtx, run.ID, attemptOwner, result.Status, result.Error)
 		finishCancel()
+		if errors.Is(err, ingestionrun.ErrTransition) && result.Status == ingestionrun.StatusSucceeded {
+			finishCtx, finishCancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			err = coordinator.runs.Finish(finishCtx, run.ID, attemptOwner, ingestionrun.StatusCancelled,
+				ingestionrun.SafeError{Class: "cancelled", Message: "run cancellation requested", Step: "finish"})
+			finishCancel()
+		}
+		cancel(nil)
+		<-heartbeatDone
+		if run.ParentRunID != nil {
+			coordinator.reconcileOwnedParent(ctx, *run.ParentRunID)
+		}
 		if err != nil && !errors.Is(err, ingestionrun.ErrTransition) {
 			coordinator.logger.Error("finish ingestion run", "run_id", run.ID, "job_key", run.JobKey, "error", err)
 		}
@@ -166,48 +221,155 @@ func (coordinator *Coordinator) worker(ctx, executionCtx context.Context) {
 	}
 }
 
-func (coordinator *Coordinator) supervise(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
+func (coordinator *Coordinator) heartbeat(ctx context.Context, cancel context.CancelCauseFunc, run ingestionrun.Run, done chan<- struct{}) {
+	defer close(done)
+	lastProof := time.Now()
+	ticker := time.NewTicker(ingestionHeartbeatInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ids, err := coordinator.runs.HeartbeatAndCancellations(ctx, coordinator.ownerID)
+			heartbeatCtx, heartbeatCancel := context.WithTimeout(ctx, 5*time.Second)
+			state, err := coordinator.runs.Heartbeat(heartbeatCtx, run.ID, run.OwnerID)
+			heartbeatCancel()
 			if err != nil {
-				coordinator.logger.Error("supervise ingestion runs", "error", err)
+				coordinator.logger.Warn("heartbeat ingestion run", "run_id", run.ID, "error", err)
+				if time.Since(lastProof) >= ingestionLease {
+					cancel(ingestionrun.ErrLeaseUnproven)
+					return
+				}
 				continue
 			}
-			coordinator.mu.Lock()
-			for _, id := range ids {
-				if cancel := coordinator.local[id]; cancel != nil {
-					cancel(ingestionrun.ErrCancellationRequested)
-				}
+			if !state.Owned {
+				cancel(ingestionrun.ErrOwnershipLost)
+				return
 			}
-			coordinator.mu.Unlock()
+			lastProof = time.Now()
+			if state.CancelRequested {
+				cancel(ingestionrun.ErrCancellationRequested)
+				return
+			}
 		}
 	}
 }
 
-func (coordinator *Coordinator) reconcile(ctx context.Context) {
-	ticker := time.NewTicker(250 * time.Millisecond)
+func (coordinator *Coordinator) recoverStale(ctx context.Context) {
+	coordinator.recoverStaleSweep(ctx)
+	ticker := time.NewTicker(ingestionRecoveryInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for {
-				changed, err := coordinator.runs.ReconcileOneParent(ctx)
-				if err != nil {
-					coordinator.logger.Error("reconcile Run All", "error", err)
-					break
-				}
-				if !changed {
-					break
-				}
+			coordinator.recoverStaleSweep(ctx)
+		}
+	}
+}
+
+func (coordinator *Coordinator) recoverStaleSweep(ctx context.Context) int {
+	defer coordinator.reconcileOwnedParents(ctx)
+	recovered := 0
+	for range ingestionRecoveryBatch {
+		owner, err := ingestionrun.NewOwnerID()
+		if err != nil {
+			coordinator.logger.Error("create recovery owner", "error", err)
+			return recovered
+		}
+		recoveryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		found, err := coordinator.runs.RecoverOneStale(recoveryCtx, ingestionLease, owner)
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				coordinator.logger.Error("recover stale ingestion run", "error", err)
 			}
+			return recovered
+		}
+		if found == nil {
+			return recovered
+		}
+		recovered++
+		coordinator.mu.Lock()
+		if found.Kind == ingestionrun.KindRunAllParent {
+			coordinator.parents[found.RunID] = found.NewOwner
+		}
+		if stop := coordinator.local[found.RunID]; stop != nil {
+			stop(ingestionrun.ErrOwnershipLost)
+		}
+		coordinator.mu.Unlock()
+		jobKey := found.JobKey
+		if jobKey == "" {
+			jobKey = "run_all_parent"
+		}
+		diagnosticCtx, diagnosticCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		err = coordinator.runs.AppendTechnicalEvent(diagnosticCtx, ingestionrun.TechnicalEvent{
+			RunID: found.RunID, Severity: "warning", EventKind: "recovery", Recovered: boolPointer(true),
+			Class: "ownership", Step: "recover_stale", Operation: "recover_stale", JobKey: jobKey,
+			ErrorMessage: "Stale execution ownership recovered automatically.",
+		})
+		diagnosticCancel()
+		if err != nil {
+			coordinator.logger.Warn("persist stale recovery diagnostic", "run_id", found.RunID, "error", err)
+		}
+	}
+	return recovered
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func (coordinator *Coordinator) reconcile(ctx context.Context) {
+	ticker := time.NewTicker(ingestionHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			coordinator.reconcileOwnedParents(ctx)
+		}
+	}
+}
+
+func (coordinator *Coordinator) reconcileOwnedParents(ctx context.Context) {
+	coordinator.mu.Lock()
+	parents := make(map[uint64]string, len(coordinator.parents))
+	for id, owner := range coordinator.parents {
+		parents[id] = owner
+	}
+	coordinator.mu.Unlock()
+	for id, owner := range parents {
+		coordinator.reconcileParent(ctx, id, owner)
+	}
+}
+
+func (coordinator *Coordinator) reconcileOwnedParent(ctx context.Context, id uint64) {
+	coordinator.mu.Lock()
+	owner := coordinator.parents[id]
+	coordinator.mu.Unlock()
+	if owner != "" {
+		coordinator.reconcileParent(ctx, id, owner)
+	}
+}
+
+func (coordinator *Coordinator) reconcileParent(ctx context.Context, id uint64, owner string) {
+	for ctx.Err() == nil {
+		changed, err := coordinator.runs.ReconcileParent(ctx, id, owner)
+		if errors.Is(err, ingestionrun.ErrOwnershipLost) {
+			coordinator.mu.Lock()
+			if coordinator.parents[id] == owner {
+				delete(coordinator.parents, id)
+			}
+			coordinator.mu.Unlock()
+			return
+		}
+		if err != nil {
+			coordinator.logger.Error("reconcile Run All", "run_id", id, "error", err)
+			return
+		}
+		if !changed {
+			return
 		}
 	}
 }

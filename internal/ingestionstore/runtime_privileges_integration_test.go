@@ -61,7 +61,7 @@ func TestRuntimePrivilegesSupportDynamicAdditiveWithoutDrop(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := repository.SaveSnapshot(ctx, MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: parsed}); err != nil {
+		if err := repository.saveSnapshotWithoutRunFence(ctx, MaintenanceSnapshot{RequestedDate: date, FileName: "cbrcustomer.csv", Parsed: parsed}); err != nil {
 			t.Fatalf("runtime dynamic additive load: %v", err)
 		}
 	}

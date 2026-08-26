@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ibldzn/go-admin/internal/fincloud"
 	"github.com/ibldzn/go-admin/internal/ingestion"
+	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/ingestionstore"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 )
@@ -58,7 +60,15 @@ func TestExactMaintenanceReportPublishesValidEmptySnapshot(t *testing.T) {
 	}
 	executor := &Executor{client: client, maintenance: ingestionstore.NewMaintenanceRepository(db)}
 	requested, _ := ingestion.ParseCalendarDate("2026-08-24")
-	rows, err := executor.fetchAndSaveMaintenance(context.Background(), definition, requested)
+	owner := strings.Repeat("a", 64)
+	result, err := db.Exec(`INSERT INTO ingestion_runs
+		(kind,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,owner_id,claimed_at,heartbeat_at,started_at)
+		VALUES ('job',?,'running','maintenance_series_v1',1,JSON_OBJECT(),UNHEX(REPEAT('00',32)),'direct',?,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))`, definition.Key, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := result.LastInsertId()
+	rows, err := executor.fetchAndSaveMaintenance(context.Background(), ingestionrun.Run{ID: uint64(runID), OwnerID: owner}, definition, requested)
 	if err != nil || rows != 0 {
 		t.Fatalf("rows=%d error=%v", rows, err)
 	}

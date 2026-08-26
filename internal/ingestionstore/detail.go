@@ -187,20 +187,13 @@ func (repository *DetailRepository) Stage(ctx context.Context, runID uint64, rec
 	if repository == nil || repository.db == nil || runID == 0 || record.Identifier == "" || record.LastFetchedAt.IsZero() || len(record.RawPayload) == 0 || record.RawChecksum == "" {
 		return fmt.Errorf("complete staged detail is required")
 	}
-	err = retryTransaction(ctx, "stage_detail", func() error {
-		return repository.stageTransaction(ctx, runID, record, specification)
+	err = retryReplaySafeTx(ctx, repository.db, "stage_detail", func(tx *sqlx.Tx) error {
+		return repository.stageTransaction(ctx, tx, runID, record, specification)
 	})
 	return wrapDatabaseError(err, "stage_detail", "replace_staged_detail", specification.stage, 0, 0)
 }
 
-func (repository *DetailRepository) stageTransaction(ctx context.Context, runID uint64, record ingestion.DetailRecord, specification detailSpec) error {
-	tx, err := repository.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin staged detail: %w", err)
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
-
+func (repository *DetailRepository) stageTransaction(ctx context.Context, tx *sqlx.Tx, runID uint64, record ingestion.DetailRecord, specification detailSpec) error {
 	columns := []string{"ingestion_run_id"}
 	values := []any{runID}
 	for _, field := range specification.fields {
@@ -209,9 +202,9 @@ func (repository *DetailRepository) stageTransaction(ctx context.Context, runID 
 		if field.identifier {
 			value = record.Identifier
 		}
-		value, err = detailSQLValue(value, field)
-		if err != nil {
-			return fmt.Errorf("%s: %w", field.name, err)
+		value, valueErr := detailSQLValue(value, field)
+		if valueErr != nil {
+			return fmt.Errorf("%s: %w", field.name, valueErr)
 		}
 		values = append(values, value)
 	}
@@ -271,10 +264,6 @@ func (repository *DetailRepository) stageTransaction(ctx context.Context, runID 
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit staged detail: %w", err)
-	}
-	committed = true
 	return nil
 }
 
@@ -323,8 +312,8 @@ func (repository *DetailRepository) Publish(ctx context.Context, runID uint64, o
 	if repository == nil || repository.db == nil || runID == 0 || ownerID == "" {
 		return fmt.Errorf("complete detail publication identity is required")
 	}
-	err = retryTransaction(ctx, "publish_detail", func() error {
-		return repository.publishTransaction(ctx, runID, ownerID, expected, specification)
+	err = retryReplaySafeTx(ctx, repository.db, "publish_detail", func(tx *sqlx.Tx) error {
+		return repository.publishTransaction(ctx, tx, runID, ownerID, expected, specification)
 	})
 	if err == nil {
 		return nil
@@ -341,31 +330,19 @@ func (repository *DetailRepository) Publish(ctx context.Context, runID uint64, o
 	return wrapDatabaseError(err, "publish_detail", "publish_current_detail", specification.table, 0, 0)
 }
 
-func (repository *DetailRepository) publishTransaction(ctx context.Context, runID uint64, ownerID string, expected uint64, specification detailSpec) error {
-	tx, err := repository.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin Detail publication: %w", err)
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
-
+func (repository *DetailRepository) publishTransaction(ctx context.Context, tx *sqlx.Tx, runID uint64, ownerID string, expected uint64, specification detailSpec) error {
 	var run struct {
-		JobKey            string `db:"job_key"`
-		Status            string `db:"status"`
-		OwnerID           string `db:"owner_id"`
-		CancelRequested   bool   `db:"cancel_requested"`
-		ProgressTotal     uint64 `db:"progress_total"`
-		ProgressStarted   uint64 `db:"progress_started"`
-		ProgressSucceeded uint64 `db:"progress_succeeded"`
-		ProgressFailed    uint64 `db:"progress_failed"`
+		JobKey          string `db:"job_key"`
+		Status          string `db:"status"`
+		OwnerID         string `db:"owner_id"`
+		CancelRequested bool   `db:"cancel_requested"`
 	}
 	if err := tx.GetContext(ctx, &run, `SELECT COALESCE(job_key,'') job_key,status,COALESCE(owner_id,'') owner_id,
-		cancel_requested_at IS NOT NULL cancel_requested,progress_total,progress_started,progress_succeeded,progress_failed
-		FROM ingestion_runs WHERE id=? FOR UPDATE`, runID); err != nil {
-		return wrapDatabaseError(err, "publish_detail", "lock_ingestion_run", "ingestion_runs", 0, 0)
+		cancel_requested_at IS NOT NULL cancel_requested
+		FROM ingestion_runs WHERE id=?`, runID); err != nil {
+		return wrapDatabaseError(err, "publish_detail", "check_ingestion_run", "ingestion_runs", 0, 0)
 	}
-	if run.JobKey != specification.jobKey || run.Status != string(ingestionrun.StatusRunning) || run.OwnerID != ownerID || run.CancelRequested ||
-		run.ProgressTotal != expected || run.ProgressStarted != expected || run.ProgressSucceeded != expected || run.ProgressFailed != 0 {
+	if run.JobKey != specification.jobKey || run.Status != string(ingestionrun.StatusRunning) || run.OwnerID != ownerID || run.CancelRequested {
 		return fmt.Errorf("Detail candidate is not complete and publishable")
 	}
 	quotedStage, _ := quoteIdentifier(specification.stage)
@@ -382,10 +359,6 @@ func (repository *DetailRepository) publishTransaction(ctx context.Context, runI
 	if err := ingestionrun.FinishSucceededInTx(ctx, tx, runID, ownerID); err != nil {
 		return wrapDatabaseError(err, "publish_detail", "finish_published_run", "ingestion_runs", 0, 0)
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit Detail publication: %w", err)
-	}
-	committed = true
 	return nil
 }
 
@@ -585,50 +558,40 @@ func (repository *DetailRepository) clearRun(ctx context.Context, runID uint64, 
 	if repository == nil || repository.db == nil || runID == 0 {
 		return fmt.Errorf("Detail staging cleanup requires a run")
 	}
-	return retryTransaction(ctx, operation, func() error {
-		tx, err := repository.db.BeginTxx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		committed := false
-		defer rollbackUnlessCommitted(tx, &committed)
+	return retryReplaySafeTx(ctx, repository.db, operation, func(tx *sqlx.Tx) error {
 		for _, specification := range detailSpecifications {
 			if _, err := tx.ExecContext(ctx, "DELETE FROM `"+specification.stage+"` WHERE ingestion_run_id=?", runID); err != nil {
 				return wrapDatabaseError(err, operation, "delete_run_staging", specification.stage, 0, 0)
 			}
 		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		committed = true
 		return nil
 	})
 }
 
-func (repository *DetailRepository) CleanupTerminal(ctx context.Context, limit int) error {
+func (repository *DetailRepository) CleanupTerminal(ctx context.Context, limit int) (int64, error) {
 	if repository == nil || repository.db == nil || limit < 1 {
-		return fmt.Errorf("positive Detail staging cleanup limit is required")
+		return 0, fmt.Errorf("positive Detail staging cleanup limit is required")
 	}
-	return retryTransaction(ctx, "cleanup_detail_staging", func() error {
-		tx, err := repository.db.BeginTxx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		committed := false
-		defer rollbackUnlessCommitted(tx, &committed)
+	var deleted int64
+	err := retryReplaySafeTx(ctx, repository.db, "cleanup_detail_staging", func(tx *sqlx.Tx) error {
+		var attemptDeleted int64
 		for _, specification := range detailSpecifications {
 			query := "DELETE FROM `" + specification.stage + "` WHERE ingestion_run_id IN (SELECT ingestion_run_id FROM (" +
-				"SELECT DISTINCT candidate.ingestion_run_id FROM `" + specification.stage + "` candidate JOIN ingestion_runs run ON run.id=candidate.ingestion_run_id " +
-				"WHERE run.status IN ('succeeded','failed','skipped','cancelled','abandoned','completed','completed_with_skips') ORDER BY candidate.ingestion_run_id LIMIT ?" +
+				"SELECT DISTINCT candidate.ingestion_run_id FROM `" + specification.stage + "` candidate LEFT JOIN ingestion_runs run ON run.id=candidate.ingestion_run_id " +
+				"WHERE run.id IS NULL OR run.status IN ('succeeded','failed','skipped','cancelled','abandoned','completed','completed_with_skips') ORDER BY candidate.ingestion_run_id LIMIT ?" +
 				") stale_runs)"
-			if _, err := tx.ExecContext(ctx, query, limit); err != nil {
+			result, err := tx.ExecContext(ctx, query, limit)
+			if err != nil {
 				return wrapDatabaseError(err, "cleanup_detail_staging", "delete_terminal_staging", specification.stage, 0, 0)
 			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			attemptDeleted += affected
 		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		committed = true
+		deleted = attemptDeleted
 		return nil
 	})
+	return deleted, err
 }

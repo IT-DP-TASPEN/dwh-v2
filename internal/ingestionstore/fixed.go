@@ -11,10 +11,12 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
 	"github.com/ibldzn/go-admin/internal/ingestion"
+	"github.com/ibldzn/go-admin/internal/ingestionrun"
 )
 
 const (
@@ -50,21 +52,15 @@ func (repository *FixedRepository) BeginLoad(ctx context.Context, ingestionRunID
 		return 0, err
 	}
 	var loadID uint64
-	err = retryTransaction(ctx, "begin_fixed_load", func() error {
+	err = retryReplaySafeTx(ctx, repository.db, "begin_fixed_load", func(tx *sqlx.Tx) error {
 		var transactionErr error
-		loadID, transactionErr = repository.beginLoadTransaction(ctx, ingestionRunID, plan, manifest)
+		loadID, transactionErr = repository.beginLoadTransaction(ctx, tx, ingestionRunID, plan, manifest)
 		return wrapDatabaseError(transactionErr, "begin_fixed_load", "create_fixed_load", "fixed_report_loads", 0, 0)
 	})
 	return loadID, wrapDatabaseError(err, "begin_fixed_load", "create_fixed_load", "fixed_report_loads", 0, 0)
 }
 
-func (repository *FixedRepository) beginLoadTransaction(ctx context.Context, ingestionRunID uint64, plan ingestion.FixedPlan, manifest [32]byte) (uint64, error) {
-	tx, err := repository.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("begin fixed load: %w", err)
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
+func (repository *FixedRepository) beginLoadTransaction(ctx context.Context, tx *sqlx.Tx, ingestionRunID uint64, plan ingestion.FixedPlan, manifest [32]byte) (uint64, error) {
 	result, err := tx.ExecContext(ctx, `INSERT INTO fixed_report_loads
 		(ingestion_run_id, job_key, period_from, period_to, status, expected_member_count, manifest_checksum)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`, ingestionRunID, plan.JobKey, plan.Range.From.String(), plan.Range.To.String(), fixedLoadPending, len(plan.Members), manifest[:])
@@ -82,10 +78,6 @@ func (repository *FixedRepository) beginLoadTransaction(ctx context.Context, ing
 	if err := insertRows(ctx, tx, "fixed_report_load_members", []string{"load_id", "member_key", "status"}, memberRows); err != nil {
 		return 0, err
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit fixed load: %w", err)
-	}
-	committed = true
 	return uint64(loadID), nil
 }
 
@@ -100,21 +92,15 @@ func (repository *FixedRepository) StageMember(ctx context.Context, definition i
 	if loadID == 0 || descriptor.MemberKey == "" || len(segments) == 0 {
 		return fmt.Errorf("load, member, and at least one source segment are required")
 	}
-	err = retryTransaction(ctx, "stage_fixed_member", func() error {
-		return wrapDatabaseError(repository.stageMemberTransaction(ctx, specification, definition, loadID, descriptor, segments),
+	err = retryReplaySafeTx(ctx, repository.db, "stage_fixed_member", func(tx *sqlx.Tx) error {
+		return wrapDatabaseError(repository.stageMemberTransaction(ctx, tx, specification, definition, loadID, descriptor, segments),
 			"stage_fixed_member", "insert_staging_rows", specification.stagingTable, 0, 0)
 	})
 	return wrapDatabaseError(err, "stage_fixed_member", "insert_staging_rows", specification.stagingTable, 0, 0)
 }
 
-func (repository *FixedRepository) stageMemberTransaction(ctx context.Context, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segments []FixedSegment) error {
+func (repository *FixedRepository) stageMemberTransaction(ctx context.Context, tx *sqlx.Tx, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segments []FixedSegment) error {
 	memberKey := descriptor.MemberKey
-	tx, err := repository.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin fixed member staging: %w", err)
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
 	var memberStatus string
 	if err := tx.GetContext(ctx, &memberStatus, `SELECT status FROM fixed_report_load_members WHERE load_id = ? AND member_key = ? FOR UPDATE`, loadID, memberKey); err != nil {
 		return fmt.Errorf("lock fixed member: %w", err)
@@ -189,36 +175,49 @@ func (repository *FixedRepository) stageMemberTransaction(ctx context.Context, s
 		WHERE load_id = ? AND member_key = ?`, fixedMemberSuccess, len(rows), checksum, loadID, memberKey); err != nil {
 		return fmt.Errorf("complete fixed member: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit fixed member: %w", err)
-	}
-	committed = true
 	return nil
 }
 
-func (repository *FixedRepository) Promote(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64) error {
+func (repository *FixedRepository) Promote(ctx context.Context, runID uint64, ownerID string, definition ingestion.FixedDefinition, loadID uint64) error {
+	return repository.promote(ctx, runID, ownerID, definition, loadID, true)
+}
+
+// promoteWithoutRunFence exercises storage publication independently in integration tests.
+// Production publication must use Promote so result data and succeeded commit together.
+func (repository *FixedRepository) promoteWithoutRunFence(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64) error {
+	return repository.promote(ctx, 0, "", definition, loadID, false)
+}
+
+func (repository *FixedRepository) promote(ctx context.Context, runID uint64, ownerID string, definition ingestion.FixedDefinition, loadID uint64, fenced bool) error {
 	if repository == nil || repository.db == nil {
 		return fmt.Errorf("fixed repository is not configured")
+	}
+	if fenced && (runID == 0 || ownerID == "") {
+		return fmt.Errorf("complete fixed publication ownership is required")
 	}
 	specification, err := fixedStorageFor(definition)
 	if err != nil {
 		return err
 	}
-	err = retryTransaction(ctx, "promote_fixed_load", func() error {
-		return wrapDatabaseError(repository.promoteTransaction(ctx, specification, definition, loadID),
+	err = retryReplaySafeTx(ctx, repository.db, "promote_fixed_load", func(tx *sqlx.Tx) error {
+		return wrapDatabaseError(repository.promoteTransaction(ctx, tx, runID, ownerID, specification, definition, loadID, fenced),
 			"promote_fixed_load", "promote_fixed_load", specification.finalTable, 0, 0)
 	})
+	if err != nil && fenced {
+		var status string
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		checkErr := repository.db.GetContext(checkCtx, &status, `SELECT status FROM ingestion_runs WHERE id=?`, runID)
+		cancel()
+		if checkErr == nil && status == string(ingestionrun.StatusSucceeded) {
+			return nil
+		}
+	}
 	return wrapDatabaseError(err, "promote_fixed_load", "promote_fixed_load", specification.finalTable, 0, 0)
 }
 
-func (repository *FixedRepository) promoteTransaction(ctx context.Context, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64) error {
-	tx, err := repository.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin fixed promotion: %w", err)
-	}
-	committed := false
-	defer rollbackUnlessCommitted(tx, &committed)
+func (repository *FixedRepository) promoteTransaction(ctx context.Context, tx *sqlx.Tx, runID uint64, ownerID string, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64, fenced bool) error {
 	var load struct {
+		IngestionRunID      uint64 `db:"ingestion_run_id"`
 		JobKey              string `db:"job_key"`
 		From                string `db:"period_from"`
 		To                  string `db:"period_to"`
@@ -226,7 +225,7 @@ func (repository *FixedRepository) promoteTransaction(ctx context.Context, speci
 		ExpectedMemberCount int    `db:"expected_member_count"`
 		Manifest            []byte `db:"manifest_checksum"`
 	}
-	if err := tx.GetContext(ctx, &load, `SELECT l.job_key,
+	if err := tx.GetContext(ctx, &load, `SELECT l.ingestion_run_id,l.job_key,
 		DATE_FORMAT(l.period_from, '%Y-%m-%d') period_from,
 		DATE_FORMAT(l.period_to, '%Y-%m-%d') period_to,
 		l.status, l.expected_member_count, l.manifest_checksum
@@ -240,6 +239,9 @@ func (repository *FixedRepository) promoteTransaction(ctx context.Context, speci
 	}
 	if load.JobKey != definition.Key || load.ExpectedMemberCount != len(members) {
 		return fmt.Errorf("fixed load is incomplete or belongs to another job")
+	}
+	if fenced && load.IngestionRunID != runID {
+		return fmt.Errorf("fixed load belongs to another ingestion run")
 	}
 	for _, member := range members {
 		if member.Status != fixedMemberSuccess {
@@ -263,10 +265,11 @@ func (repository *FixedRepository) promoteTransaction(ctx context.Context, speci
 	if active.Valid {
 		activeLoadID := uint64(active.Int64)
 		if activeLoadID == loadID {
-			if err := tx.Commit(); err != nil {
-				return err
+			if fenced {
+				if err := ingestionrun.FinishSucceededInTx(ctx, tx, runID, ownerID); err != nil {
+					return err
+				}
 			}
-			committed = true
 			return nil
 		}
 		if activeLoadID > loadID {
@@ -310,10 +313,11 @@ func (repository *FixedRepository) promoteTransaction(ctx context.Context, speci
 	if _, err := tx.ExecContext(ctx, `UPDATE fixed_report_loads SET status = ?, published_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, fixedLoadPublished, loadID); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit fixed promotion: %w", err)
+	if fenced {
+		if err := ingestionrun.FinishSucceededInTx(ctx, tx, runID, ownerID); err != nil {
+			return err
+		}
 	}
-	committed = true
 	return nil
 }
 
