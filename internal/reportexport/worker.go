@@ -138,7 +138,11 @@ func (worker *Worker) execute(parent context.Context, job Job) {
 		}
 		defer sink.Abort()
 		stage = "query"
-		if err := worker.engine.Stream(attemptContext, database, job.SQLText, snapshot.Parameters, snapshot.Input, sink); err != nil {
+		normalized, err := reporting.NormalizeSnapshotParameters(snapshot.Parameters, snapshot.Input)
+		if err != nil {
+			return err
+		}
+		if err := worker.engine.StreamNormalized(attemptContext, database, job.SQLText, snapshot.Parameters, normalized, sink); err != nil {
 			return err
 		}
 		stage = "workbook"

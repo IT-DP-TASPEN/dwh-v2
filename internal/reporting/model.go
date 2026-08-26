@@ -63,6 +63,13 @@ const (
 	ParameterMultipleOption ParameterType = "multiple_option"
 )
 
+type OptionSource string
+
+const (
+	OptionSourceStatic  OptionSource = "static"
+	OptionSourceDynamic OptionSource = "dynamic"
+)
+
 type ParameterOption struct {
 	ID           uint64 `db:"id"`
 	ParameterID  uint64 `db:"parameter_id"`
@@ -72,15 +79,17 @@ type ParameterOption struct {
 }
 
 type Parameter struct {
-	ID           uint64          `db:"id"`
-	ReportID     uint64          `db:"report_id"`
-	Key          string          `db:"parameter_key"`
-	Label        string          `db:"label"`
-	Type         ParameterType   `db:"parameter_type"`
-	Required     bool            `db:"required"`
-	DefaultValue json.RawMessage `db:"default_value"`
-	DisplayOrder uint16          `db:"display_order"`
-	Options      []ParameterOption
+	ID               uint64          `db:"id"`
+	ReportID         uint64          `db:"report_id"`
+	Key              string          `db:"parameter_key"`
+	Label            string          `db:"label"`
+	Type             ParameterType   `db:"parameter_type"`
+	OptionSource     OptionSource    `db:"option_source"`
+	DynamicOptionSQL string          `db:"dynamic_option_sql"`
+	Required         bool            `db:"required"`
+	DefaultValue     json.RawMessage `db:"default_value"`
+	DisplayOrder     uint16          `db:"display_order"`
+	Options          []ParameterOption
 }
 
 type Template struct {
@@ -131,4 +140,17 @@ type InteractiveResult struct {
 	TruncationReason string   `json:"truncation_reason,omitempty"`
 	CellPreviews     int      `json:"cell_previews,omitempty"`
 	EncodedBytes     int      `json:"encoded_bytes"`
+}
+
+type OptionItem struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
+type OptionLoad struct {
+	State        string       `json:"state"`
+	Dependencies []string     `json:"dependencies"`
+	Options      []OptionItem `json:"options"`
+	WaitingFor   string       `json:"waiting_for,omitempty"`
+	Warning      string       `json:"warning,omitempty"`
 }

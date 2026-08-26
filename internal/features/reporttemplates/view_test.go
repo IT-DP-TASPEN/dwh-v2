@@ -21,8 +21,8 @@ func TestTemplateFormRendersSelectedDatasource(t *testing.T) {
 	if err := renderer.RenderPage(recorder, 200, "features/reporttemplates/form", adminshell.PageData{Title: "Template", AppName: "Test", Data: data}); err != nil {
 		t.Fatal(err)
 	}
-	if body := recorder.Body.String(); !strings.Contains(body, `value="7" selected`) {
-		t.Fatalf("datasource was not selected: %s", body)
+	if body := recorder.Body.String(); !strings.Contains(body, `value="7" selected`) || !strings.Contains(body, "tests use the currently saved datasource") {
+		t.Fatalf("datasource boundary was not rendered: %s", body)
 	}
 }
 
@@ -91,6 +91,37 @@ func TestDecodeStructuredTestValues(t *testing.T) {
 	}
 	if _, err := decodeTestValues(`{broken`); err == nil || strings.Contains(err.Error(), "JSON") {
 		t.Fatalf("internal JSON parser error leaked: %v", err)
+	}
+}
+
+func TestDynamicOptionDraftRoundTripsThroughStructuredEditor(t *testing.T) {
+	parameters, err := decodeParameters(`[
+		{"key":"province","label":"Province","type":"text","required":true,"default":null},
+		{"key":"city","label":"City","type":"single_option","option_source":"dynamic","dynamic_option_sql":"","required":false,"default":"001"}
+	]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parameters[1].OptionSource != reporting.OptionSourceDynamic || parameters[1].DynamicOptionSQL != "" || len(parameters[1].Options) != 0 {
+		t.Fatalf("dynamic parameter=%+v", parameters[1])
+	}
+	encoded := encodeParameters(parameters)
+	if !strings.Contains(encoded, `"option_source": "dynamic"`) {
+		t.Fatalf("encoded=%s", encoded)
+	}
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	data := FormData{ID: 2, ParametersJSON: encoded, TestValuesJSON: `{}`, Errors: map[string]string{}}
+	if err := renderer.RenderPage(recorder, 200, "features/reporttemplates/form", adminshell.PageData{Title: "Template", AppName: "Test", Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Option Source", "Dynamic Query", "Dynamic option SQL", "Test options", "Available upstream parameters"} {
+		if !strings.Contains(recorder.Body.String(), want) {
+			t.Fatalf("dynamic editor missing %q", want)
+		}
 	}
 }
 

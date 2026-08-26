@@ -47,6 +47,8 @@ type FormData struct {
 	Errors                                                                   map[string]string
 	TestResult                                                               *reporting.InteractiveResult
 	TestResultJSON                                                           template.JS
+	TestOptionsResult                                                        *reporting.OptionLoad
+	TestOptionsIndex                                                         int
 }
 
 func NewHandler(admin *adminshell.Shell, repository *reporting.Repository, service *reporting.Service) *Handler {
@@ -61,6 +63,7 @@ func (handler *Handler) RegisterRoutes(router chi.Router) {
 	router.With(handler.admin.RequirePermission(PermissionUpdate)).Get("/report-templates/{id}/edit", handler.Edit)
 	router.With(handler.admin.RequirePermission(PermissionUpdate)).Post("/report-templates/{id}", handler.Update)
 	router.With(handler.admin.RequirePermission(PermissionUpdate), handler.admin.RequirePermission("reports.execute")).Post("/report-templates/{id}/test", handler.Test)
+	router.With(handler.admin.RequirePermission(PermissionUpdate), handler.admin.RequirePermission("reports.execute")).Post("/report-templates/{id}/test-options", handler.TestOptions)
 	router.With(handler.admin.RequirePermission(PermissionChangeState)).Post("/report-templates/{id}/state", handler.State)
 	router.With(handler.admin.RequirePermission(PermissionManageAccess)).Get("/report-templates/{id}/access", handler.Access)
 	router.With(handler.admin.RequirePermission(PermissionManageAccess)).Post("/report-templates/{id}/access/{userID}", handler.ChangeAccess)
@@ -177,6 +180,37 @@ func (handler *Handler) Test(writer http.ResponseWriter, request *http.Request) 
 	form.TestResult = &result
 	encoded, _ := json.Marshal(result)
 	form.TestResultJSON = template.JS(encoded)
+	handler.renderForm(writer, request, 200, form)
+}
+
+func (handler *Handler) TestOptions(writer http.ResponseWriter, request *http.Request) {
+	id, ok := idParam(request)
+	if !ok {
+		handler.admin.NotFound(writer, request)
+		return
+	}
+	form, input, values, ok := handler.form(writer, request)
+	if !ok {
+		return
+	}
+	form.ID = id
+	target, err := strconv.Atoi(request.PostFormValue("target_index"))
+	if err != nil || target < 0 || target >= len(input.Parameters) {
+		form.Errors["test_options"] = "Choose a dynamic option parameter."
+	}
+	form.TestOptionsIndex = target
+	if len(form.Errors) != 0 {
+		handler.renderForm(writer, request, 422, form)
+		return
+	}
+	principal, _ := browserauth.CurrentPrincipal(request.Context())
+	result, err := handler.service.TestOptions(request.Context(), principal.SecurityContext(), id, input, target, values)
+	if err != nil {
+		form.Errors["test_options"] = publicError(err)
+		handler.renderForm(writer, request, 422, form)
+		return
+	}
+	form.TestOptionsResult = &result
 	handler.renderForm(writer, request, 200, form)
 }
 
@@ -298,13 +332,15 @@ func (handler *Handler) accessData(request *http.Request, reportID uint64) (Acce
 }
 
 type parameterForm struct {
-	Key      string          `json:"key"`
-	Label    string          `json:"label"`
-	Type     string          `json:"type"`
-	Required bool            `json:"required"`
-	Default  json.RawMessage `json:"default"`
-	Order    uint16          `json:"order,omitempty"`
-	Options  []optionForm    `json:"options,omitempty"`
+	Key              string          `json:"key"`
+	Label            string          `json:"label"`
+	Type             string          `json:"type"`
+	OptionSource     string          `json:"option_source,omitempty"`
+	DynamicOptionSQL string          `json:"dynamic_option_sql,omitempty"`
+	Required         bool            `json:"required"`
+	Default          json.RawMessage `json:"default"`
+	Order            uint16          `json:"order,omitempty"`
+	Options          []optionForm    `json:"options,omitempty"`
 }
 type optionForm struct {
 	Value string `json:"value"`
@@ -327,7 +363,12 @@ func decodeParameters(value string) ([]reporting.Parameter, error) {
 		if len(form.Options) > 1<<16 {
 			return nil, fmt.Errorf("Parameter %q has too many options.", form.Key)
 		}
-		result[index] = reporting.Parameter{Key: form.Key, Label: form.Label, Type: reporting.ParameterType(form.Type), Required: form.Required, DefaultValue: form.Default, DisplayOrder: uint16(index)}
+		typeValue := reporting.ParameterType(form.Type)
+		source := reporting.OptionSource(form.OptionSource)
+		if (typeValue == reporting.ParameterSingleOption || typeValue == reporting.ParameterMultipleOption) && source == "" {
+			source = reporting.OptionSourceStatic
+		}
+		result[index] = reporting.Parameter{Key: form.Key, Label: form.Label, Type: typeValue, OptionSource: source, DynamicOptionSQL: form.DynamicOptionSQL, Required: form.Required, DefaultValue: form.Default, DisplayOrder: uint16(index)}
 		for optionIndex, option := range form.Options {
 			result[index].Options = append(result[index].Options, reporting.ParameterOption{Value: option.Value, Label: option.Label, DisplayOrder: uint16(optionIndex)})
 		}
@@ -339,6 +380,13 @@ func encodeParameters(parameters []reporting.Parameter) string {
 	forms := make([]parameterForm, len(parameters))
 	for index, parameter := range parameters {
 		forms[index] = parameterForm{Key: parameter.Key, Label: parameter.Label, Type: string(parameter.Type), Required: parameter.Required, Default: parameter.DefaultValue}
+		if parameter.Type == reporting.ParameterSingleOption || parameter.Type == reporting.ParameterMultipleOption {
+			forms[index].OptionSource = string(parameter.OptionSource)
+			if forms[index].OptionSource == "" {
+				forms[index].OptionSource = string(reporting.OptionSourceStatic)
+			}
+			forms[index].DynamicOptionSQL = parameter.DynamicOptionSQL
+		}
 		for _, option := range parameter.Options {
 			forms[index].Options = append(forms[index].Options, optionForm{Value: option.Value, Label: option.Label})
 		}

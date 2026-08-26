@@ -355,8 +355,15 @@ func replaceParameters(ctx context.Context, tx *sqlx.Tx, reportID uint64, parame
 		if len(parameter.DefaultValue) != 0 {
 			defaultValue = string(parameter.DefaultValue)
 		}
-		result, err := tx.ExecContext(ctx, `INSERT INTO report_parameters (report_id,parameter_key,label,parameter_type,required,default_value,display_order) VALUES (?,?,?,?,?,?,?)`,
-			reportID, parameter.Key, parameter.Label, parameter.Type, parameter.Required, defaultValue, parameter.DisplayOrder)
+		var optionSource, dynamicOptionSQL any
+		if isOptionType(parameter.Type) {
+			optionSource = effectiveOptionSource(parameter)
+			if effectiveOptionSource(parameter) == OptionSourceDynamic {
+				dynamicOptionSQL = parameter.DynamicOptionSQL
+			}
+		}
+		result, err := tx.ExecContext(ctx, `INSERT INTO report_parameters (report_id,parameter_key,label,parameter_type,option_source,dynamic_option_sql,required,default_value,display_order) VALUES (?,?,?,?,?,?,?,?,?)`,
+			reportID, parameter.Key, parameter.Label, parameter.Type, optionSource, dynamicOptionSQL, parameter.Required, defaultValue, parameter.DisplayOrder)
 		if err != nil {
 			return err
 		}
@@ -372,7 +379,7 @@ func replaceParameters(ctx context.Context, tx *sqlx.Tx, reportID uint64, parame
 
 func parameters(ctx context.Context, executor *sqlx.Tx, reportID uint64) ([]Parameter, error) {
 	parameters := make([]Parameter, 0)
-	if err := executor.SelectContext(ctx, &parameters, `SELECT id,report_id,parameter_key,label,parameter_type,required,default_value,display_order FROM report_parameters WHERE report_id=? ORDER BY display_order,id`, reportID); err != nil {
+	if err := executor.SelectContext(ctx, &parameters, `SELECT id,report_id,parameter_key,label,parameter_type,COALESCE(option_source,'') AS option_source,COALESCE(dynamic_option_sql,'') AS dynamic_option_sql,required,default_value,display_order FROM report_parameters WHERE report_id=? ORDER BY display_order,id`, reportID); err != nil {
 		return nil, err
 	}
 	for index := range parameters {

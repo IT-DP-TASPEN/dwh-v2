@@ -17,6 +17,7 @@ var boundedState atomic.Pointer[fakeRawState]
 type fakeRawState struct {
 	rowsClosed, connectionsClosed atomic.Int32
 	rows                          int
+	nextResult                    bool
 }
 type fakeDriver struct{}
 type fakeConn struct{ state *fakeRawState }
@@ -54,6 +55,11 @@ func (rows *fakeRows) Next(destination []driver.Value) error {
 	}
 	rows.read++
 	destination[0] = int64(rows.read)
+	return nil
+}
+func (rows *fakeRows) HasNextResultSet() bool { return rows.state.nextResult }
+func (rows *fakeRows) NextResultSet() error {
+	rows.state.nextResult = false
 	return nil
 }
 
@@ -101,6 +107,17 @@ func TestRawEOFClosesRowsAndKeepsConnectionReusable(t *testing.T) {
 	if state.connectionsClosed.Load() != 1 {
 		t.Fatalf("connection was not returned and closed normally")
 	}
+}
+
+func TestRawRejectsSecondResultSet(t *testing.T) {
+	state := &fakeRawState{rows: 1, nextResult: true}
+	database, connection := fakeDatabase(t, state)
+	err := streamRaw(context.Background(), connection, "CALL report()", nil, &testSink{})
+	if !errors.Is(err, ErrMultipleResultSets) {
+		t.Fatalf("error=%v", err)
+	}
+	_ = connection.Close()
+	_ = database.Close()
 }
 
 func fakeDatabase(t *testing.T, state *fakeRawState) (*sql.DB, *sql.Conn) {

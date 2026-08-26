@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -50,12 +52,23 @@ func (view ParameterView) Selected(value string) bool {
 }
 
 type ShowData struct {
-	Report                reporting.Template
-	Parameters            []ParameterView
-	Errors                map[string]string
-	Result                *reporting.InteractiveResult
-	ResultJSON            template.JS
-	CanExecute, CanExport bool
+	Report                                reporting.Template
+	Parameters                            []ParameterView
+	ParametersJSON                        template.JS
+	Errors                                map[string]string
+	Result                                *reporting.InteractiveResult
+	ResultJSON                            template.JS
+	CanExecute, CanExport, CanLoadOptions bool
+}
+
+type runtimeParameter struct {
+	Key          string          `json:"key"`
+	Type         string          `json:"type"`
+	OptionSource string          `json:"option_source,omitempty"`
+	Required     bool            `json:"required"`
+	Default      json.RawMessage `json:"default"`
+	Current      []string        `json:"current"`
+	Present      bool            `json:"present"`
 }
 type ExportsData struct{ Rows []reportexport.Job }
 
@@ -66,6 +79,7 @@ func NewHandler(admin *adminshell.Shell, reports *reporting.Repository, service 
 func (handler *Handler) RegisterRoutes(router chi.Router) {
 	router.With(handler.admin.RequirePermission(PermissionView)).Get("/reports", handler.Index)
 	router.With(handler.admin.RequirePermission(PermissionView)).Get("/reports/{id}", handler.Show)
+	router.With(handler.admin.RequirePermission(PermissionView)).Post("/reports/{id}/parameters/{key}/options", handler.Options)
 	router.With(handler.admin.RequirePermission(PermissionExecute)).Post("/reports/{id}/run", handler.Run)
 	router.With(handler.admin.RequirePermission(PermissionExport)).Post("/reports/{id}/export", handler.Export)
 	router.With(handler.admin.RequirePermission(PermissionExport)).Get("/exports", handler.Exports)
@@ -109,12 +123,50 @@ func (handler *Handler) Export(writer http.ResponseWriter, request *http.Request
 	if !ok || !webutil.ParseForm(writer, request, 2<<20) {
 		return
 	}
-	job, err := handler.exports.Submit(request.Context(), principal.SecurityContext(), report, formInput(request, report.Parameters), time.Now().UTC())
+	input := formInput(request, report.Parameters)
+	validatedReport, normalized, err := handler.service.PrepareExport(request.Context(), principal.SecurityContext(), report.ID, input)
+	var job reportexport.Job
+	if err == nil {
+		job, err = handler.exports.Submit(request.Context(), principal.SecurityContext(), validatedReport, normalized, time.Now().UTC())
+	}
 	if err != nil {
-		handler.render(writer, request, 422, report, formInput(request, report.Parameters), map[string]string{"form": publicError(err)}, principal.Can(PermissionExecute), true)
+		handler.render(writer, request, 422, report, input, map[string]string{"form": publicError(err)}, principal.Can(PermissionExecute), true)
 		return
 	}
 	http.Redirect(writer, request, fmt.Sprintf("/exports?notice=report-export-submitted&submitted=%d", job.ID), http.StatusSeeOther)
+}
+
+func (handler *Handler) Options(writer http.ResponseWriter, request *http.Request) {
+	report, principal, ok := handler.authorized(writer, request)
+	if !ok {
+		return
+	}
+	if !principal.Can(PermissionExecute) && !principal.Can(PermissionExport) {
+		writeOptionJSON(writer, http.StatusForbidden, reporting.OptionLoad{State: "error"})
+		return
+	}
+	if !webutil.ParseForm(writer, request, 2<<20) {
+		return
+	}
+	result, err := handler.service.LoadOptions(request.Context(), principal.SecurityContext(), report.ID, chi.URLParam(request, "key"), formInput(request, report.Parameters))
+	if err == nil {
+		writeOptionJSON(writer, http.StatusOK, result)
+		return
+	}
+	status := http.StatusUnprocessableEntity
+	if errors.Is(err, context.DeadlineExceeded) {
+		status = http.StatusGatewayTimeout
+	} else if !errors.Is(err, reporting.ErrInvalid) && !errors.Is(err, reporting.ErrInactive) && !errors.Is(err, reporting.ErrForbidden) {
+		status = http.StatusInternalServerError
+		slog.ErrorContext(request.Context(), "load report options", "report_id", report.ID, "parameter", chi.URLParam(request, "key"), "error", err)
+	}
+	writeOptionJSON(writer, status, reporting.OptionLoad{State: "error"})
+}
+
+func writeOptionJSON(writer http.ResponseWriter, status int, result reporting.OptionLoad) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(result)
 }
 
 func (handler *Handler) Exports(writer http.ResponseWriter, request *http.Request) {
@@ -203,10 +255,14 @@ func (handler *Handler) render(writer http.ResponseWriter, request *http.Request
 		}
 	}
 	views := make([]ParameterView, len(report.Parameters))
+	definitions := make([]runtimeParameter, len(report.Parameters))
 	for index, parameter := range report.Parameters {
 		views[index] = ParameterView{Value: parameter, Input: input[parameter.Key]}
+		definitions[index] = runtimeParameter{Key: parameter.Key, Type: string(parameter.Type), OptionSource: string(parameter.OptionSource), Required: parameter.Required, Default: parameter.DefaultValue, Current: append([]string(nil), input[parameter.Key].Values...), Present: input[parameter.Key].Present}
 	}
-	data := ShowData{Report: report, Parameters: views, Errors: formErrors, CanExecute: execute, CanExport: export}
+	data := ShowData{Report: report, Parameters: views, Errors: formErrors, CanExecute: execute, CanExport: export, CanLoadOptions: execute || export}
+	encodedParameters, _ := json.Marshal(definitions)
+	data.ParametersJSON = template.JS(encodedParameters)
 	if len(results) != 0 {
 		data.Result = &results[0]
 		encoded, _ := json.Marshal(results[0])
@@ -219,6 +275,17 @@ func formInput(request *http.Request, parameters []reporting.Parameter) map[stri
 	result := make(map[string]reporting.InputValue, len(parameters))
 	for _, parameter := range parameters {
 		result[parameter.Key] = reporting.InputValue{Present: request.PostFormValue("present_"+parameter.Key) == "1", Values: append([]string(nil), request.PostForm["param_"+parameter.Key]...)}
+	}
+	for name := range request.PostForm {
+		key, found := strings.CutPrefix(name, "param_")
+		if !found {
+			key, found = strings.CutPrefix(name, "present_")
+		}
+		if found && key != "" {
+			if _, known := result[key]; !known {
+				result[key] = reporting.InputValue{Present: request.PostFormValue("present_"+key) == "1", Values: append([]string(nil), request.PostForm["param_"+key]...)}
+			}
+		}
 	}
 	return result
 }
@@ -234,5 +301,5 @@ func publicError(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "The interactive query timed out. Use background export for longer reports."
 	}
-	return "The report could not be completed." + err.Error()
+	return "The report could not be completed."
 }

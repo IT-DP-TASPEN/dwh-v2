@@ -81,6 +81,45 @@ func TestBoundedRawMySQLExecutionDiscardsOnlyAbortedConnections(t *testing.T) {
 	}
 }
 
+func TestDynamicOptionMySQLContractAndBoundedAbort(t *testing.T) {
+	database := reportDatabase(t)
+	engine := reporting.QueryEngine{}
+	options, err := reporting.RunDynamicOptions(context.Background(), engine, database, `SELECT '001' AS value,'First' AS label UNION ALL SELECT '000','Zero'`, nil, map[string]reporting.NormalizedValue{}, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options) != 2 || options[0].Value != "001" || options[1].Value != "000" {
+		t.Fatalf("options=%+v", options)
+	}
+	empty, err := reporting.RunDynamicOptions(context.Background(), engine, database, `SELECT 'x' AS value,'X' AS label WHERE FALSE`, nil, map[string]reporting.NormalizedValue{}, 1000, 1<<20)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty=%+v error=%v", empty, err)
+	}
+	connectionID := func() int64 {
+		sink := &collectingSink{}
+		if err := engine.Stream(context.Background(), database, `SELECT CONNECTION_ID()`, nil, map[string]reporting.InputValue{}, sink); err != nil {
+			t.Fatal(err)
+		}
+		return sink.rows[0][0].(int64)
+	}
+	before := connectionID()
+	_, err = reporting.RunDynamicOptions(context.Background(), engine, database, `WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<100) SELECT CAST(n AS CHAR) AS value,CAST(n AS CHAR) AS label FROM seq`, nil, map[string]reporting.NormalizedValue{}, 10, 1<<20)
+	if !errors.Is(err, reporting.ErrInvalid) {
+		t.Fatalf("row bound error=%v", err)
+	}
+	if after := connectionID(); after == before {
+		t.Fatal("dynamic option row bound did not discard physical connection")
+	}
+	before = connectionID()
+	_, err = reporting.RunDynamicOptions(context.Background(), engine, database, `SELECT 'x' AS value,REPEAT('x', 10000) AS label`, nil, map[string]reporting.NormalizedValue{}, 1000, 4096)
+	if !errors.Is(err, reporting.ErrInvalid) {
+		t.Fatalf("payload bound error=%v", err)
+	}
+	if after := connectionID(); after == before {
+		t.Fatal("dynamic option payload bound did not discard physical connection")
+	}
+}
+
 func reportDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 	config := integrationdb.Config(t)

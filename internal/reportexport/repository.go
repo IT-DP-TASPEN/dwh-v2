@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -26,7 +25,7 @@ func NewRepository(database *sqlx.DB) (*Repository, error) {
 	return &Repository{database: database}, nil
 }
 
-func (repository *Repository) Submit(ctx context.Context, requester securityctx.Requester, report reporting.Template, input map[string]reporting.InputValue, now time.Time) (Job, error) {
+func (repository *Repository) Submit(ctx context.Context, requester securityctx.Requester, report reporting.Template, normalized map[string]reporting.NormalizedValue, now time.Time) (Job, error) {
 	tx, err := repository.database.BeginTxx(ctx, nil)
 	if err != nil {
 		return Job{}, err
@@ -43,11 +42,11 @@ func (repository *Repository) Submit(ctx context.Context, requester securityctx.
 	if currentRevision != report.Revision {
 		return Job{}, reporting.ErrConflict
 	}
-	normalized, err := reporting.NormalizeParameters(report.Parameters, input)
-	if err != nil {
+	canonical := reporting.CanonicalInput(normalized)
+	if _, err := reporting.NormalizeSnapshotParameters(report.Parameters, canonical); err != nil {
 		return Job{}, err
 	}
-	snapshot := Snapshot{Version: 1, Parameters: report.Parameters, Input: canonicalInput(normalized)}
+	snapshot := Snapshot{Version: 1, Parameters: report.Parameters, Input: canonical}
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return Job{}, err
@@ -65,29 +64,6 @@ func (repository *Repository) Submit(ctx context.Context, requester securityctx.
 		return Job{}, err
 	}
 	return repository.Find(ctx, uint64(id))
-}
-
-func canonicalInput(values map[string]reporting.NormalizedValue) map[string]reporting.InputValue {
-	result := make(map[string]reporting.InputValue, len(values))
-	for key, value := range values {
-		input := reporting.InputValue{Present: true}
-		if value.Scalar != nil {
-			switch typed := value.Scalar.(type) {
-			case string:
-				input.Values = []string{typed}
-			case int64:
-				input.Values = []string{strconv.FormatInt(typed, 10)}
-			case bool:
-				input.Values = []string{strconv.FormatBool(typed)}
-			}
-		} else {
-			for _, item := range value.Multi {
-				input.Values = append(input.Values, item.(string))
-			}
-		}
-		result[key] = input
-	}
-	return result
 }
 
 func (repository *Repository) Find(ctx context.Context, id uint64) (Job, error) {

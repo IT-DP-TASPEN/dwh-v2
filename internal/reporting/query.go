@@ -21,19 +21,49 @@ type RowSink interface {
 type QueryEngine struct{}
 
 func (QueryEngine) Validate(ctx context.Context, database *sql.DB, statement string, parameters []Parameter) error {
+	mode, err := (QueryEngine{}).SQLMode(ctx, database)
+	if err != nil {
+		return err
+	}
+	return ValidateBinding(statement, parameters, mode)
+}
+
+func (QueryEngine) ValidateTemplate(ctx context.Context, database *sql.DB, statement string, parameters []Parameter) error {
+	mode, err := (QueryEngine{}).SQLMode(ctx, database)
+	if err != nil {
+		return err
+	}
+	return ValidateTemplateBinding(statement, parameters, mode)
+}
+
+func (QueryEngine) SQLMode(ctx context.Context, database *sql.DB) (SQLMode, error) {
+	if database == nil {
+		return SQLMode{}, fmt.Errorf("report database is required")
+	}
 	connection, err := database.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("acquire report connection: %w", err)
+		return SQLMode{}, fmt.Errorf("acquire report connection: %w", err)
 	}
 	defer connection.Close()
 	var sqlMode string
 	if err := connection.QueryRowContext(ctx, `SELECT @@SESSION.sql_mode`).Scan(&sqlMode); err != nil {
-		return fmt.Errorf("inspect report SQL mode: %w", err)
+		return SQLMode{}, fmt.Errorf("inspect report SQL mode: %w", err)
 	}
-	return ValidateBinding(statement, parameters, ParseSQLMode(sqlMode))
+	return ParseSQLMode(sqlMode), nil
 }
 
 func (QueryEngine) Stream(ctx context.Context, database *sql.DB, statement string, parameters []Parameter, input map[string]InputValue, sink RowSink) error {
+	if database == nil || sink == nil {
+		return fmt.Errorf("report database and row sink are required")
+	}
+	normalized, err := NormalizeParameters(parameters, input)
+	if err != nil {
+		return err
+	}
+	return (QueryEngine{}).StreamNormalized(ctx, database, statement, parameters, normalized, sink)
+}
+
+func (QueryEngine) StreamNormalized(ctx context.Context, database *sql.DB, statement string, parameters []Parameter, normalized map[string]NormalizedValue, sink RowSink) error {
 	if database == nil || sink == nil {
 		return fmt.Errorf("report database and row sink are required")
 	}
@@ -45,10 +75,6 @@ func (QueryEngine) Stream(ctx context.Context, database *sql.DB, statement strin
 	var sqlMode string
 	if err := connection.QueryRowContext(ctx, `SELECT @@SESSION.sql_mode`).Scan(&sqlMode); err != nil {
 		return fmt.Errorf("inspect report SQL mode: %w", err)
-	}
-	normalized, err := NormalizeParameters(parameters, input)
-	if err != nil {
-		return err
 	}
 	query, arguments, err := Bind(statement, parameters, normalized, ParseSQLMode(sqlMode))
 	if err != nil {
@@ -174,11 +200,19 @@ type interactiveSink struct {
 }
 
 func RunInteractive(ctx context.Context, engine QueryEngine, database *sql.DB, statement string, parameters []Parameter, input map[string]InputValue, maxRows int, payloadCap int64, cellPreview int) (InteractiveResult, error) {
+	normalized, err := NormalizeParameters(parameters, input)
+	if err != nil {
+		return InteractiveResult{}, err
+	}
+	return RunInteractiveNormalized(ctx, engine, database, statement, parameters, normalized, maxRows, payloadCap, cellPreview)
+}
+
+func RunInteractiveNormalized(ctx context.Context, engine QueryEngine, database *sql.DB, statement string, parameters []Parameter, normalized map[string]NormalizedValue, maxRows int, payloadCap int64, cellPreview int) (InteractiveResult, error) {
 	if maxRows <= 0 || payloadCap < 4096 || cellPreview <= 0 {
 		return InteractiveResult{}, fmt.Errorf("invalid interactive bounds")
 	}
 	sink := &interactiveSink{maxRows: maxRows, payloadCap: payloadCap, cellPreview: cellPreview, approximateSize: 1024}
-	err := engine.Stream(ctx, database, statement, parameters, input, sink)
+	err := engine.StreamNormalized(ctx, database, statement, parameters, normalized, sink)
 	if err != nil && !errors.Is(err, errInteractiveBound) {
 		return InteractiveResult{}, err
 	}

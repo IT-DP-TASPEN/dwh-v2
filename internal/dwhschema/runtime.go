@@ -16,9 +16,10 @@ var ApplicationVersions = []int64{
 	20260814161323, 20260821120000, 20260822120000,
 	20260823120000,
 	20260825090000,
+	20260826120000,
 }
 
-const CurrentVersion int64 = 20260825090000
+const CurrentVersion int64 = 20260826120000
 
 type MigrationRecord struct {
 	Version int64 `db:"version_id"`

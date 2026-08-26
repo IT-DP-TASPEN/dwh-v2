@@ -2,6 +2,7 @@ package reports
 
 import (
 	"html/template"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -60,5 +61,35 @@ func TestReportResultAndExportsUseAdminTableAndStatusPatterns(t *testing.T) {
 		if !strings.Contains(exports.Body.String(), want) {
 			t.Fatalf("export table missing %q", want)
 		}
+	}
+}
+
+func TestReportFormRendersLazyDynamicOptionState(t *testing.T) {
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamic := reporting.Parameter{Key: "city", Label: "City", Type: reporting.ParameterSingleOption, OptionSource: reporting.OptionSourceDynamic, DynamicOptionSQL: "SELECT code AS value,name AS label FROM cities", Required: true}
+	data := ShowData{Report: reporting.Template{ID: 9, Name: "Cities"}, Parameters: []ParameterView{{Value: dynamic}}, ParametersJSON: template.JS(`[{"key":"city","type":"single_option","option_source":"dynamic","required":true,"default":null,"current":[]}]`), CanExecute: true, CanLoadOptions: true}
+	recorder := httptest.NewRecorder()
+	if err := renderer.RenderPage(recorder, 200, "features/reports/show", adminshell.PageData{Title: "Report", AppName: "Test", Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`reportParameters('report-parameter-data', 9, true)`, "Loading options…", "Unable to load options.", "Retry", `:disabled="!submittable"`, `:value="stateFor('city').present ? '1' : '0'"`} {
+		if !strings.Contains(recorder.Body.String(), want) {
+			t.Fatalf("dynamic runtime missing %q", want)
+		}
+	}
+}
+
+func TestFormInputCarriesUnknownParametersToServerValidation(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/reports/9/run", strings.NewReader("present_city=1&param_city=001&present_tampered=1&param_tampered=x"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err := request.ParseForm(); err != nil {
+		t.Fatal(err)
+	}
+	input := formInput(request, []reporting.Parameter{{Key: "city"}})
+	if input["city"].Values[0] != "001" || !input["tampered"].Present || input["tampered"].Values[0] != "x" {
+		t.Fatalf("input=%+v", input)
 	}
 }

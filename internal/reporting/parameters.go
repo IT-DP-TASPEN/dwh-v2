@@ -38,12 +38,27 @@ func ValidateParameters(parameters []Parameter) error {
 		}
 		switch parameter.Type {
 		case ParameterText, ParameterInteger, ParameterDecimal, ParameterDate, ParameterDatetime, ParameterBoolean:
-			if len(parameter.Options) != 0 {
-				return fmt.Errorf("%w: parameter %q cannot have options", ErrInvalid, parameter.Key)
+			if len(parameter.Options) != 0 || parameter.OptionSource != "" || parameter.DynamicOptionSQL != "" {
+				return fmt.Errorf("%w: parameter %q cannot have option configuration", ErrInvalid, parameter.Key)
 			}
 		case ParameterSingleOption, ParameterMultipleOption:
-			if len(parameter.Options) == 0 {
-				return fmt.Errorf("%w: parameter %q requires options", ErrInvalid, parameter.Key)
+			switch effectiveOptionSource(parameter) {
+			case OptionSourceStatic:
+				if len(parameter.Options) == 0 {
+					return fmt.Errorf("%w: parameter %q requires options", ErrInvalid, parameter.Key)
+				}
+				if parameter.DynamicOptionSQL != "" {
+					return fmt.Errorf("%w: static parameter %q cannot have dynamic SQL", ErrInvalid, parameter.Key)
+				}
+			case OptionSourceDynamic:
+				if len(parameter.Options) != 0 {
+					return fmt.Errorf("%w: dynamic parameter %q cannot have static options", ErrInvalid, parameter.Key)
+				}
+				if len(parameter.DynamicOptionSQL) > 1<<20 {
+					return fmt.Errorf("%w: dynamic option SQL for %q exceeds 1 MiB", ErrInvalid, parameter.Key)
+				}
+			default:
+				return fmt.Errorf("%w: parameter %q has invalid option source", ErrInvalid, parameter.Key)
 			}
 		default:
 			return fmt.Errorf("%w: parameter %q has invalid type", ErrInvalid, parameter.Key)
@@ -66,6 +81,17 @@ func ValidateParameters(parameters []Parameter) error {
 	return nil
 }
 
+func isOptionType(value ParameterType) bool {
+	return value == ParameterSingleOption || value == ParameterMultipleOption
+}
+
+func effectiveOptionSource(parameter Parameter) OptionSource {
+	if isOptionType(parameter.Type) && parameter.OptionSource == "" {
+		return OptionSourceStatic
+	}
+	return parameter.OptionSource
+}
+
 func NormalizeParameters(parameters []Parameter, input map[string]InputValue) (map[string]NormalizedValue, error) {
 	if err := ValidateParameters(parameters); err != nil {
 		return nil, err
@@ -73,6 +99,9 @@ func NormalizeParameters(parameters []Parameter, input map[string]InputValue) (m
 	known := make(map[string]struct{}, len(parameters))
 	result := make(map[string]NormalizedValue, len(parameters))
 	for _, parameter := range parameters {
+		if effectiveOptionSource(parameter) == OptionSourceDynamic {
+			return nil, fmt.Errorf("%w: dynamic parameter %q requires option resolution", ErrInvalid, parameter.Key)
+		}
 		known[parameter.Key] = struct{}{}
 		provided := input[parameter.Key]
 		values := append([]string(nil), provided.Values...)
@@ -98,6 +127,94 @@ func NormalizeParameters(parameters []Parameter, input map[string]InputValue) (m
 		}
 	}
 	return result, nil
+}
+
+func NormalizeSnapshotParameters(parameters []Parameter, input map[string]InputValue) (map[string]NormalizedValue, error) {
+	if err := ValidateParameters(parameters); err != nil {
+		return nil, err
+	}
+	known := make(map[string]struct{}, len(parameters))
+	result := make(map[string]NormalizedValue, len(parameters))
+	for _, parameter := range parameters {
+		known[parameter.Key] = struct{}{}
+		provided := input[parameter.Key]
+		values := append([]string(nil), provided.Values...)
+		if !provided.Present && len(parameter.DefaultValue) != 0 && !bytes.Equal(parameter.DefaultValue, []byte("null")) {
+			var err error
+			values, err = defaultStrings(parameter.DefaultValue)
+			if err != nil {
+				return nil, fmt.Errorf("%w: parameter %q has invalid default: %v", ErrInvalid, parameter.Key, err)
+			}
+		}
+		var normalized NormalizedValue
+		var err error
+		if effectiveOptionSource(parameter) == OptionSourceDynamic {
+			normalized, err = normalizeDynamicSnapshot(parameter, values)
+		} else {
+			normalized, err = normalizeParameter(parameter, values)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err)
+		}
+		if parameter.Required && normalized.Scalar == nil && len(normalized.Multi) == 0 {
+			return nil, fmt.Errorf("%w: %s is required", ErrInvalid, parameter.Label)
+		}
+		result[parameter.Key] = normalized
+	}
+	for key := range input {
+		if _, found := known[key]; !found {
+			return nil, fmt.Errorf("%w: unknown parameter %q", ErrInvalid, key)
+		}
+	}
+	return result, nil
+}
+
+func normalizeDynamicSnapshot(parameter Parameter, values []string) (NormalizedValue, error) {
+	if parameter.Type == ParameterSingleOption {
+		if len(values) > 1 {
+			return NormalizedValue{}, fmt.Errorf("accepts one value")
+		}
+		if len(values) == 0 || values[0] == "" {
+			return NormalizedValue{}, nil
+		}
+		return NormalizedValue{Scalar: values[0]}, nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := NormalizedValue{Multi: make([]any, 0, len(values))}
+	for _, value := range values {
+		if value == "" {
+			return NormalizedValue{}, fmt.Errorf("invalid option")
+		}
+		if _, found := seen[value]; found {
+			return NormalizedValue{}, fmt.Errorf("duplicate selection %q", value)
+		}
+		seen[value] = struct{}{}
+		result.Multi = append(result.Multi, value)
+	}
+	return result, nil
+}
+
+func CanonicalInput(values map[string]NormalizedValue) map[string]InputValue {
+	result := make(map[string]InputValue, len(values))
+	for key, value := range values {
+		input := InputValue{Present: true}
+		if value.Scalar != nil {
+			switch typed := value.Scalar.(type) {
+			case string:
+				input.Values = []string{typed}
+			case int64:
+				input.Values = []string{strconv.FormatInt(typed, 10)}
+			case bool:
+				input.Values = []string{strconv.FormatBool(typed)}
+			}
+		} else {
+			for _, item := range value.Multi {
+				input.Values = append(input.Values, item.(string))
+			}
+		}
+		result[key] = input
+	}
+	return result
 }
 
 func normalizeParameter(parameter Parameter, values []string) (NormalizedValue, error) {
@@ -256,7 +373,6 @@ func Bind(statement string, parameters []Parameter, values map[string]Normalized
 	for _, parameter := range parameters {
 		definitions[parameter.Key] = parameter
 	}
-	used := make(map[string]struct{}, len(parameters))
 	var query strings.Builder
 	arguments := make([]any, 0, len(placeholders))
 	position := 0
@@ -271,7 +387,6 @@ func Bind(statement string, parameters []Parameter, values map[string]Normalized
 		if !found {
 			return "", nil, fmt.Errorf("%w: parameter %q is not normalized", ErrInvalid, key)
 		}
-		used[key] = struct{}{}
 		if count {
 			if parameter.Type != ParameterMultipleOption {
 				return "", nil, fmt.Errorf("%w: %q count is only valid for multiple options", ErrInvalid, key)
@@ -298,11 +413,6 @@ func Bind(statement string, parameters []Parameter, values map[string]Normalized
 		position = placeholder.End
 	}
 	query.WriteString(statement[position:])
-	for _, parameter := range parameters {
-		if _, found := used[parameter.Key]; !found {
-			return "", nil, fmt.Errorf("%w: parameter %q is not used by SQL", ErrInvalid, parameter.Key)
-		}
-	}
 	return query.String(), arguments, nil
 }
 
@@ -313,17 +423,8 @@ func ValidateBinding(statement string, parameters []Parameter, mode SQLMode) err
 	if err := ValidateParameters(parameters); err != nil {
 		return err
 	}
-	for _, parameter := range parameters {
-		if len(parameter.DefaultValue) == 0 || bytes.Equal(parameter.DefaultValue, []byte("null")) {
-			continue
-		}
-		values, err := defaultStrings(parameter.DefaultValue)
-		if err != nil {
-			return fmt.Errorf("%w: parameter %q has invalid default: %v", ErrInvalid, parameter.Key, err)
-		}
-		if _, err := normalizeParameter(parameter, values); err != nil {
-			return fmt.Errorf("%w: parameter %q has invalid default: %v", ErrInvalid, parameter.Key, err)
-		}
+	if err := validateDefaults(parameters); err != nil {
+		return err
 	}
 	placeholders, err := ScanPlaceholders(statement, mode)
 	if err != nil {
@@ -337,7 +438,6 @@ func validateReferences(placeholders []Placeholder, parameters []Parameter) erro
 	for _, parameter := range parameters {
 		definitions[parameter.Key] = parameter
 	}
-	used := make(map[string]struct{}, len(parameters))
 	for _, placeholder := range placeholders {
 		key, count := placeholder.Key, false
 		if strings.HasSuffix(key, "__count") {
@@ -350,11 +450,106 @@ func validateReferences(placeholders []Placeholder, parameters []Parameter) erro
 		if count && parameter.Type != ParameterMultipleOption {
 			return fmt.Errorf("%w: %q count is only valid for multiple options", ErrInvalid, key)
 		}
+	}
+	return nil
+}
+
+func ReferencedParameters(statement string, parameters []Parameter, mode SQLMode) ([]string, error) {
+	placeholders, err := ScanPlaceholders(statement, mode)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateReferences(placeholders, parameters); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(placeholders))
+	result := make([]string, 0, len(placeholders))
+	for _, placeholder := range placeholders {
+		key := strings.TrimSuffix(placeholder.Key, "__count")
+		if _, found := seen[key]; found {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, key)
+	}
+	return result, nil
+}
+
+func ValidateTemplateBinding(statement string, parameters []Parameter, mode SQLMode) error {
+	if strings.TrimSpace(statement) == "" {
+		return fmt.Errorf("%w: SQL must not be empty", ErrInvalid)
+	}
+	if err := ValidateParameters(parameters); err != nil {
+		return err
+	}
+	if err := validateDefaults(parameters); err != nil {
+		return err
+	}
+	used := make(map[string]struct{}, len(parameters))
+	mainReferences, err := ReferencedParameters(statement, parameters, mode)
+	if err != nil {
+		return err
+	}
+	for _, key := range mainReferences {
 		used[key] = struct{}{}
+	}
+	byKey := make(map[string]Parameter, len(parameters))
+	for _, parameter := range parameters {
+		byKey[parameter.Key] = parameter
+	}
+	for _, parameter := range parameters {
+		if effectiveOptionSource(parameter) != OptionSourceDynamic {
+			continue
+		}
+		if strings.TrimSpace(parameter.DynamicOptionSQL) == "" {
+			return fmt.Errorf("%w: dynamic option SQL for %q must not be empty", ErrInvalid, parameter.Key)
+		}
+		references, err := ReferencedParameters(parameter.DynamicOptionSQL, parameters, mode)
+		if err != nil {
+			return fmt.Errorf("dynamic option SQL for %q: %w", parameter.Key, err)
+		}
+		for _, key := range references {
+			if byKey[key].DisplayOrder >= parameter.DisplayOrder {
+				return fmt.Errorf("%w: dynamic parameter %q references non-upstream parameter %q", ErrInvalid, parameter.Key, key)
+			}
+			used[key] = struct{}{}
+		}
 	}
 	for _, parameter := range parameters {
 		if _, found := used[parameter.Key]; !found {
-			return fmt.Errorf("%w: parameter %q is not used by SQL", ErrInvalid, parameter.Key)
+			return fmt.Errorf("%w: parameter %q is not used by report SQL", ErrInvalid, parameter.Key)
+		}
+	}
+	return nil
+}
+
+func validateDefaults(parameters []Parameter) error {
+	for _, parameter := range parameters {
+		if len(parameter.DefaultValue) == 0 || bytes.Equal(parameter.DefaultValue, []byte("null")) {
+			continue
+		}
+		values, err := defaultStrings(parameter.DefaultValue)
+		if err != nil {
+			return fmt.Errorf("%w: parameter %q has invalid default: %v", ErrInvalid, parameter.Key, err)
+		}
+		if effectiveOptionSource(parameter) == OptionSourceDynamic {
+			if parameter.Type == ParameterSingleOption && len(values) > 1 {
+				return fmt.Errorf("%w: parameter %q default accepts one value", ErrInvalid, parameter.Key)
+			}
+			seen := make(map[string]struct{}, len(values))
+			for _, value := range values {
+				if value == "" {
+					return fmt.Errorf("%w: parameter %q has an empty default", ErrInvalid, parameter.Key)
+				}
+				if _, found := seen[value]; found {
+					return fmt.Errorf("%w: parameter %q has duplicate default value", ErrInvalid, parameter.Key)
+				}
+				seen[value] = struct{}{}
+			}
+			continue
+		}
+		if _, err := normalizeParameter(parameter, values); err != nil {
+			return fmt.Errorf("%w: parameter %q has invalid default: %v", ErrInvalid, parameter.Key, err)
 		}
 	}
 	return nil

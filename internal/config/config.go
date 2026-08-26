@@ -54,22 +54,24 @@ type RuntimeConfig struct {
 }
 
 type ReportingConfig struct {
-	MasterKey               [32]byte
-	ExportDir               string
-	ConnectTimeout          time.Duration
-	InteractiveTimeout      time.Duration
-	ExportTimeout           time.Duration
-	DownloadTimeout         time.Duration
-	InteractiveMaxRows      int
-	InteractivePayloadBytes int64
-	CellPreviewBytes        int
-	MySQLMaxPacketBytes     int
-	MaxConcurrentExports    int
-	Retention               time.Duration
-	CleanupInterval         time.Duration
-	HeartbeatInterval       time.Duration
-	StaleAfter              time.Duration
-	OrphanGrace             time.Duration
+	MasterKey                 [32]byte
+	ExportDir                 string
+	ConnectTimeout            time.Duration
+	InteractiveTimeout        time.Duration
+	ExportTimeout             time.Duration
+	DownloadTimeout           time.Duration
+	InteractiveMaxRows        int
+	InteractivePayloadBytes   int64
+	DynamicOptionMaxRows      int
+	DynamicOptionPayloadBytes int64
+	CellPreviewBytes          int
+	MySQLMaxPacketBytes       int
+	MaxConcurrentExports      int
+	Retention                 time.Duration
+	CleanupInterval           time.Duration
+	HeartbeatInterval         time.Duration
+	StaleAfter                time.Duration
+	OrphanGrace               time.Duration
 }
 
 type FincloudConfig struct {
@@ -231,6 +233,17 @@ func parseReporting(lookup lookupEnv, environment string) (ReportingConfig, erro
 	if payloadBytes < 4096 {
 		return ReportingConfig{}, fmt.Errorf("REPORT_INTERACTIVE_PAYLOAD_BYTES must be at least 4096")
 	}
+	dynamicOptionRows, err := positive("REPORT_DYNAMIC_OPTION_MAX_ROWS", 1000)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	dynamicOptionPayloadBytes, err := positive("REPORT_DYNAMIC_OPTION_PAYLOAD_BYTES", 1<<20)
+	if err != nil {
+		return ReportingConfig{}, err
+	}
+	if dynamicOptionPayloadBytes < 4096 {
+		return ReportingConfig{}, fmt.Errorf("REPORT_DYNAMIC_OPTION_PAYLOAD_BYTES must be at least 4096")
+	}
 	cellBytes, err := positive("REPORT_CELL_PREVIEW_BYTES", 16<<10)
 	if err != nil {
 		return ReportingConfig{}, err
@@ -254,7 +267,8 @@ func parseReporting(lookup lookupEnv, environment string) (ReportingConfig, erro
 	return ReportingConfig{
 		MasterKey: masterKey, ExportDir: exportDir, ConnectTimeout: connectTimeout,
 		InteractiveTimeout: interactiveTimeout, ExportTimeout: exportTimeout, DownloadTimeout: downloadTimeout,
-		InteractiveMaxRows: maxRows, InteractivePayloadBytes: int64(payloadBytes), CellPreviewBytes: cellBytes,
+		InteractiveMaxRows: maxRows, InteractivePayloadBytes: int64(payloadBytes), DynamicOptionMaxRows: dynamicOptionRows,
+		DynamicOptionPayloadBytes: int64(dynamicOptionPayloadBytes), CellPreviewBytes: cellBytes,
 		MySQLMaxPacketBytes: packetBytes, MaxConcurrentExports: maxExports, Retention: retention,
 		CleanupInterval: cleanupInterval, HeartbeatInterval: heartbeatInterval, StaleAfter: staleAfter, OrphanGrace: orphanGrace,
 	}, nil

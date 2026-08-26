@@ -128,7 +128,7 @@ func TestParseRuntimeRequiresFincloudOnlyAtRuntimeBoundary(t *testing.T) {
 	if got.Fincloud.LocationID != "001" || got.Fincloud.RoleID != "role-1" || got.Fincloud.HTTPTimeout != 30*time.Second {
 		t.Fatalf("unexpected Fincloud config: %+v", got.Fincloud)
 	}
-	if got.Reporting.InteractiveMaxRows != 10000 || got.Reporting.InteractivePayloadBytes != 8<<20 || got.Reporting.CellPreviewBytes != 16<<10 {
+	if got.Reporting.InteractiveMaxRows != 10000 || got.Reporting.InteractivePayloadBytes != 8<<20 || got.Reporting.DynamicOptionMaxRows != 1000 || got.Reporting.DynamicOptionPayloadBytes != 1<<20 || got.Reporting.CellPreviewBytes != 16<<10 {
 		t.Fatalf("unexpected reporting config: %+v", got.Reporting)
 	}
 }
@@ -163,6 +163,8 @@ func TestParseReportingValidation(t *testing.T) {
 	tests := []struct{ key, value, want string }{
 		{"REPORT_DATASOURCE_MASTER_KEY", "short", "exactly 32 bytes"},
 		{"REPORT_INTERACTIVE_PAYLOAD_BYTES", "0", "positive integer"},
+		{"REPORT_DYNAMIC_OPTION_MAX_ROWS", "0", "positive integer"},
+		{"REPORT_DYNAMIC_OPTION_PAYLOAD_BYTES", "100", "at least 4096"},
 		{"REPORT_CELL_PREVIEW_BYTES", "many", "positive integer"},
 		{"REPORT_EXPORT_HEARTBEAT_INTERVAL", "30s", "shorter"},
 	}

@@ -43,7 +43,7 @@ func TestExportAuthorizationClaimFencingAndDownloadRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := reporting.Template{ID: uint64(reportID), Name: "test", SQLText: "SELECT 1", DatasourceID: uint64(datasourceID), Revision: 1}
-	job, err := repository.Submit(context.Background(), requester, report, map[string]reporting.InputValue{}, now)
+	job, err := repository.Submit(context.Background(), requester, report, map[string]reporting.NormalizedValue{}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestExportAuthorizationClaimFencingAndDownloadRules(t *testing.T) {
 	if _, err := database.Exec(`UPDATE report_datasources SET status='disabled' WHERE id=?`, datasourceID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.Submit(context.Background(), requester, report, map[string]reporting.InputValue{}, now); !errors.Is(err, reporting.ErrForbidden) {
+	if _, err := repository.Submit(context.Background(), requester, report, map[string]reporting.NormalizedValue{}, now); !errors.Is(err, reporting.ErrForbidden) {
 		t.Fatalf("disabled datasource submission error=%v", err)
 	}
 	if _, allowed, err := repository.Downloadable(context.Background(), job.ID, user.ID); err != nil || !allowed {
@@ -84,13 +84,13 @@ func TestExportAuthorizationClaimFencingAndDownloadRules(t *testing.T) {
 	if _, err := database.Exec(`UPDATE report_templates SET status='disabled' WHERE id=?`, reportID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.Submit(context.Background(), requester, report, map[string]reporting.InputValue{}, now); !errors.Is(err, reporting.ErrForbidden) {
+	if _, err := repository.Submit(context.Background(), requester, report, map[string]reporting.NormalizedValue{}, now); !errors.Is(err, reporting.ErrForbidden) {
 		t.Fatalf("disabled report submission error=%v", err)
 	}
 	if _, err := database.Exec(`UPDATE report_templates SET status='active' WHERE id=?`, reportID); err != nil {
 		t.Fatal(err)
 	}
-	second, err := repository.Submit(context.Background(), requester, report, map[string]reporting.InputValue{}, now.Add(4*time.Second))
+	second, err := repository.Submit(context.Background(), requester, report, map[string]reporting.NormalizedValue{}, now.Add(4*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}

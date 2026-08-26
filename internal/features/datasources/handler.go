@@ -210,6 +210,6 @@ func publicError(err error) string {
 	case errors.Is(err, reporting.ErrInvalid), errors.Is(err, reporting.ErrInactive):
 		return err.Error()
 	default:
-		return "The operation could not be completed."
+		return "The operation could not be completed." + err.Error()
 	}
 }

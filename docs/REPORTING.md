@@ -6,6 +6,10 @@ Set `REPORT_DATASOURCE_MASTER_KEY` to the standard-base64 encoding of exactly 32
 
 Interactive reads default to 10,000 rows, 8 MiB of encoded payload, 16 KiB per-cell previews, and 20 seconds. Crossing a row or payload bound cancels the query and discards its physical MySQL connection instead of draining unread rows. SQL is never rewritten and no `LIMIT` is injected. Full values remain available through background export, subject to XLSX format limits.
 
+`single_option` and `multiple_option` parameters may use static options or a live dynamic query against the report's datasource. Dynamic queries return exactly `value,label`, may reference only earlier parameters, and use the same MySQL scanner/binder as report SQL. Runtime and export submission revalidate current membership in display order; export workers use the validated snapshot and do not rerun option queries.
+
+Dynamic option reads default to 1,000 rows and 1 MiB of encoded option data, use the interactive timeout, and are never cached. Exceeding either bound fails the load and discards the physical MySQL connection; results are never silently truncated. Configure bounds with `REPORT_DYNAMIC_OPTION_MAX_ROWS` and `REPORT_DYNAMIC_OPTION_PAYLOAD_BYTES`.
+
 Datetime parameters are timezone-naive SQL `DATETIME` wall-clock values. Entered components are preserved; the application does not convert them to UTC or Asia/Jakarta.
 
 Exports use attempt-scoped workspaces and opaque final paths under `REPORT_EXPORT_DIR`. A fenced heartbeat controls active query and file generation; confirmed claim loss cancels both immediately. Cleanup expires referenced artifacts and removes unreferenced final artifacts after the orphan grace period.

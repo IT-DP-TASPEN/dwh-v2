@@ -111,7 +111,12 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("initialize reporting pools: %w", err)
 	}
 	defer reportingPools.Close()
-	reportingService, err := reporting.NewService(reportingRepository, reportingPools, reporting.ServiceConfig{ConnectTimeout: applicationConfig.Reporting.ConnectTimeout, InteractiveTimeout: applicationConfig.Reporting.InteractiveTimeout, InteractiveMaxRows: applicationConfig.Reporting.InteractiveMaxRows, InteractivePayloadBytes: applicationConfig.Reporting.InteractivePayloadBytes, CellPreviewBytes: applicationConfig.Reporting.CellPreviewBytes})
+	reportingService, err := reporting.NewService(reportingRepository, reportingPools, reporting.ServiceConfig{
+		ConnectTimeout: applicationConfig.Reporting.ConnectTimeout, InteractiveTimeout: applicationConfig.Reporting.InteractiveTimeout,
+		InteractiveMaxRows: applicationConfig.Reporting.InteractiveMaxRows, InteractivePayloadBytes: applicationConfig.Reporting.InteractivePayloadBytes,
+		DynamicOptionMaxRows: applicationConfig.Reporting.DynamicOptionMaxRows, DynamicOptionPayloadBytes: applicationConfig.Reporting.DynamicOptionPayloadBytes,
+		CellPreviewBytes: applicationConfig.Reporting.CellPreviewBytes,
+	})
 	if err != nil {
 		return fmt.Errorf("initialize reporting service: %w", err)
 	}

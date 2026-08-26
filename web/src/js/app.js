@@ -192,6 +192,114 @@ Alpine.data("reportResult", (elementID) => ({
   },
 }));
 
+Alpine.data("reportParameters", (elementID, reportID, enabled) => ({
+  definitions: [],
+  states: {},
+  controllers: {},
+  async init() {
+    const element = document.getElementById(elementID);
+    this.definitions = element ? JSON.parse(element.textContent || "[]") : [];
+    for (const definition of this.definitions.filter((item) => item.option_source === "dynamic")) {
+      this.states[definition.key] = { status: "idle", dependencies: null, options: [], selected: [], waitingFor: "", warning: "", generation: 0, present: Boolean(definition.present) };
+    }
+    this.$root.addEventListener("change", (event) => {
+      const name = event.target?.name || "";
+      if (!name.startsWith("param_")) return;
+      const key = name.slice(6);
+      const definition = this.definitions.find((item) => item.key === key);
+      if (!definition || definition.option_source === "dynamic") return;
+      this.cascade(key);
+    });
+    if (!enabled) return;
+    for (const definition of this.definitions) {
+      if (definition.option_source === "dynamic") await this.load(definition.key, true);
+    }
+  },
+  stateFor(key) {
+    return this.states[key] || { status: "idle", dependencies: [], options: [], selected: [], waitingFor: "", warning: "", present: false };
+  },
+  setState(key, changes) {
+    this.states[key] = { ...this.stateFor(key), ...changes };
+  },
+  values(value) {
+    if (Array.isArray(value)) return value.map(String).filter((item) => item !== "");
+    return value == null || value === "" ? [] : [String(value)];
+  },
+  async load(key, initial = false) {
+    const definition = this.definitions.find((item) => item.key === key);
+    if (!definition || definition.option_source !== "dynamic" || !enabled) return;
+    this.controllers[key]?.abort();
+    const controller = new AbortController();
+    this.controllers[key] = controller;
+    const generation = this.stateFor(key).generation + 1;
+    this.setState(key, { status: "loading", options: [], selected: [], waitingFor: "", warning: "", generation });
+    try {
+      const body = new URLSearchParams(new FormData(this.$root));
+      const response = await fetch(`/reports/${reportID}/parameters/${key}/options`, { method: "POST", body, signal: controller.signal, headers: { Accept: "application/json" } });
+      const result = await response.json();
+      if (!response.ok || result.state === "error") throw new Error("option load failed");
+      if (this.stateFor(key).generation !== generation) return;
+      if (result.state === "waiting") {
+        this.setState(key, { status: "waiting", dependencies: result.dependencies || [], waitingFor: result.waiting_for || "required parameter", options: [], selected: [] });
+        return;
+      }
+      const options = result.options || [];
+      const allowed = new Set(options.map((option) => option.value));
+      const current = initial ? this.values(definition.current) : [];
+      const defaults = this.values(definition.default);
+      let selected = current.length && current.every((value) => allowed.has(value)) ? current : defaults.every((value) => allowed.has(value)) ? defaults : [];
+      if (definition.type === "single_option") selected = selected.slice(0, 1);
+      const invalidPreferred = (current.length && selected !== current && !current.every((value) => allowed.has(value))) || (defaults.length && !defaults.every((value) => allowed.has(value)));
+      this.setState(key, { status: "ready", dependencies: result.dependencies || [], options, selected, waitingFor: "", warning: result.warning || (invalidPreferred ? "Saved value is not available. Choose a current option." : "") });
+      await this.$nextTick();
+    } catch (error) {
+      if (error.name === "AbortError" || this.stateFor(key).generation !== generation) return;
+      this.setState(key, { status: "error", options: [], selected: [], waitingFor: "", warning: "" });
+    }
+  },
+  dynamicChanged(key, event) {
+    const definition = this.definitions.find((item) => item.key === key);
+    if (!definition) return;
+    const selected = definition.type === "multiple_option"
+      ? [...this.$root.querySelectorAll(`[name="param_${key}"]:checked`)].map((input) => input.value)
+      : event.target.value ? [event.target.value] : [];
+    this.setState(key, { selected, present: true });
+    this.cascade(key);
+  },
+  async cascade(changedKey) {
+    const changed = new Set([changedKey]);
+    const changedIndex = this.definitions.findIndex((item) => item.key === changedKey);
+    const descendants = [];
+    for (let pass = 0; pass < this.definitions.length; pass++) {
+      for (let index = 0; index < this.definitions.length; index++) {
+        const definition = this.definitions[index];
+        if (definition.option_source !== "dynamic" || changed.has(definition.key)) continue;
+        const dependencies = this.stateFor(definition.key).dependencies;
+        if ((dependencies === null && index > changedIndex) || dependencies?.some((key) => changed.has(key))) {
+          changed.add(definition.key);
+          if (!descendants.includes(definition.key)) descendants.push(definition.key);
+        }
+      }
+    }
+    for (const key of descendants) {
+      this.controllers[key]?.abort();
+      this.setState(key, { status: "idle", options: [], selected: [], waitingFor: "", warning: "", generation: this.stateFor(key).generation + 1 });
+    }
+    for (const key of descendants) await this.load(key, false);
+  },
+  async retry(key) {
+    await this.load(key, false);
+    if (this.stateFor(key).status === "ready") await this.cascade(key);
+  },
+  get submittable() {
+    return this.definitions.every((definition) => {
+      if (definition.option_source !== "dynamic" || !definition.required) return true;
+      const state = this.stateFor(definition.key);
+      return state.status === "ready" && state.selected.length > 0;
+    });
+  },
+}));
+
 Alpine.data("reportTemplateEditor", () => ({
   parameters: [],
   nextID: 1,
@@ -211,16 +319,25 @@ Alpine.data("reportTemplateEditor", () => ({
   },
   parameter(definition = {}, testValues = {}) {
     const type = ["text", "integer", "decimal", "date", "datetime", "boolean", "single_option", "multiple_option"].includes(definition.type) ? definition.type : "text";
+	const isOption = type === "single_option" || type === "multiple_option";
+	const optionSource = isOption && definition.option_source === "dynamic" ? "dynamic" : isOption ? "static" : "";
     const hasTestValue = Object.prototype.hasOwnProperty.call(testValues, definition.key);
+	const defaultValue = this.controlValue(type, definition.default);
+	const testValue = this.controlValue(type, hasTestValue ? testValues[definition.key] : definition.default);
     return {
       id: this.nextID++,
       key: definition.key || "",
       label: definition.label || "",
       type,
       previousType: type,
+	  optionSource,
+	  previousOptionSource: optionSource,
+	  dynamicOptionSQL: definition.dynamic_option_sql || "",
       required: Boolean(definition.required),
-      defaultValue: this.controlValue(type, definition.default),
-      testValue: this.controlValue(type, hasTestValue ? testValues[definition.key] : definition.default),
+	  defaultValue,
+	  dynamicDefaultText: Array.isArray(defaultValue) ? defaultValue.join("\n") : "",
+	  testValue,
+	  dynamicTestText: Array.isArray(testValue) ? testValue.join("\n") : "",
       testTouched: hasTestValue,
       options: (definition.options || []).map((option) => ({ id: this.nextID++, value: option.value || "", label: option.label || "" })),
     };
@@ -244,12 +361,47 @@ Alpine.data("reportTemplateEditor", () => ({
   typeChanged(parameter) {
     const wasOption = parameter.previousType === "single_option" || parameter.previousType === "multiple_option";
     const isOption = parameter.type === "single_option" || parameter.type === "multiple_option";
-    if (!wasOption || !isOption) parameter.options = [];
+	if (!wasOption || !isOption) {
+	  parameter.options = [];
+	  parameter.dynamicOptionSQL = "";
+	  parameter.optionSource = isOption ? "static" : "";
+	  parameter.previousOptionSource = parameter.optionSource;
+	}
     parameter.defaultValue = parameter.type === "multiple_option" ? [] : "";
+	parameter.dynamicDefaultText = "";
     parameter.testValue = parameter.type === "multiple_option" ? [] : "";
+	parameter.dynamicTestText = "";
     parameter.testTouched = false;
     parameter.previousType = parameter.type;
   },
+	sourceChanged(parameter) {
+	  if (parameter.optionSource === parameter.previousOptionSource) return;
+	  parameter.options = [];
+	  parameter.dynamicOptionSQL = "";
+	  parameter.defaultValue = parameter.type === "multiple_option" ? [] : "";
+	  parameter.dynamicDefaultText = "";
+	  parameter.testValue = parameter.type === "multiple_option" ? [] : "";
+	  parameter.dynamicTestText = "";
+	  parameter.testTouched = false;
+	  parameter.previousOptionSource = parameter.optionSource;
+	},
+	availableUpstream(index) {
+	  const result = [];
+	  for (const parameter of this.parameters.slice(0, index)) {
+		if (!parameter.key) continue;
+		result.push(`:${parameter.key}`);
+		if (parameter.type === "multiple_option") result.push(`:${parameter.key}__count`);
+	  }
+	  return result;
+	},
+	syncDynamicDefault(parameter) {
+	  parameter.defaultValue = parameter.dynamicDefaultText.split("\n").filter((value) => value !== "");
+	  this.syncDefault(parameter);
+	},
+	syncDynamicTest(parameter) {
+	  parameter.testValue = parameter.dynamicTestText.split("\n").filter((value) => value !== "");
+	  parameter.testTouched = true;
+	},
   syncDefault(parameter) {
     if (!parameter.testTouched) parameter.testValue = Array.isArray(parameter.defaultValue) ? [...parameter.defaultValue] : parameter.defaultValue;
   },
@@ -277,7 +429,10 @@ Alpine.data("reportTemplateEditor", () => ({
       type: parameter.type,
       required: parameter.required,
       default: this.encodedValue(parameter, parameter.defaultValue),
-      ...(parameter.type === "single_option" || parameter.type === "multiple_option" ? { options: parameter.options.map(({ value, label }) => ({ value, label })) } : {}),
+	  ...(parameter.type === "single_option" || parameter.type === "multiple_option" ? {
+		option_source: parameter.optionSource,
+		...(parameter.optionSource === "static" ? { options: parameter.options.map(({ value, label }) => ({ value, label })) } : { dynamic_option_sql: parameter.dynamicOptionSQL }),
+	  } : {}),
     })));
     const testValues = {};
     for (const parameter of this.parameters) {
