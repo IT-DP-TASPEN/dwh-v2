@@ -96,12 +96,39 @@ func (c *Client) FetchCIFNumbers(ctx context.Context, throughDate string) ([]str
 			return nil, &Error{Kind: ErrorMalformed, Operation: "fetch CIF numbers", Message: "Fincloud CIF listing was malformed", Cause: err}
 		}
 		var cif string
-		if err := json.Unmarshal([]byte(row[column]), &cif); err != nil {
+		cif, err = decodeCIFReportValue(row[column])
+		if err != nil {
 			return nil, &Error{Kind: ErrorMalformed, Operation: "fetch CIF numbers", Message: "Invalid CIF number format", Cause: err}
 		}
 		values = append(values, cif)
 	}
 	return normalizeIdentifiers(values), nil
+}
+
+func decodeCIFReportValue(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+
+	// CIF Opening Report has an extra quoted layer:
+	//
+	// Raw CSV:
+	//   """00100000001"""
+	//
+	// csv.Reader produces:
+	//   "00100000001"
+	//
+	// Decode the remaining quoted representation.
+	if strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) {
+		var decoded string
+		if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(decoded), nil
+	}
+
+	return value, nil
 }
 
 func (c *Client) FetchSavingAccounts(ctx context.Context) ([]string, error) {
