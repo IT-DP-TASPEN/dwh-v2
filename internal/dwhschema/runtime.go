@@ -18,9 +18,10 @@ var ApplicationVersions = []int64{
 	20260825090000,
 	20260826120000,
 	20260826150000,
+	20260827090000,
 }
 
-const CurrentVersion int64 = 20260826150000
+const CurrentVersion int64 = 20260827090000
 
 type MigrationRecord struct {
 	Version int64 `db:"version_id"`
@@ -143,7 +144,7 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 			return fmt.Errorf("required runtime safety index %s.%s is missing", required.table, required.index)
 		}
 	}
-	for _, table := range []string{"schedules", "schedule_attempts", "report_datasources", "report_templates", "report_parameters", "report_parameter_options", "report_template_user_access", "report_export_jobs"} {
+	for _, table := range []string{"schedules", "schedule_attempts", "report_datasources", "report_templates", "report_parameters", "report_parameter_options", "report_template_user_access", "report_export_jobs", "report_user_folders", "report_user_preferences"} {
 		var count int
 		if err := db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.TABLES
 			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, table); err != nil || count != 1 {
@@ -154,6 +155,24 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 	if err := db.GetContext(ctx, &exportClaimIndex, `SELECT COUNT(*) FROM information_schema.STATISTICS
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='report_export_jobs' AND INDEX_NAME='idx_report_export_jobs_claim'`); err != nil || exportClaimIndex == 0 {
 		return fmt.Errorf("required report export claim index is missing")
+	}
+	for _, index := range []struct {
+		table, name string
+	}{
+		{"report_user_folders", "uq_report_user_folders_user_id"},
+		{"report_user_preferences", "idx_report_user_preferences_folder"},
+		{"report_user_preferences", "idx_report_user_preferences_starred"},
+	} {
+		var count int
+		if err := db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.STATISTICS
+			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=?`, index.table, index.name); err != nil || count == 0 {
+			return fmt.Errorf("required report organization index %s.%s is missing", index.table, index.name)
+		}
+	}
+	var folderOwnerRule string
+	if err := db.GetContext(ctx, &folderOwnerRule, `SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
+		WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='fk_report_user_preferences_folder_owner'`); err != nil || folderOwnerRule != "RESTRICT" {
+		return fmt.Errorf("required report preference folder ownership constraint is missing")
 	}
 	var diagnosticsIndex int
 	if err := db.GetContext(ctx, &diagnosticsIndex, `SELECT COUNT(*) FROM information_schema.STATISTICS

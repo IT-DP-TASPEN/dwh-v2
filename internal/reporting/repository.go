@@ -196,15 +196,6 @@ func (repository *Repository) ListTemplates(ctx context.Context) ([]Template, er
 	return rows, nil
 }
 
-func (repository *Repository) ListAvailableTemplates(ctx context.Context, userID uint64) ([]Template, error) {
-	rows := make([]Template, 0)
-	if err := repository.database.SelectContext(ctx, &rows, `SELECT `+templateColumns+` FROM report_templates r JOIN report_datasources d ON d.id=r.datasource_id
-		WHERE r.status='active' AND d.status='active' AND EXISTS (SELECT 1 FROM report_template_user_access a WHERE a.report_id=r.id AND a.user_id=?) ORDER BY r.name,r.id`, userID); err != nil {
-		return nil, fmt.Errorf("list available reports: %w", err)
-	}
-	return rows, nil
-}
-
 func (repository *Repository) FindTemplate(ctx context.Context, id uint64) (Template, error) {
 	tx, err := repository.database.BeginTxx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {

@@ -93,3 +93,55 @@ func TestFormInputCarriesUnknownParametersToServerValidation(t *testing.T) {
 		t.Fatalf("input=%+v", input)
 	}
 }
+
+func TestReportOrganizationRendersScopedHTMXControlsAndVisibleDeleteCount(t *testing.T) {
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	folderID := uint64(3)
+	starred := ReportCard{
+		Value:         reporting.RuntimeReport{ID: 9, Name: "NPL", Description: "Loans", DatasourceName: "DWH", FolderID: &folderID, Starred: true},
+		FolderOptions: []FolderOption{{ID: 3, Name: "Kredit", Selected: true}}, ReturnQuery: "?q=NPL", Unfiled: false,
+	}
+	data := OrganizationData{
+		Query: "NPL", Heading: "All Reports", ReturnQuery: "?q=NPL", AllURL: "/reports?q=NPL", StarredURL: "/reports?q=NPL&starred=1",
+		Rows: []ReportCard{starred}, StarredRows: []ReportCard{starred}, StarredVisibleCount: 1,
+		Folders: []FolderView{{Value: reporting.UserReportFolder{ID: 3, Name: "Kredit", VisibleReportCount: 1}, URL: "/reports?folder=3&q=NPL", DeleteMessage: "Reports will not be deleted. 1 currently visible reports will return to No Folder / All Reports."}},
+	}
+	recorder := httptest.NewRecorder()
+	if err := renderer.RenderPage(recorder, http.StatusOK, "features/reports/index", adminshell.PageData{Title: "Reports", AppName: "Test", Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	body := recorder.Body.String()
+	starredHeading := strings.Index(body, `id="starred-reports-heading"`)
+	allHeading := strings.Index(body, `id="scoped-reports-heading"`)
+	if starredHeading < 0 || allHeading < 0 || starredHeading >= allHeading {
+		t.Fatalf("starred section is not before all reports: %s", body)
+	}
+	for _, want := range []string{
+		`hx-post="/reports/9/star?q=NPL"`, `hx-target="#report-browser"`, `aria-label="Unstar NPL"`,
+		`hx-post="/reports/9/folder?q=NPL"`, `<option value="3" selected>Kredit</option>`,
+		`data-confirm-message="Reports will not be deleted. 1 currently visible reports will return to No Folder / All Reports."`,
+		"dark:bg-slate-900",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("organization view missing %q", want)
+		}
+	}
+}
+
+func TestReportOrganizationOmitsEmptyStarredSection(t *testing.T) {
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	data := OrganizationData{Heading: "All Reports", EmptyMessage: "No reports are currently available to you.", Rows: []ReportCard{}, StarredRows: []ReportCard{}, Folders: []FolderView{}}
+	if err := renderer.RenderPage(recorder, http.StatusOK, "features/reports/index", adminshell.PageData{Title: "Reports", AppName: "Test", Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	if body := recorder.Body.String(); strings.Contains(body, `id="starred-reports-heading"`) || !strings.Contains(body, "No reports are currently available to you.") || !strings.Contains(body, "No personal folders yet.") {
+		t.Fatalf("empty organization state=%s", body)
+	}
+}

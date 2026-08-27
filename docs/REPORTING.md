@@ -15,3 +15,7 @@ Datetime parameters are timezone-naive SQL `DATETIME` wall-clock values. Entered
 Exports use attempt-scoped workspaces and opaque final paths under `REPORT_EXPORT_DIR`. A fenced heartbeat controls active query and file generation; confirmed claim loss cancels both immediately. Cleanup expires referenced artifacts and removes unreferenced final artifacts after the orphan grace period.
 
 V1 local-filesystem export storage assumes one application instance. Multiple instances require `REPORT_EXPORT_DIR` to be a shared filesystem with atomic rename semantics; otherwise a worker may publish an artifact that another instance cannot download or reconcile.
+
+Runtime report stars and folders are personal presentation state owned by the effective user, including during impersonation. They never grant report access: every list, search, folder count, and starred count intersects the current explicit ACL with active report and datasource state. Preferences remain dormant while access is unavailable and reappear when access returns.
+
+Folders are flat and each report has at most one folder per user. Deleting a folder transactionally clears that folder from every owned preference, including dormant memberships, without changing stars or deleting reports. Personal organization changes intentionally do not create security audit events.

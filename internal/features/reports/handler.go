@@ -30,7 +30,6 @@ type Handler struct {
 	downloadTimeout time.Duration
 }
 
-type ListData struct{ Rows []reporting.Template }
 type ParameterView struct {
 	Value reporting.Parameter
 	Input reporting.InputValue
@@ -78,22 +77,17 @@ func NewHandler(admin *adminshell.Shell, reports *reporting.Repository, service 
 
 func (handler *Handler) RegisterRoutes(router chi.Router) {
 	router.With(handler.admin.RequirePermission(PermissionView)).Get("/reports", handler.Index)
+	router.With(handler.admin.RequirePermission(PermissionView)).Post("/reports/folders", handler.CreateFolder)
+	router.With(handler.admin.RequirePermission(PermissionView)).Post("/reports/folders/{folderID}/rename", handler.RenameFolder)
+	router.With(handler.admin.RequirePermission(PermissionView)).Post("/reports/folders/{folderID}/delete", handler.DeleteFolder)
+	router.With(handler.admin.RequirePermission(PermissionView)).Post("/reports/{id}/star", handler.Star)
+	router.With(handler.admin.RequirePermission(PermissionView)).Post("/reports/{id}/folder", handler.MoveToFolder)
 	router.With(handler.admin.RequirePermission(PermissionView)).Get("/reports/{id}", handler.Show)
 	router.With(handler.admin.RequirePermission(PermissionView)).Post("/reports/{id}/parameters/{key}/options", handler.Options)
 	router.With(handler.admin.RequirePermission(PermissionExecute)).Post("/reports/{id}/run", handler.Run)
 	router.With(handler.admin.RequirePermission(PermissionExport)).Post("/reports/{id}/export", handler.Export)
 	router.With(handler.admin.RequirePermission(PermissionExport)).Get("/exports", handler.Exports)
 	router.With(handler.admin.RequirePermission(PermissionExport)).Get("/exports/{id}/download", handler.Download)
-}
-
-func (handler *Handler) Index(writer http.ResponseWriter, request *http.Request) {
-	principal, _ := browserauth.CurrentPrincipal(request.Context())
-	rows, err := handler.reports.ListAvailableTemplates(request.Context(), principal.UserID)
-	if err != nil {
-		handler.admin.Internal(writer, request, "list reports", err)
-		return
-	}
-	handler.admin.RenderPage(writer, request, 200, "features/reports/index", "Reports", ListData{Rows: rows})
 }
 
 func (handler *Handler) Show(writer http.ResponseWriter, request *http.Request) {

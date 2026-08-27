@@ -154,6 +154,30 @@ func TestOpaqueSourceKeysUseExactDatabaseSemantics(t *testing.T) {
 	}
 }
 
+func TestReportOrganizationSchemaEnforcesOwnershipAndCaseInsensitiveNames(t *testing.T) {
+	db := integrationdb.Open(t)
+	var collation string
+	if err := db.Get(&collation, `SELECT COLLATION_NAME FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='report_user_folders' AND COLUMN_NAME='name'`); err != nil || collation != "utf8mb4_unicode_ci" {
+		t.Fatalf("folder name collation=%q error=%v", collation, err)
+	}
+	type keyColumn struct {
+		Column     string `db:"COLUMN_NAME"`
+		Referenced string `db:"REFERENCED_COLUMN_NAME"`
+	}
+	var columns []keyColumn
+	if err := db.Select(&columns, `SELECT COLUMN_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE
+		WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='fk_report_user_preferences_folder_owner'
+		ORDER BY ORDINAL_POSITION`); err != nil || len(columns) != 2 || columns[0].Column != "user_id" || columns[0].Referenced != "user_id" || columns[1].Column != "folder_id" || columns[1].Referenced != "id" {
+		t.Fatalf("folder ownership columns=%+v error=%v", columns, err)
+	}
+	var deleteRule string
+	if err := db.Get(&deleteRule, `SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
+		WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='fk_report_user_preferences_folder_owner'`); err != nil || deleteRule != "RESTRICT" {
+		t.Fatalf("folder ownership delete rule=%q error=%v", deleteRule, err)
+	}
+}
+
 func TestRuntimeSchemaCompatibility(t *testing.T) {
 	db := integrationdb.Open(t)
 	ctx := context.Background()
