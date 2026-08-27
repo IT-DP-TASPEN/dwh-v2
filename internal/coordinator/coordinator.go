@@ -21,6 +21,7 @@ import (
 type Coordinator struct {
 	runs     *ingestionrun.Repository
 	executor *ingestionexec.Executor
+	fixed    *ingestionstore.FixedRepository
 	details  *ingestionstore.DetailRepository
 	ownerID  string
 	workers  int
@@ -58,13 +59,14 @@ func New(ctx context.Context, db *sqlx.DB, client *fincloud.Client, logger *slog
 	if err != nil {
 		return nil, err
 	}
+	fixed := ingestionstore.NewFixedRepository(db)
 	details := ingestionstore.NewDetailRepository(db)
-	executor, err := ingestionexec.New(client, ingestionstore.NewFixedRepository(db), details,
+	executor, err := ingestionexec.New(client, fixed, details,
 		ingestionstore.NewMaintenanceRepository(db), runs, catalog, settings.FixedMemberConcurrency, settings.DetailConcurrency, logger)
 	if err != nil {
 		return nil, err
 	}
-	return &Coordinator{runs: runs, executor: executor, details: details, ownerID: ownerID, workers: settings.MaxRunningJobs, logger: logger,
+	return &Coordinator{runs: runs, executor: executor, fixed: fixed, details: details, ownerID: ownerID, workers: settings.MaxRunningJobs, logger: logger,
 		local: map[uint64]context.CancelCauseFunc{}, parents: map[uint64]string{}}, nil
 }
 
@@ -129,13 +131,59 @@ func (coordinator *Coordinator) Run(ctx context.Context) {
 		wait.Add(1)
 		go func() { defer wait.Done(); coordinator.worker(ctx, executionCtx) }()
 	}
-	wait.Add(3)
+	wait.Add(4)
 	go func() { defer wait.Done(); coordinator.recoverStale(ctx) }()
 	go func() { defer wait.Done(); coordinator.reconcile(ctx) }()
 	go func() { defer wait.Done(); coordinator.cleanupDetailStaging(ctx) }()
+	go func() { defer wait.Done(); coordinator.cleanupFixedStaging(ctx) }()
 	<-ctx.Done()
 	stopExecution(ingestionrun.ErrCoordinatorShutdown)
 	wait.Wait()
+}
+
+func (coordinator *Coordinator) cleanupFixedStaging(ctx context.Context) {
+	cleanup := func() {
+		started := time.Now()
+		cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		total := ingestionstore.FixedCleanupResult{RowsByTable: map[string]int64{}}
+		for cleanupCtx.Err() == nil {
+			result, err := coordinator.fixed.CleanupTerminal(cleanupCtx, 100)
+			total.Candidates += result.Candidates
+			total.Loads += result.Loads
+			total.Rows += result.Rows
+			for table, rows := range result.RowsByTable {
+				total.RowsByTable[table] += rows
+			}
+			if err != nil {
+				if ctx.Err() == nil && !errors.Is(err, context.DeadlineExceeded) {
+					coordinator.logger.Warn("clean terminal Fixed staging", "candidate_loads", total.Candidates,
+						"loads_cleaned", total.Loads, "rows_deleted", total.Rows,
+						"duration_ms", time.Since(started).Milliseconds(), "diagnostic", ingestionstore.TechnicalDiagnostic(err))
+				}
+				return
+			}
+			if result.Candidates == 0 {
+				break
+			}
+		}
+		if total.Candidates > 0 {
+			coordinator.logger.Info("cleaned terminal Fixed staging", "candidate_loads", total.Candidates,
+				"loads_cleaned", total.Loads, "rows_deleted", total.Rows, "rows_by_table", total.RowsByTable,
+				"duration_ms", time.Since(started).Milliseconds())
+		}
+	}
+	cleanup()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cleanup()
+		}
+	}
 }
 
 func (coordinator *Coordinator) cleanupDetailStaging(ctx context.Context) {

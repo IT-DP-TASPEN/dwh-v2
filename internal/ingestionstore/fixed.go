@@ -24,9 +24,27 @@ const (
 	fixedLoadPublished = "published"
 	fixedMemberPending = "pending"
 	fixedMemberSuccess = "success"
+	fixedTerminalSQL   = "?,?,?,?"
 )
 
+var fixedTerminalStatuses = []any{
+	string(ingestionrun.StatusSucceeded), string(ingestionrun.StatusFailed),
+	string(ingestionrun.StatusCancelled), string(ingestionrun.StatusAbandoned),
+}
+
 type FixedRepository struct{ db *sqlx.DB }
+
+// FixedCleanupResult reports staging cleanup only; run, load, and member history is retained.
+type FixedCleanupResult struct {
+	Candidates, Loads int
+	Rows              int64
+	RowsByTable       map[string]int64
+}
+
+type fixedCleanupCandidate struct {
+	LoadID       uint64 `db:"load_id"`
+	StagingTable string
+}
 
 type FixedSegment struct {
 	Index      int
@@ -36,6 +54,87 @@ type FixedSegment struct {
 }
 
 func NewFixedRepository(db *sqlx.DB) *FixedRepository { return &FixedRepository{db: db} }
+
+// CleanupTerminal deletes at most limit discovered loads, one short transaction per load.
+func (repository *FixedRepository) CleanupTerminal(ctx context.Context, limit int) (FixedCleanupResult, error) {
+	result := FixedCleanupResult{RowsByTable: map[string]int64{}}
+	if repository == nil || repository.db == nil || limit < 1 {
+		return result, fmt.Errorf("positive Fixed staging cleanup limit is required")
+	}
+	storages, err := fixedStorages()
+	if err != nil {
+		return result, err
+	}
+	candidates, err := repository.fixedCleanupCandidates(ctx, storages, limit)
+	if err != nil {
+		return result, err
+	}
+	result.Candidates = len(candidates)
+	var firstError error
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			if firstError != nil {
+				return result, firstError
+			}
+			return result, err
+		}
+		deleted, err := repository.cleanupFixedCandidate(ctx, candidate)
+		if err != nil {
+			if firstError == nil {
+				firstError = err
+			}
+			continue
+		}
+		if deleted == 0 {
+			continue
+		}
+		result.Loads++
+		result.Rows += deleted
+		result.RowsByTable[candidate.StagingTable] += deleted
+	}
+	return result, firstError
+}
+
+func (repository *FixedRepository) cleanupFixedCandidate(ctx context.Context, candidate fixedCleanupCandidate) (int64, error) {
+	var deleted int64
+	err := retryReplaySafeTx(ctx, repository.db, "cleanup_fixed_staging", func(tx *sqlx.Tx) error {
+		query := "DELETE candidate FROM `" + candidate.StagingTable + "` candidate " +
+			"JOIN fixed_report_loads load_row ON load_row.id=candidate.load_id " +
+			"JOIN ingestion_runs run ON run.id=load_row.ingestion_run_id " +
+			"WHERE candidate.load_id=? AND run.status IN (" + fixedTerminalSQL + ")"
+		args := append([]any{candidate.LoadID}, fixedTerminalStatuses...)
+		deleteResult, deleteErr := tx.ExecContext(ctx, query, args...)
+		if deleteErr != nil {
+			return wrapDatabaseError(deleteErr, "cleanup_fixed_staging", "delete_terminal_load_staging", candidate.StagingTable, 0, 0)
+		}
+		deleted, deleteErr = deleteResult.RowsAffected()
+		return wrapDatabaseError(deleteErr, "cleanup_fixed_staging", "count_deleted_load_staging", candidate.StagingTable, 0, 0)
+	})
+	return deleted, err
+}
+
+func (repository *FixedRepository) fixedCleanupCandidates(ctx context.Context, storages []fixedStorage, limit int) ([]fixedCleanupCandidate, error) {
+	candidates := make([]fixedCleanupCandidate, 0, limit)
+	for _, storage := range storages {
+		remaining := limit - len(candidates)
+		if remaining == 0 {
+			break
+		}
+		var loadIDs []uint64
+		query := "SELECT DISTINCT candidate.load_id FROM `" + storage.stagingTable + "` candidate " +
+			"JOIN fixed_report_loads load_row ON load_row.id=candidate.load_id " +
+			"JOIN ingestion_runs run ON run.id=load_row.ingestion_run_id " +
+			"WHERE run.status IN (" + fixedTerminalSQL + ") ORDER BY candidate.load_id LIMIT ?"
+		args := append(append([]any{}, fixedTerminalStatuses...), remaining)
+		if err := repository.db.SelectContext(ctx, &loadIDs, query, args...); err != nil {
+			return nil, wrapDatabaseError(err, "cleanup_fixed_staging", "find_terminal_load_staging", storage.stagingTable, 0, 0)
+		}
+		for _, loadID := range loadIDs {
+			candidates = append(candidates, fixedCleanupCandidate{LoadID: loadID, StagingTable: storage.stagingTable})
+		}
+	}
+	return candidates, nil
+}
 
 func (repository *FixedRepository) BeginLoad(ctx context.Context, ingestionRunID uint64, definition ingestion.FixedDefinition, plan ingestion.FixedPlan) (uint64, error) {
 	if repository == nil || repository.db == nil {
@@ -379,6 +478,19 @@ type fixedStorage struct {
 	finalTable, stagingTable string
 	columns                  []string
 	sourceLocation           bool
+}
+
+func fixedStorages() ([]fixedStorage, error) {
+	definitions := ingestion.FixedDefinitions()
+	storages := make([]fixedStorage, len(definitions))
+	for index, definition := range definitions {
+		storage, err := fixedStorageFor(definition)
+		if err != nil {
+			return nil, err
+		}
+		storages[index] = storage
+	}
+	return storages, nil
 }
 
 func fixedStorageFor(definition ingestion.FixedDefinition) (fixedStorage, error) {
