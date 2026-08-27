@@ -217,6 +217,7 @@ type MaintenanceColumn struct {
 
 type MaintenanceRow struct {
 	SourceRowNumber int
+	SourceFileName  string
 	BusinessKeyHash string
 	RowChecksum     string
 	Values          []string

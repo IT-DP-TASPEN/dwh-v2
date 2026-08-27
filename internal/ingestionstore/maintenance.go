@@ -370,7 +370,11 @@ func replaceMaintenanceSnapshot(ctx context.Context, connection *sql.Conn, runID
 			if row.BusinessKeyHash != "" {
 				businessKey = row.BusinessKeyHash
 			}
-			values[index] = []any{snapshot.RequestedDate.String(), snapshot.RequestedDate.String(), snapshot.FileName, row.SourceRowNumber, row.RowChecksum, businessKey}
+			sourceFileName := row.SourceFileName
+			if sourceFileName == "" {
+				sourceFileName = snapshot.FileName
+			}
+			values[index] = []any{snapshot.RequestedDate.String(), snapshot.RequestedDate.String(), sourceFileName, row.SourceRowNumber, row.RowChecksum, businessKey}
 			for _, value := range row.Values {
 				values[index] = append(values[index], value)
 			}

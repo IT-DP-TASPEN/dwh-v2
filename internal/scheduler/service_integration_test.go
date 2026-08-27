@@ -24,7 +24,7 @@ import (
 func TestRetryUntilSuccessAndChronologicalCursor(t *testing.T) {
 	db, service := integrationService(t)
 	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)
-	schedule := createDueSchedule(t, db, service, "retry", "eod_cif_opening_report_full", due)
+	schedule := createDueSchedule(t, db, service, "retry", "eod_detail_outstanding_rekening_pinjaman", due)
 
 	if changed, err := service.process(context.Background(), schedule.ID); err != nil || !changed {
 		t.Fatalf("submit first changed=%v error=%v", changed, err)

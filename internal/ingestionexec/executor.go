@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +61,24 @@ type fixedMemberResult struct {
 type maintenanceDateError struct {
 	class string
 	cause error
+}
+
+const (
+	detailOutstandingDefinitionKey = "eod_detail_outstanding_rekening_pinjaman"
+	detailOutstandingMergedFile    = "DetailOutstandingRekeningPinjaman.csv"
+	maintenanceSourceMerged        = "merged"
+	maintenanceSourceSplit         = "split"
+)
+
+var (
+	detailOutstandingSplitFile = regexp.MustCompile(`(?i)^DetailOutstandingRekeningPinjaman_(.+)\.csv$`)
+	detailOutstandingBranches  = []string{"000", "001", "002", "003", "004", "005", "006", "007", "008"}
+)
+
+type maintenanceSourceSelection struct {
+	mode            string
+	logicalFileName string
+	paths           []string
 }
 
 func (failure *maintenanceDateError) Error() string { return failure.cause.Error() }
@@ -693,30 +713,143 @@ func (executor *Executor) fetchAndSaveMaintenance(ctx context.Context, run inges
 			return 0, &maintenanceDateError{class: "source_contract", cause: fmt.Errorf("maintenance report path does not match requested date %s", requested)}
 		}
 	}
-	for _, sourcePath := range files {
-		disposition, candidate := ingestion.ClassifyMaintenanceFile(definition.Kind, path.Base(sourcePath))
-		if disposition != ingestion.MaintenanceRegistered || candidate == nil || candidate.Key != definition.Key {
-			continue
+	selection, err := selectMaintenanceSources(definition, files)
+	if err != nil {
+		return 0, &maintenanceDateError{class: "source_contract", cause: err}
+	}
+	if len(selection.paths) == 0 {
+		return 0, &maintenanceDateError{class: "date_local", cause: fmt.Errorf("registered maintenance file was not found for requested date %s", requested)}
+	}
+	if definition.Key == detailOutstandingDefinitionKey && executor.logger != nil {
+		names := make([]string, len(selection.paths))
+		for index, sourcePath := range selection.paths {
+			names[index] = path.Base(sourcePath)
 		}
+		executor.logger.InfoContext(ctx, "maintenance source selected", "job_key", definition.Key, "requested_date", requested.String(),
+			"source_mode", selection.mode, "source_files", names)
+	}
+	var combined ingestion.ParsedMaintenanceCSV
+	logicalRowNumber := 2
+	for _, sourcePath := range selection.paths {
+		fileName := path.Base(sourcePath)
 		downloadCtx := diagnosticScope(ctx, "source", "download_maintenance_report", "download_maintenance_report", requested.String(), "")
-		content, err := executor.client.DownloadMaintenanceReport(downloadCtx, path.Base(sourcePath), path.Dir(sourcePath))
+		content, err := executor.client.DownloadMaintenanceReport(downloadCtx, fileName, path.Dir(sourcePath))
 		if err != nil {
+			if selection.mode == maintenanceSourceSplit {
+				err = fmt.Errorf("download split maintenance file %s: %w", fileName, err)
+			}
 			return 0, err
 		}
 		parsed, err := ingestion.ParseMaintenanceCSV(diagnosticScope(ctx, "source_contract", "parse_maintenance_csv", "parse_maintenance_csv", requested.String(), ""), definition, requested, content)
 		if err != nil {
+			if selection.mode == maintenanceSourceSplit {
+				err = fmt.Errorf("parse split maintenance file %s: %w", fileName, err)
+			}
 			return 0, &maintenanceDateError{class: "source_contract", cause: err}
 		}
 		if parsed.AsOfDate != requested {
 			return 0, &maintenanceDateError{class: "source_contract", cause: fmt.Errorf("maintenance report date does not match requested date %s", requested)}
 		}
-		persistCtx := diagnosticScope(ctx, "persistence", "persist_maintenance", "persist_maintenance", requested.String(), "")
-		if err := executor.maintenance.SaveSnapshot(persistCtx, run.ID, run.OwnerID, ingestionstore.MaintenanceSnapshot{RequestedDate: requested, FileName: path.Base(sourcePath), Parsed: parsed}); err != nil {
-			return 0, &maintenanceDateError{class: "persistence", cause: err}
+		if err := appendMaintenanceSource(&combined, parsed, fileName, selection.mode, &logicalRowNumber); err != nil {
+			return 0, &maintenanceDateError{class: "source_contract", cause: err}
 		}
-		return uint64(len(parsed.Rows)), nil
 	}
-	return 0, &maintenanceDateError{class: "date_local", cause: fmt.Errorf("registered maintenance file was not found for requested date %s", requested)}
+	persistCtx := diagnosticScope(ctx, "persistence", "persist_maintenance", "persist_maintenance", requested.String(), "")
+	if err := executor.maintenance.SaveSnapshot(persistCtx, run.ID, run.OwnerID, ingestionstore.MaintenanceSnapshot{
+		RequestedDate: requested, FileName: selection.logicalFileName, Parsed: combined,
+	}); err != nil {
+		return 0, &maintenanceDateError{class: "persistence", cause: err}
+	}
+	return uint64(len(combined.Rows)), nil
+}
+
+func appendMaintenanceSource(combined *ingestion.ParsedMaintenanceCSV, parsed ingestion.ParsedMaintenanceCSV, fileName, mode string, logicalRowNumber *int) error {
+	if combined.Columns == nil {
+		*combined = parsed
+		combined.Rows = nil
+	} else if !slices.Equal(combined.Columns, parsed.Columns) {
+		return fmt.Errorf("DetailOutstandingRekeningPinjaman split header mismatch in %s", fileName)
+	}
+	for _, row := range parsed.Rows {
+		row.SourceFileName = fileName
+		if mode == maintenanceSourceSplit {
+			row.SourceRowNumber = *logicalRowNumber
+			*logicalRowNumber = *logicalRowNumber + 1
+		}
+		combined.Rows = append(combined.Rows, row)
+	}
+	return nil
+}
+
+func selectMaintenanceSources(definition ingestion.MaintenanceDefinition, files []string) (maintenanceSourceSelection, error) {
+	if definition.Key == detailOutstandingDefinitionKey {
+		return selectDetailOutstandingSources(definition, files)
+	}
+	for _, sourcePath := range files {
+		disposition, candidate := ingestion.ClassifyMaintenanceFile(definition.Kind, path.Base(sourcePath))
+		if disposition == ingestion.MaintenanceRegistered && candidate != nil && candidate.Key == definition.Key {
+			return maintenanceSourceSelection{mode: maintenanceSourceMerged, logicalFileName: path.Base(sourcePath), paths: []string{sourcePath}}, nil
+		}
+	}
+	return maintenanceSourceSelection{}, nil
+}
+
+func selectDetailOutstandingSources(definition ingestion.MaintenanceDefinition, files []string) (maintenanceSourceSelection, error) {
+	var merged, splitLooking []string
+	canonical := make(map[string]string, len(detailOutstandingBranches))
+	duplicateBranches := make(map[string][]string)
+	for _, sourcePath := range files {
+		fileName := path.Base(sourcePath)
+		if definition.FilePattern.MatchString(fileName) {
+			merged = append(merged, sourcePath)
+			continue
+		}
+		match := detailOutstandingSplitFile.FindStringSubmatch(fileName)
+		if match == nil {
+			continue
+		}
+		splitLooking = append(splitLooking, sourcePath)
+		branch := match[1]
+		if !slices.Contains(detailOutstandingBranches, branch) {
+			continue
+		}
+		if previous, exists := canonical[branch]; exists {
+			duplicateBranches[branch] = []string{previous, sourcePath}
+			continue
+		}
+		canonical[branch] = sourcePath
+	}
+	if len(merged) > 0 && len(splitLooking) > 0 {
+		return maintenanceSourceSelection{}, fmt.Errorf("invalid DetailOutstandingRekeningPinjaman source layout: merged and split files coexist")
+	}
+	if len(merged) > 1 {
+		return maintenanceSourceSelection{}, fmt.Errorf("duplicate DetailOutstandingRekeningPinjaman merged source: %s and %s", merged[0], merged[1])
+	}
+	for _, branch := range detailOutstandingBranches {
+		if duplicates := duplicateBranches[branch]; len(duplicates) > 0 {
+			return maintenanceSourceSelection{}, fmt.Errorf("duplicate DetailOutstandingRekeningPinjaman split branch %s: %s and %s", branch, duplicates[0], duplicates[1])
+		}
+	}
+	if len(merged) == 1 {
+		return maintenanceSourceSelection{mode: maintenanceSourceMerged, logicalFileName: detailOutstandingMergedFile, paths: merged}, nil
+	}
+	if len(canonical) == 0 {
+		return maintenanceSourceSelection{}, nil
+	}
+	missing := make([]string, 0, len(detailOutstandingBranches)-len(canonical))
+	paths := make([]string, 0, len(detailOutstandingBranches))
+	for _, branch := range detailOutstandingBranches {
+		sourcePath, exists := canonical[branch]
+		if !exists {
+			missing = append(missing, branch)
+			continue
+		}
+		paths = append(paths, sourcePath)
+	}
+	if len(missing) > 0 {
+		return maintenanceSourceSelection{}, fmt.Errorf("incomplete DetailOutstandingRekeningPinjaman split source; missing branches: %s", strings.Join(missing, ", "))
+	}
+	return maintenanceSourceSelection{mode: maintenanceSourceSplit, logicalFileName: detailOutstandingMergedFile, paths: paths}, nil
 }
 
 func maintenanceErrorClass(err error) string {
