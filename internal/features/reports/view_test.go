@@ -101,8 +101,9 @@ func TestReportOrganizationRendersScopedHTMXControlsAndVisibleDeleteCount(t *tes
 	}
 	folderID := uint64(3)
 	starred := ReportCard{
-		Value:         reporting.RuntimeReport{ID: 9, Name: "NPL", Description: "Loans", DatasourceName: "DWH", FolderID: &folderID, Starred: true},
-		FolderOptions: []FolderOption{{ID: 3, Name: "Kredit", Selected: true}}, ReturnQuery: "?q=NPL", Unfiled: false,
+		Value:             reporting.RuntimeReport{ID: 9, Name: "NPL", Description: "Loans", DatasourceName: "DWH", FolderID: &folderID, Starred: true},
+		FolderOptions:     []FolderOption{{ID: 3, Name: "Kredit", Selected: true}},
+		CurrentFolderName: "Kredit", ReturnQuery: "?q=NPL", Unfiled: false,
 	}
 	data := OrganizationData{
 		Query: "NPL", Heading: "All Reports", ReturnQuery: "?q=NPL", AllURL: "/reports?q=NPL", StarredURL: "/reports?q=NPL&starred=1",
@@ -121,12 +122,22 @@ func TestReportOrganizationRendersScopedHTMXControlsAndVisibleDeleteCount(t *tes
 	}
 	for _, want := range []string{
 		`hx-post="/reports/9/star?q=NPL"`, `hx-target="#report-browser"`, `aria-label="Unstar NPL"`,
-		`hx-post="/reports/9/folder?q=NPL"`, `<option value="3" selected>Kredit</option>`,
+		`hx-post="/reports/9/folder?q=NPL"`, `name="folder_id" value="3"`, `aria-label="Folder: Kredit"`,
+		`aria-label="Actions for Kredit"`, `aria-label="Actions for NPL"`, `>Rename folder</button>`,
+		`x-id="['folder-actions-popover']"`, `:aria-controls="$id('folder-actions-popover')"`,
+		`:id="$id('folder-actions-popover')" data-context-popover data-folder-actions-popover="3"`,
+		`x-cloak x-show="open"`,
+		`id="folder-rename-form-3" hx-preserve hx-boost="false"`, `data-confirm-success-focus="report-scope-all"`,
 		`data-confirm-message="Reports will not be deleted. 1 currently visible reports will return to No Folder / All Reports."`,
 		"dark:bg-slate-900",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("organization view missing %q", want)
+		}
+	}
+	for _, obsolete := range []string{">Manage</summary>", ">Move to folder</summary>", `role="menu`, `role="menuitem`, `id="folder-actions-popover-3"`, `aria-controls="folder-actions-popover-3"`} {
+		if strings.Contains(body, obsolete) {
+			t.Fatalf("organization view still contains %q", obsolete)
 		}
 	}
 }
@@ -141,7 +152,52 @@ func TestReportOrganizationOmitsEmptyStarredSection(t *testing.T) {
 	if err := renderer.RenderPage(recorder, http.StatusOK, "features/reports/index", adminshell.PageData{Title: "Reports", AppName: "Test", Data: data}); err != nil {
 		t.Fatal(err)
 	}
-	if body := recorder.Body.String(); strings.Contains(body, `id="starred-reports-heading"`) || !strings.Contains(body, "No reports are currently available to you.") || !strings.Contains(body, "No personal folders yet.") {
+	if body := recorder.Body.String(); strings.Contains(body, `id="starred-reports-heading"`) || strings.Contains(body, `aria-label="Folder:`) || !strings.Contains(body, "No reports are currently available to you.") || !strings.Contains(body, "No personal folders yet.") {
 		t.Fatalf("empty organization state=%s", body)
+	}
+}
+
+func TestReportOrganizationOmitsFolderBadgeWhenUnfiled(t *testing.T) {
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	data := OrganizationData{
+		Heading: "All Reports", Rows: []ReportCard{{
+			Value: reporting.RuntimeReport{ID: 10, Name: "Unfiled", DatasourceName: "DWH"}, Unfiled: true,
+			FolderOptions: []FolderOption{{ID: 3, Name: "Kredit"}},
+		}}, StarredRows: []ReportCard{}, Folders: []FolderView{},
+	}
+	if err := renderer.RenderPage(recorder, http.StatusOK, "features/reports/index", adminshell.PageData{Title: "Reports", AppName: "Test", Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, `aria-label="Folder:`) || !strings.Contains(body, `aria-label="Actions for Unfiled"`) {
+		t.Fatalf("unfiled organization state=%s", body)
+	}
+}
+
+func TestReportOrganizationRendersAuthoritativeRenameError(t *testing.T) {
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	data := OrganizationData{
+		Heading: "All Reports", Rows: []ReportCard{}, StarredRows: []ReportCard{},
+		Folders: []FolderView{{
+			Value: reporting.UserReportFolder{ID: 3, Name: "Kredit"}, Editing: true,
+			RenameValue: "  Deposito & Baru  ", NameError: "Folder name already exists.",
+		}},
+	}
+	if err := renderer.RenderPage(recorder, http.StatusUnprocessableEntity, "features/reports/index", adminshell.PageData{Title: "Reports", AppName: "Test", Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{`x-data="{ editing: true }"`, `value="  Deposito &amp; Baru  "`, `role="alert"`, "Folder name already exists."} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("rename error view missing %q", want)
+		}
 	}
 }

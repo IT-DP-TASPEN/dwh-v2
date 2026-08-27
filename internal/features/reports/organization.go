@@ -25,16 +25,19 @@ type FolderOption struct {
 }
 
 type ReportCard struct {
-	Value         reporting.RuntimeReport
-	FolderOptions []FolderOption
-	Unfiled       bool
-	ReturnQuery   string
+	Value             reporting.RuntimeReport
+	FolderOptions     []FolderOption
+	CurrentFolderName string
+	Unfiled           bool
+	ReturnQuery       string
 }
 
 type FolderView struct {
 	Value         reporting.UserReportFolder
 	Current       bool
+	Editing       bool
 	URL           string
+	RenameValue   string
 	NameError     string
 	DeleteMessage string
 }
@@ -55,7 +58,7 @@ func (handler *Handler) Index(writer http.ResponseWriter, request *http.Request)
 		http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
-	data, err := handler.organizationData(request, filter, 0, "", "")
+	data, err := handler.organizationData(request, filter, 0, "", "", "")
 	if errors.Is(err, reporting.ErrNotFound) {
 		handler.admin.NotFound(writer, request)
 		return
@@ -128,13 +131,13 @@ func (handler *Handler) CreateFolder(writer http.ResponseWriter, request *http.R
 	}
 	name := reporting.NormalizeFolderName(request.PostFormValue("name"))
 	if err := reporting.ValidateFolderName(name); err != nil {
-		handler.renderOrganizationError(writer, request, filter, 0, "", err.Error())
+		handler.renderOrganizationError(writer, request, filter, 0, "", "", err.Error())
 		return
 	}
 	principal, _ := browserauth.CurrentPrincipal(request.Context())
 	_, err := handler.reports.CreateUserReportFolder(request.Context(), principal.UserID, name, time.Now().UTC())
 	if errors.Is(err, reporting.ErrFolderNameTaken) {
-		handler.renderOrganizationError(writer, request, filter, 0, "", "Folder name already exists.")
+		handler.renderOrganizationError(writer, request, filter, 0, "", "", "Folder name already exists.")
 		return
 	}
 	if err != nil {
@@ -154,15 +157,16 @@ func (handler *Handler) RenameFolder(writer http.ResponseWriter, request *http.R
 		handler.admin.NotFound(writer, request)
 		return
 	}
-	name := reporting.NormalizeFolderName(request.PostFormValue("name"))
+	submittedName := request.PostFormValue("name")
+	name := reporting.NormalizeFolderName(submittedName)
 	if err := reporting.ValidateFolderName(name); err != nil {
-		handler.renderOrganizationError(writer, request, filter, folderID, err.Error(), "")
+		handler.renderOrganizationError(writer, request, filter, folderID, submittedName, err.Error(), "")
 		return
 	}
 	principal, _ := browserauth.CurrentPrincipal(request.Context())
 	err := handler.reports.RenameUserReportFolder(request.Context(), principal.UserID, folderID, name, time.Now().UTC())
 	if errors.Is(err, reporting.ErrFolderNameTaken) {
-		handler.renderOrganizationError(writer, request, filter, folderID, "Folder name already exists.", "")
+		handler.renderOrganizationError(writer, request, filter, folderID, submittedName, "Folder name already exists.", "")
 		return
 	}
 	if errors.Is(err, reporting.ErrNotFound) {
@@ -217,7 +221,7 @@ func (handler *Handler) organizationMutationSuccess(writer http.ResponseWriter, 
 		http.Redirect(writer, request, reportsURL(filter), http.StatusSeeOther)
 		return
 	}
-	data, err := handler.organizationData(request, filter, 0, "", "")
+	data, err := handler.organizationData(request, filter, 0, "", "", "")
 	if errors.Is(err, reporting.ErrNotFound) {
 		handler.admin.NotFound(writer, request)
 		return
@@ -245,8 +249,8 @@ func (handler *Handler) organizationMutationError(writer http.ResponseWriter, re
 	handler.admin.Internal(writer, request, operation, err)
 }
 
-func (handler *Handler) renderOrganizationError(writer http.ResponseWriter, request *http.Request, filter reporting.RuntimeReportFilter, renameFolderID uint64, renameError, createError string) {
-	data, err := handler.organizationData(request, filter, renameFolderID, renameError, createError)
+func (handler *Handler) renderOrganizationError(writer http.ResponseWriter, request *http.Request, filter reporting.RuntimeReportFilter, renameFolderID uint64, renameValue, renameError, createError string) {
+	data, err := handler.organizationData(request, filter, renameFolderID, renameValue, renameError, createError)
 	if errors.Is(err, reporting.ErrNotFound) {
 		handler.admin.NotFound(writer, request)
 		return
@@ -258,7 +262,7 @@ func (handler *Handler) renderOrganizationError(writer http.ResponseWriter, requ
 	handler.renderOrganization(writer, request, http.StatusUnprocessableEntity, data)
 }
 
-func (handler *Handler) organizationData(request *http.Request, filter reporting.RuntimeReportFilter, renameFolderID uint64, renameError, createError string) (OrganizationData, error) {
+func (handler *Handler) organizationData(request *http.Request, filter reporting.RuntimeReportFilter, renameFolderID uint64, renameValue, renameError, createError string) (OrganizationData, error) {
 	principal, _ := browserauth.CurrentPrincipal(request.Context())
 	organization, err := handler.reports.ListRuntimeReportOrganization(request.Context(), principal.UserID, filter)
 	if err != nil {
@@ -285,6 +289,8 @@ func (handler *Handler) organizationData(request *http.Request, filter reporting
 	for _, folder := range organization.Folders {
 		view := FolderView{Value: folder, Current: filter.FolderID != nil && folder.ID == *filter.FolderID, URL: reportsURL(reporting.RuntimeReportFilter{Query: filter.Query, FolderID: &folder.ID}), DeleteMessage: folderDeleteMessage(folder)}
 		if folder.ID == renameFolderID {
+			view.Editing = true
+			view.RenameValue = renameValue
 			view.NameError = renameError
 		}
 		if view.Current {
@@ -295,7 +301,11 @@ func (handler *Handler) organizationData(request *http.Request, filter reporting
 	for _, report := range organization.Reports {
 		card := ReportCard{Value: report, Unfiled: report.FolderID == nil, FolderOptions: make([]FolderOption, 0, len(organization.Folders)), ReturnQuery: data.ReturnQuery}
 		for _, folder := range organization.Folders {
-			card.FolderOptions = append(card.FolderOptions, FolderOption{ID: folder.ID, Name: folder.Name, Selected: report.FolderID != nil && *report.FolderID == folder.ID})
+			selected := report.FolderID != nil && *report.FolderID == folder.ID
+			card.FolderOptions = append(card.FolderOptions, FolderOption{ID: folder.ID, Name: folder.Name, Selected: selected})
+			if selected {
+				card.CurrentFolderName = folder.Name
+			}
 		}
 		data.Rows = append(data.Rows, card)
 		if !filter.Starred && filter.FolderID == nil && report.Starred {

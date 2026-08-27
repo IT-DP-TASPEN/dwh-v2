@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,12 +22,12 @@ import (
 const address = "127.0.0.1:4173"
 
 type fixture struct {
-	renderer  *render.Renderer
-	mu        sync.Mutex
-	polls     map[uint64]int
-	starred   map[uint64]bool
-	folders   map[uint64]*uint64
-	hasFolder bool
+	renderer    *render.Renderer
+	mu          sync.Mutex
+	polls       map[uint64]int
+	starred     map[uint64]bool
+	folders     map[uint64]*uint64
+	folderNames map[uint64]string
 }
 
 func main() {
@@ -71,16 +72,17 @@ func (fixture *fixture) page(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (fixture *fixture) resetReports() {
-	folderID := uint64(3)
+	kreditID := uint64(3)
+	depositoID := uint64(4)
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
 	fixture.starred = map[uint64]bool{1: false, 2: true}
-	fixture.folders = map[uint64]*uint64{1: &folderID, 2: nil}
-	fixture.hasFolder = true
+	fixture.folders = map[uint64]*uint64{1: &kreditID, 2: &depositoID}
+	fixture.folderNames = map[uint64]string{3: "Kredit", 4: "Deposito"}
 }
 
 func (fixture *fixture) reportsPage(writer http.ResponseWriter, request *http.Request) {
-	data := fixture.reportData(request)
+	data := fixture.reportData(request, 0, "", "")
 	pageData := adminshell.PageData{Title: "Reports", AppName: "Browser fixture", Data: data}
 	name := "admin"
 	if request.Header.Get("HX-Request") == "true" {
@@ -104,17 +106,44 @@ func (fixture *fixture) reportMutation(writer http.ResponseWriter, request *http
 		fixture.starred[id] = request.PostFormValue("starred") == "true"
 	case len(parts) == 3 && parts[0] == "reports" && parts[2] == "folder":
 		id, _ := strconv.ParseUint(parts[1], 10, 64)
-		if request.PostFormValue("folder_id") == "3" && fixture.hasFolder {
-			folderID := uint64(3)
+		folderID, _ := strconv.ParseUint(request.PostFormValue("folder_id"), 10, 64)
+		if _, exists := fixture.folderNames[folderID]; exists {
 			fixture.folders[id] = &folderID
 		} else {
 			fixture.folders[id] = nil
 		}
-	case len(parts) == 4 && parts[0] == "reports" && parts[1] == "folders" && parts[2] == "3" && parts[3] == "delete":
-		fixture.hasFolder = false
-		for id := range fixture.folders {
-			fixture.folders[id] = nil
+	case len(parts) == 4 && parts[0] == "reports" && parts[1] == "folders" && parts[3] == "delete":
+		folderID, _ := strconv.ParseUint(parts[2], 10, 64)
+		delete(fixture.folderNames, folderID)
+		for reportID, assignedFolderID := range fixture.folders {
+			if assignedFolderID != nil && *assignedFolderID == folderID {
+				fixture.folders[reportID] = nil
+			}
 		}
+	case len(parts) == 4 && parts[0] == "reports" && parts[1] == "folders" && parts[3] == "rename":
+		folderID, _ := strconv.ParseUint(parts[2], 10, 64)
+		submitted := request.PostFormValue("name")
+		name := strings.TrimSpace(submitted)
+		errorMessage := ""
+		if name == "" {
+			errorMessage = "folder name must not be empty"
+		}
+		for otherID, otherName := range fixture.folderNames {
+			if otherID != folderID && strings.EqualFold(otherName, name) {
+				errorMessage = "Folder name already exists."
+			}
+		}
+		if errorMessage != "" {
+			fixture.mu.Unlock()
+			fixture.renderReports(writer, request, http.StatusUnprocessableEntity, fixture.reportData(request, folderID, submitted, errorMessage))
+			return
+		}
+		if _, exists := fixture.folderNames[folderID]; !exists {
+			fixture.mu.Unlock()
+			http.NotFound(writer, request)
+			return
+		}
+		fixture.folderNames[folderID] = name
 	default:
 		fixture.mu.Unlock()
 		http.NotFound(writer, request)
@@ -122,7 +151,7 @@ func (fixture *fixture) reportMutation(writer http.ResponseWriter, request *http
 	}
 	fixture.mu.Unlock()
 	if len(parts) == 4 {
-		http.Redirect(writer, request, "/reports", http.StatusSeeOther)
+		http.Redirect(writer, request, "/reports"+reportQuery(request), http.StatusSeeOther)
 		return
 	}
 	if request.Header.Get("HX-Request") == "true" {
@@ -132,16 +161,27 @@ func (fixture *fixture) reportMutation(writer http.ResponseWriter, request *http
 	http.Redirect(writer, request, "/reports"+reportQuery(request), http.StatusSeeOther)
 }
 
-func (fixture *fixture) reportData(request *http.Request) reportsfeature.OrganizationData {
+func (fixture *fixture) renderReports(writer http.ResponseWriter, request *http.Request, status int, data reportsfeature.OrganizationData) {
+	pageData := adminshell.PageData{Title: "Reports", AppName: "Browser fixture", Data: data}
+	if err := fixture.renderer.RenderPartial(writer, status, "features/reports/index", "admin", pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (fixture *fixture) reportData(request *http.Request, renameFolderID uint64, renameValue, renameError string) reportsfeature.OrganizationData {
 	fixture.mu.Lock()
 	starred := map[uint64]bool{1: fixture.starred[1], 2: fixture.starred[2]}
 	folders := map[uint64]*uint64{1: fixture.folders[1], 2: fixture.folders[2]}
-	hasFolder := fixture.hasFolder
+	folderNames := make(map[uint64]string, len(fixture.folderNames))
+	for id, name := range fixture.folderNames {
+		folderNames[id] = name
+	}
 	fixture.mu.Unlock()
 
 	query := strings.TrimSpace(request.URL.Query().Get("q"))
 	starredScope := request.URL.Query().Get("starred") == "1"
-	folderScope := request.URL.Query().Get("folder") == "3" && hasFolder
+	requestedFolderID, _ := strconv.ParseUint(request.URL.Query().Get("folder"), 10, 64)
+	_, folderScope := folderNames[requestedFolderID]
 	values := []reporting.RuntimeReport{
 		{ID: 1, Name: "NPL per Cabang", Description: "Loan quality", DatasourceName: "DWH", FolderID: folders[1], Starred: starred[1]},
 		{ID: 2, Name: "Nominatif Deposito", Description: "Funding", DatasourceName: "DWH", FolderID: folders[2], Starred: starred[2]},
@@ -151,7 +191,7 @@ func (fixture *fixture) reportData(request *http.Request) reportsfeature.Organiz
 		if query != "" && !strings.Contains(strings.ToLower(value.Name+" "+value.Description), strings.ToLower(query)) {
 			continue
 		}
-		if starredScope && !value.Starred || folderScope && (value.FolderID == nil || *value.FolderID != 3) {
+		if starredScope && !value.Starred || folderScope && (value.FolderID == nil || *value.FolderID != requestedFolderID) {
 			continue
 		}
 		visible = append(visible, value)
@@ -163,7 +203,7 @@ func (fixture *fixture) reportData(request *http.Request) reportsfeature.Organiz
 	if starredScope {
 		filterValues.Set("starred", "1")
 	} else if folderScope {
-		filterValues.Set("folder", "3")
+		filterValues.Set("folder", strconv.FormatUint(requestedFolderID, 10))
 	}
 	returnQuery := ""
 	if encoded := filterValues.Encode(); encoded != "" {
@@ -171,33 +211,46 @@ func (fixture *fixture) reportData(request *http.Request) reportsfeature.Organiz
 	}
 	data := reportsfeature.OrganizationData{
 		Query: query, Heading: "All Reports", EmptyMessage: "No reports match this search.", ReturnQuery: returnQuery,
-		AllURL: fixtureReportURL(query, ""), StarredURL: fixtureReportURL(query, "starred"), StarredScope: starredScope,
+		AllURL: fixtureReportURL(query, true, 0), StarredURL: fixtureReportURL(query, false, 0), StarredScope: starredScope,
 		FolderScope: folderScope, StarredVisibleCount: boolCount(starred[1]) + boolCount(starred[2]),
 		Rows: make([]reportsfeature.ReportCard, 0, len(visible)), StarredRows: make([]reportsfeature.ReportCard, 0),
-		Folders: make([]reportsfeature.FolderView, 0, 1),
+		Folders: make([]reportsfeature.FolderView, 0, len(folderNames)),
 	}
 	if starredScope {
 		data.Heading, data.EmptyMessage = "Starred", "No starred reports match this search."
 	}
 	if folderScope {
-		data.Heading, data.EmptyMessage, data.CurrentFolderID = "Kredit", "No reports in this folder.", 3
+		data.Heading, data.EmptyMessage, data.CurrentFolderID = folderNames[requestedFolderID], "No reports in this folder.", requestedFolderID
 	}
-	folderCount := 0
-	for _, folderID := range folders {
-		if folderID != nil && *folderID == 3 {
-			folderCount++
+	folderIDs := make([]uint64, 0, len(folderNames))
+	for folderID := range folderNames {
+		folderIDs = append(folderIDs, folderID)
+	}
+	sort.Slice(folderIDs, func(left, right int) bool { return folderNames[folderIDs[left]] < folderNames[folderIDs[right]] })
+	for _, folderID := range folderIDs {
+		folderCount := 0
+		for _, assignedFolderID := range folders {
+			if assignedFolderID != nil && *assignedFolderID == folderID {
+				folderCount++
+			}
 		}
-	}
-	if hasFolder {
-		data.Folders = append(data.Folders, reportsfeature.FolderView{
-			Value: reporting.UserReportFolder{ID: 3, Name: "Kredit", VisibleReportCount: folderCount}, Current: folderScope,
-			URL: fixtureReportURL(query, "folder"), DeleteMessage: fmt.Sprintf("Reports will not be deleted. %d currently visible reports will return to No Folder / All Reports.", folderCount),
-		})
+		view := reportsfeature.FolderView{
+			Value: reporting.UserReportFolder{ID: folderID, Name: folderNames[folderID], VisibleReportCount: folderCount}, Current: folderScope && requestedFolderID == folderID,
+			URL: fixtureReportURL(query, false, folderID), DeleteMessage: fmt.Sprintf("Reports will not be deleted. %d currently visible reports will return to No Folder / All Reports.", folderCount),
+		}
+		if folderID == renameFolderID {
+			view.Editing, view.RenameValue, view.NameError = true, renameValue, renameError
+		}
+		data.Folders = append(data.Folders, view)
 	}
 	for _, value := range visible {
 		card := reportsfeature.ReportCard{Value: value, Unfiled: value.FolderID == nil, ReturnQuery: returnQuery}
-		if hasFolder {
-			card.FolderOptions = []reportsfeature.FolderOption{{ID: 3, Name: "Kredit", Selected: value.FolderID != nil && *value.FolderID == 3}}
+		for _, folderID := range folderIDs {
+			selected := value.FolderID != nil && *value.FolderID == folderID
+			card.FolderOptions = append(card.FolderOptions, reportsfeature.FolderOption{ID: folderID, Name: folderNames[folderID], Selected: selected})
+			if selected {
+				card.CurrentFolderName = folderNames[folderID]
+			}
 		}
 		data.Rows = append(data.Rows, card)
 		if !starredScope && !folderScope && value.Starred {
@@ -207,15 +260,15 @@ func (fixture *fixture) reportData(request *http.Request) reportsfeature.Organiz
 	return data
 }
 
-func fixtureReportURL(query, scope string) string {
+func fixtureReportURL(query string, all bool, folderID uint64) string {
 	values := url.Values{}
 	if query != "" {
 		values.Set("q", query)
 	}
-	if scope == "starred" {
+	if !all && folderID == 0 {
 		values.Set("starred", "1")
-	} else if scope == "folder" {
-		values.Set("folder", "3")
+	} else if folderID != 0 {
+		values.Set("folder", strconv.FormatUint(folderID, 10))
 	}
 	if encoded := values.Encode(); encoded != "" {
 		return "/reports?" + encoded

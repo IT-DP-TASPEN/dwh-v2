@@ -7489,6 +7489,46 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
       }
     }
   }));
+  module_default.data("contextMenu", () => ({
+    open: false,
+    left: 0,
+    top: 0,
+    maxHeight: 0,
+    toggle() {
+      if (this.open) {
+        this.close(true);
+        return;
+      }
+      window.dispatchEvent(new CustomEvent("context-menu-open", { detail: this.$el }));
+      this.open = true;
+      this.$nextTick(() => {
+        this.place();
+        this.$refs.first?.focus();
+      });
+    },
+    place() {
+      const trigger2 = this.$refs.trigger.getBoundingClientRect();
+      const menu = this.$refs.menu;
+      const margin = 8;
+      const gap = 6;
+      const width = menu.offsetWidth;
+      this.left = Math.max(margin, Math.min(trigger2.right - width, window.innerWidth - width - margin));
+      const below = window.innerHeight - trigger2.bottom - gap - margin;
+      const above = trigger2.top - gap - margin;
+      const openAbove = below < Math.min(menu.scrollHeight, 160) && above > below;
+      this.maxHeight = Math.max(48, openAbove ? above : below);
+      const height = Math.min(menu.scrollHeight, this.maxHeight);
+      this.top = openAbove ? trigger2.top - gap - height : trigger2.bottom + gap;
+    },
+    close(restoreFocus = false) {
+      if (!this.open) return;
+      this.open = false;
+      if (restoreFocus) this.$nextTick(() => this.$refs.trigger?.focus());
+    },
+    viewportChanged() {
+      this.close(this.$refs.menu?.contains(document.activeElement));
+    }
+  }));
   module_default.data("confirmationDialog", () => ({
     form: null,
     trigger: null,
@@ -7497,7 +7537,7 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     confirmLabel: "Confirm",
     open(event) {
       this.form = event.detail.form;
-      this.trigger = event.detail.trigger;
+      this.trigger = document.getElementById(this.form.dataset.confirmCancelFocus || "") || event.detail.trigger;
       this.title = this.form.dataset.confirmTitle || "Confirm action";
       this.message = this.form.dataset.confirmMessage || "Are you sure?";
       this.confirmLabel = this.form.dataset.confirmLabel || "Confirm";
@@ -7509,6 +7549,8 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     },
     confirm() {
       const form = this.form;
+      const successFocus = document.getElementById(form.dataset.confirmSuccessFocus || "");
+      if (successFocus) this.trigger = successFocus;
       this.$refs.dialog.close();
       form.dataset.confirmed = "true";
       form.requestSubmit();
