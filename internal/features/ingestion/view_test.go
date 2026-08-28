@@ -1,6 +1,7 @@
 package ingestion
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +23,46 @@ func TestMaintenanceParameterFieldsContainOnlyRequestedDates(t *testing.T) {
 	fields := parameterFields(parameters)
 	if len(fields) != 3 || fields[0] != (ParameterField{"From", "2026-08-23"}) || fields[1] != (ParameterField{"To", "2026-08-24"}) || fields[2] != (ParameterField{"Dates", "2"}) {
 		t.Fatalf("fields=%+v", fields)
+	}
+}
+
+func TestRunAllChildStatusesUseRunsListBadges(t *testing.T) {
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renderPartial := func(page, name string, data any) string {
+		t.Helper()
+		response := httptest.NewRecorder()
+		if err := renderer.RenderPartial(response, http.StatusOK, page, name, render.PageData{Data: data}); err != nil {
+			t.Fatal(err)
+		}
+		return response.Body.String()
+	}
+
+	statuses := []string{"planned", "queued", "running", "succeeded", "failed", "skipped", "cancelled", "abandoned", "completed", "completed_with_skips", "future_status"}
+	for _, key := range statuses {
+		t.Run(key, func(t *testing.T) {
+			status := PresentStatus(key)
+			list := renderPartial("features/ingestion/runs", "runs-table", RunPage{Rows: []RunView{{ID: 1, Status: status}}})
+			child := RunView{ID: 2, ChildPosition: 1, JobName: "Child", Status: status}
+			if key == "skipped" {
+				child.SkipReason = "not selected"
+			}
+			children := renderPartial("features/ingestion/show", "run-children-content", RunDetail{Children: []RunView{child}})
+			expected := fmt.Sprintf(`<span aria-label="Status: %s" class="rounded-full px-2 py-1 text-xs %s">%s</span>`, status.Label, status.Class, status.Label)
+			for surface, body := range map[string]string{"runs list": list, "Run All children": children} {
+				if !strings.Contains(body, expected) {
+					t.Errorf("%s missing shared %s badge: %s", surface, key, body)
+				}
+			}
+			if strings.Contains(children, fmt.Sprintf(`<td class="px-4 py-3">%s</td>`, status.Label)) {
+				t.Errorf("child %s status rendered as plain text: %s", key, children)
+			}
+			if key == "future_status" && status.Class != "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300" {
+				t.Errorf("unknown status class=%q", status.Class)
+			}
+		})
 	}
 }
 
