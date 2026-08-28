@@ -4,6 +4,8 @@ package ingestion
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -98,4 +100,161 @@ func TestRunReadModelsPaginationAndPlans(t *testing.T) {
 			t.Fatalf("%s plan did not use Phase 6 index: %v\n%s", name, err, plan)
 		}
 	}
+}
+
+func TestRunsListChildVisibilityAndParentSummaries(t *testing.T) {
+	db := integrationdb.Open(t)
+	ctx := context.Background()
+	from, _ := core.ParseCalendarDate("2026-06-02")
+	parameters, _ := ingestionrun.NewRangeExecution("cif_opening_report", from, from)
+	insertJob := func(jobKey, status, trigger string) uint64 {
+		t.Helper()
+		result, err := db.Exec(`INSERT INTO ingestion_runs
+			(kind,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,trigger_reference,created_at,finished_at)
+			VALUES ('job',?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP(6))`, jobKey, status, parameters.Kind, parameters.Version, parameters.JSON, parameters.Checksum[:], trigger,
+			fmt.Sprintf("runs-list-%s-%d", trigger, time.Now().UnixNano()), time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := result.LastInsertId()
+		return uint64(id)
+	}
+	manualID := insertJob("cif_opening_report", "succeeded", "direct")
+	scheduledID := insertJob("journal_transaction_report", "failed", "scheduler")
+
+	catalog, _ := core.NewCatalog()
+	runs, _ := ingestionrun.NewRepository(db, catalog)
+	parentID, err := runs.CreateRunAll(ctx, from, from, ingestionrun.TriggerDirect, fmt.Sprintf("runs-list-parent-%d", time.Now().UnixNano()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var childIDs []uint64
+	if err := db.Select(&childIDs, `SELECT id FROM ingestion_runs WHERE parent_run_id=? ORDER BY child_position`, parentID); err != nil || len(childIDs) != 36 {
+		t.Fatalf("children=%d error=%v", len(childIDs), err)
+	}
+	if _, err := db.Exec(`UPDATE ingestion_runs SET status=CASE
+		WHEN child_position<=30 THEN 'succeeded' WHEN child_position<=32 THEN 'failed'
+		WHEN child_position=33 THEN 'running' ELSE 'planned' END WHERE parent_run_id=?`, parentID); err != nil {
+		t.Fatal(err)
+	}
+
+	parentParameters, _ := ingestionrun.NewRunAllRange(from, from)
+	emptyResult, err := db.Exec(`INSERT INTO ingestion_runs
+		(kind,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,trigger_reference,created_at)
+		VALUES ('run_all_parent','running',?,?,?,?,?,?,?)`, parentParameters.Kind, parentParameters.Version, parentParameters.JSON, parentParameters.Checksum[:], "direct",
+		fmt.Sprintf("runs-list-empty-%d", time.Now().UnixNano()), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyParentID, _ := emptyResult.LastInsertId()
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE parent_run_id=?`, parentID)
+		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id IN (?,?,?,?)`, parentID, uint64(emptyParentID), manualID, scheduledID)
+	})
+
+	repository := NewRepository(db)
+	service, _ := NewService(repository)
+	defaultPage, err := service.ListRuns(ctx, RunFilter{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []uint64{manualID, scheduledID, parentID, uint64(emptyParentID)} {
+		if findRunView(defaultPage.Rows, id) == nil {
+			t.Errorf("default page missing top-level run %d", id)
+		}
+	}
+	for _, id := range childIDs {
+		if findRunView(defaultPage.Rows, id) != nil {
+			t.Fatalf("default page exposed child %d", id)
+		}
+	}
+	for index := 1; index < len(defaultPage.Rows); index++ {
+		if defaultPage.Rows[index-1].ID <= defaultPage.Rows[index].ID {
+			t.Fatalf("top-level order changed at %d: %d <= %d", index, defaultPage.Rows[index-1].ID, defaultPage.Rows[index].ID)
+		}
+	}
+	var topLevelTotal, physicalTotal int64
+	if err := db.Get(&topLevelTotal, `SELECT COUNT(*) FROM ingestion_runs WHERE kind<>'run_all_child'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&physicalTotal, `SELECT COUNT(*) FROM ingestion_runs`); err != nil {
+		t.Fatal(err)
+	}
+	if defaultPage.Pagination.Total != topLevelTotal || physicalTotal-topLevelTotal < int64(len(childIDs)) {
+		t.Fatalf("pagination total=%d top-level=%d physical=%d children=%d", defaultPage.Pagination.Total, topLevelTotal, physicalTotal, len(childIDs))
+	}
+	parent := findRunView(defaultPage.Rows, parentID)
+	if parent == nil || parent.RunAllSummary == nil || *parent.RunAllSummary != (RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}) {
+		t.Fatalf("parent summary=%+v", parent)
+	}
+	emptyParent := findRunView(defaultPage.Rows, uint64(emptyParentID))
+	if emptyParent == nil || emptyParent.RunAllSummary == nil || *emptyParent.RunAllSummary != (RunAllSummary{}) {
+		t.Fatalf("empty parent summary=%+v", emptyParent)
+	}
+
+	explicitChildren, err := service.ListRuns(ctx, RunFilter{Kind: "run_all_child"}, 1)
+	if err != nil || findRunView(explicitChildren.Rows, childIDs[0]) == nil {
+		t.Fatalf("explicit child kind rows=%d error=%v", len(explicitChildren.Rows), err)
+	}
+	failedDefault, err := service.ListRuns(ctx, RunFilter{Status: "failed"}, 1)
+	if err != nil || findRunView(failedDefault.Rows, scheduledID) == nil || findRunView(failedDefault.Rows, childIDs[30]) != nil {
+		t.Fatalf("default failed filter rows=%d error=%v", len(failedDefault.Rows), err)
+	}
+	failedChildren, err := service.ListRuns(ctx, RunFilter{Kind: "run_all_child", Status: "failed"}, 1)
+	if err != nil || findRunView(failedChildren.Rows, scheduledID) != nil || findRunView(failedChildren.Rows, childIDs[30]) == nil || findRunView(failedChildren.Rows, childIDs[31]) == nil {
+		t.Fatalf("failed child filter rows=%d error=%v", len(failedChildren.Rows), err)
+	}
+	jobDefault, err := service.ListRuns(ctx, RunFilter{Job: "journal_transaction_report"}, 1)
+	if err != nil || findRunView(jobDefault.Rows, scheduledID) == nil || findRunView(jobDefault.Rows, childIDs[1]) != nil {
+		t.Fatalf("default job filter rows=%d error=%v", len(jobDefault.Rows), err)
+	}
+	jobChildren, err := service.ListRuns(ctx, RunFilter{Kind: "run_all_child", Job: "journal_transaction_report"}, 1)
+	if err != nil || len(jobChildren.Rows) == 0 {
+		t.Fatalf("explicit child job filter rows=%d error=%v", len(jobChildren.Rows), err)
+	}
+	for _, row := range jobChildren.Rows {
+		if row.Kind != "run_all_child" || row.JobKey != "journal_transaction_report" {
+			t.Fatalf("explicit child job filter returned %+v", row)
+		}
+	}
+
+	children, err := service.RunAllChildren(ctx, parentID)
+	if err != nil || len(children.Rows) != 36 {
+		t.Fatalf("fragment children=%d error=%v", len(children.Rows), err)
+	}
+	for index, child := range children.Rows {
+		if child.ParentRunID == nil || *child.ParentRunID != parentID || child.ChildPosition != uint16(index+1) {
+			t.Fatalf("fragment child %d=%+v", index, child)
+		}
+	}
+	emptyChildren, err := service.RunAllChildren(ctx, uint64(emptyParentID))
+	if err != nil || len(emptyChildren.Rows) != 0 {
+		t.Fatalf("empty fragment=%+v error=%v", emptyChildren, err)
+	}
+	for _, invalidID := range []uint64{manualID, ^uint64(0)} {
+		if _, err := service.RunAllChildren(ctx, invalidID); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("invalid parent %d error=%v", invalidID, err)
+		}
+	}
+
+	summaries, err := repository.runAllSummaries(ctx, []uint64{parentID, uint64(emptyParentID)})
+	if err != nil || summaries[parentID] != (RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}) || summaries[uint64(emptyParentID)] != (RunAllSummary{}) {
+		t.Fatalf("batched summaries=%+v error=%v", summaries, err)
+	}
+	if _, err := db.Exec(`UPDATE ingestion_runs SET status='succeeded' WHERE parent_run_id=?`, parentID); err != nil {
+		t.Fatal(err)
+	}
+	allComplete, err := repository.runAllSummaries(ctx, []uint64{parentID})
+	if err != nil || allComplete[parentID] != (RunAllSummary{Total: 36, Complete: 36}) {
+		t.Fatalf("all-complete summary=%+v error=%v", allComplete[parentID], err)
+	}
+}
+
+func findRunView(rows []RunView, id uint64) *RunView {
+	for index := range rows {
+		if rows[index].ID == id {
+			return &rows[index]
+		}
+	}
+	return nil
 }

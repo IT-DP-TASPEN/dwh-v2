@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/jmoiron/sqlx"
+
+	"github.com/ibldzn/go-admin/internal/ingestionrun"
 )
 
 const runColumns = `r.id,r.kind,r.parent_run_id,r.child_position,r.job_key,r.status,r.parameter_kind,r.parameter_version,
@@ -38,7 +40,10 @@ func (repository *Repository) ListRuns(ctx context.Context, filter RunFilter, li
 }
 
 func runWhere(filter RunFilter) (string, []any) {
-	clauses, arguments := make([]string, 0, 4), make([]any, 0, 4)
+	clauses, arguments := make([]string, 0, 5), make([]any, 0, 4)
+	if filter.Kind == "" {
+		clauses = append(clauses, `r.kind<>'run_all_child'`)
+	}
 	for _, value := range []struct{ column, value string }{{"r.job_key", filter.Job}, {"r.status", filter.Status}, {"r.kind", filter.Kind}, {"r.trigger_type", filter.Trigger}} {
 		if value.value != "" {
 			clauses, arguments = append(clauses, value.column+`=?`), append(arguments, value.value)
@@ -50,6 +55,48 @@ func runWhere(filter RunFilter) (string, []any) {
 	return ` WHERE ` + strings.Join(clauses, ` AND `), arguments
 }
 
+func (repository *Repository) runAllSummaries(ctx context.Context, parentIDs []uint64) (map[uint64]RunAllSummary, error) {
+	result := make(map[uint64]RunAllSummary, len(parentIDs))
+	for _, parentID := range parentIDs {
+		result[parentID] = RunAllSummary{}
+	}
+	if len(parentIDs) == 0 {
+		return result, nil
+	}
+	query, arguments, err := sqlx.In(`SELECT parent_run_id,status,COUNT(*) count FROM ingestion_runs
+		WHERE parent_run_id IN (?) GROUP BY parent_run_id,status`, parentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("prepare Run All summaries: %w", err)
+	}
+	var rows []struct {
+		ParentID uint64 `db:"parent_run_id"`
+		Status   string `db:"status"`
+		Count    uint64 `db:"count"`
+	}
+	if err := repository.db.SelectContext(ctx, &rows, query, arguments...); err != nil {
+		return nil, fmt.Errorf("summarize Run All children: %w", err)
+	}
+	for _, row := range rows {
+		summary := result[row.ParentID]
+		summary.add(row.Status, row.Count)
+		result[row.ParentID] = summary
+	}
+	return result, nil
+}
+
+func (summary *RunAllSummary) add(status string, count uint64) {
+	summary.Total += count
+	if ingestionrun.IsTerminal(ingestionrun.Status(status)) {
+		summary.Complete += count
+	}
+	if status == string(ingestionrun.StatusFailed) {
+		summary.Failed += count
+	}
+	if status == string(ingestionrun.StatusRunning) {
+		summary.Running += count
+	}
+}
+
 func (repository *Repository) FindRun(ctx context.Context, id uint64) (runRow, error) {
 	var row runRow
 	err := repository.db.GetContext(ctx, &row, `SELECT `+runDetailColumns+` FROM ingestion_runs r LEFT JOIN users u ON u.id=r.requested_by_user_id WHERE r.id=?`, id)
@@ -58,8 +105,16 @@ func (repository *Repository) FindRun(ctx context.Context, id uint64) (runRow, e
 
 func (repository *Repository) Children(ctx context.Context, parentID uint64) ([]runRow, error) {
 	rows := []runRow{}
-	err := repository.db.SelectContext(ctx, &rows, `SELECT `+runColumns+` FROM ingestion_runs r LEFT JOIN users u ON u.id=r.requested_by_user_id WHERE r.parent_run_id=? ORDER BY r.child_position`, parentID)
+	err := repository.db.SelectContext(ctx, &rows, `SELECT `+runColumns+` FROM ingestion_runs r LEFT JOIN users u ON u.id=r.requested_by_user_id WHERE r.parent_run_id=? AND r.kind='run_all_child' ORDER BY r.child_position ASC`, parentID)
 	return rows, err
+}
+
+func (repository *Repository) RunAllChildren(ctx context.Context, parentID uint64) ([]runRow, error) {
+	var id uint64
+	if err := repository.db.GetContext(ctx, &id, `SELECT id FROM ingestion_runs WHERE id=? AND kind='run_all_parent'`, parentID); err != nil {
+		return nil, err
+	}
+	return repository.Children(ctx, id)
 }
 
 func (repository *Repository) ActiveRunID(ctx context.Context, jobKey string) (uint64, bool, error) {

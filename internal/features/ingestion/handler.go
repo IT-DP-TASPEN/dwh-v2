@@ -24,6 +24,7 @@ const maxRunFormBody = 32 << 10
 
 type runService interface {
 	ListRuns(context.Context, RunFilter, int) (RunPage, error)
+	RunAllChildren(context.Context, uint64) (RunChildren, error)
 	FindRun(context.Context, uint64) (RunDetail, error)
 	OverviewRuns(context.Context) (RunOverview, error)
 	OverviewSources(context.Context) (SourceOverview, error)
@@ -123,6 +124,26 @@ func (handler *Handler) Runs(writer http.ResponseWriter, request *http.Request) 
 	}
 	if err := handler.admin.RenderPartial(writer, http.StatusOK, "features/ingestion/runs", name, pageData); err != nil {
 		handler.admin.Internal(writer, request, "render run history", err)
+	}
+}
+
+func (handler *Handler) RunAllChildren(writer http.ResponseWriter, request *http.Request) {
+	id, ok := handler.routeID(writer, request)
+	if !ok {
+		return
+	}
+	children, err := handler.service.RunAllChildren(request.Context(), id)
+	if err != nil {
+		handler.readError(writer, request, "list Run All children", err)
+		return
+	}
+	pageData, ok := handler.admin.PageData(request, "Run All children", children)
+	if !ok {
+		handler.admin.Internal(writer, request, "prepare Run All children", errors.New("principal missing"))
+		return
+	}
+	if err := handler.admin.RenderPartial(writer, http.StatusOK, "features/ingestion/runs", "run-all-children", pageData); err != nil {
+		handler.admin.Internal(writer, request, "render Run All children", err)
 	}
 }
 

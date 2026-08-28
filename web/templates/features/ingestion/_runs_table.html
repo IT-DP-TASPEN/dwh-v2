@@ -1,8 +1,68 @@
 {{define "run-status-badge"}}<span aria-label="Status: {{.Label}}" class="rounded-full px-2 py-1 text-xs {{.Class}}">{{.Label}}</span>{{end}}
 
+{{define "run-all-children"}}
+{{if .Data.Rows}}
+<ol aria-label="Run All #{{.Data.ParentID}} children" class="space-y-2">
+  {{range .Data.Rows}}
+  <li data-run-all-child data-child-position="{{.ChildPosition}}" class="grid gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm sm:grid-cols-3 sm:items-center dark:border-slate-700 dark:bg-slate-950">
+    <div class="flex items-center gap-2"><span aria-hidden="true">↳</span><span class="text-xs text-slate-500">Position {{.ChildPosition}}</span><a class="font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="/runs/{{.ID}}">#{{.ID}}</a></div>
+    <div class="min-w-0"><p class="truncate">{{.JobName}}</p>{{if .ProgressTotal}}<p class="text-xs text-slate-500">Progress {{.ProgressSucceeded}} / {{.ProgressTotal}}</p>{{end}}</div>
+    <div>{{template "run-status-badge" .Status}}{{if .SkipReason}}<span class="ml-2 text-xs text-slate-500">{{.SkipReason}}</span>{{end}}</div>
+  </li>
+  {{end}}
+</ol>
+{{else}}<p class="text-sm text-slate-500">No children</p>{{end}}
+{{end}}
+
 {{define "runs-table"}}
 <div id="runs-table">
-  <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900"><table class="min-w-full divide-y divide-slate-200 text-left text-sm dark:divide-slate-800"><thead><tr><th class="px-4 py-3">Run</th><th class="px-4 py-3">Job</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Trigger</th><th class="px-4 py-3">Created</th></tr></thead><tbody class="divide-y divide-slate-100 dark:divide-slate-800">{{range .Data.Rows}}<tr><td class="px-4 py-3"><a class="font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="/runs/{{.ID}}">#{{.ID}}</a><span class="block text-xs text-slate-500">{{.KindLabel}}</span></td><td class="px-4 py-3">{{if .JobName}}{{.JobName}}{{else}}Run All{{end}}</td><td class="px-4 py-3">{{template "run-status-badge" .Status}}</td><td class="px-4 py-3">{{.Trigger}}</td><td class="whitespace-nowrap px-4 py-3">{{.CreatedAt}}</td></tr>{{else}}<tr><td colspan="5" class="px-4 py-12 text-center text-slate-500">No runs found.</td></tr>{{end}}</tbody></table></div>
+  <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+    <table class="min-w-full divide-y divide-slate-200 text-left text-sm dark:divide-slate-800">
+      <thead><tr><th class="px-4 py-3">Run</th><th class="px-4 py-3">Job</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Trigger</th><th class="px-4 py-3">Created</th></tr></thead>
+      {{range .Data.Rows}}
+      {{if eq .Kind "run_all_parent"}}
+      <tbody class="border-t border-slate-100 dark:border-slate-800" x-data="{ open: false, loaded: false, loading: false, failed: false, load() { if (this.loaded || this.loading) return; window.htmx.trigger(this.$refs.children, 'load-run-all-children') } }">
+        <tr>
+          <td class="px-4 py-3">
+            <div class="flex items-center gap-2">
+              <button type="button" aria-expanded="false" :aria-expanded="open.toString()" aria-controls="run-all-children-{{.ID}}" aria-label="Expand Run All #{{.ID}} children" :aria-label="(open ? 'Collapse' : 'Expand') + ' Run All #{{.ID}} children'" class="rounded p-1 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:hover:bg-slate-800" @click="open = !open; if (open) load()"><span aria-hidden="true" x-text="open ? '▼' : '▶'">▶</span></button>
+              <a class="font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="/runs/{{.ID}}">#{{.ID}}</a>
+            </div>
+            <span class="block text-xs text-slate-500">{{.KindLabel}}</span>
+          </td>
+          <td class="px-4 py-3">Run All{{with .RunAllSummary}}<span class="block text-xs text-slate-500">{{if .Total}}{{.Complete}} / {{.Total}} complete{{if .Failed}} · <span class="text-red-700 dark:text-red-300">{{.Failed}} failed</span>{{end}}{{if .Running}} · {{.Running}} running{{end}}{{else}}No children{{end}}</span>{{end}}</td>
+          <td class="px-4 py-3">{{template "run-status-badge" .Status}}</td>
+          <td class="px-4 py-3">{{.Trigger}}</td>
+          <td class="whitespace-nowrap px-4 py-3">{{.CreatedAt}}</td>
+        </tr>
+        <tr x-cloak x-show="open">
+          <td colspan="5" class="bg-slate-50 px-4 py-3 dark:bg-slate-950/50">
+            <div id="run-all-children-{{.ID}}" x-ref="children" hx-get="/runs/{{.ID}}/children" hx-trigger="load-run-all-children" hx-target="this" hx-swap="innerHTML"
+              @htmx:before-request="if ($event.detail.elt === $el) { loading = true; failed = false }"
+              @htmx:after-swap="if ($event.detail.elt === $el) { loading = false; loaded = true; failed = false }"
+              @htmx:after-request="if ($event.detail.elt === $el && $event.detail.successful !== true) { loading = false; loaded = false; failed = true }">
+              <p x-cloak x-show="loading" role="status" class="text-sm text-slate-500">Loading children…</p>
+              <div x-cloak x-show="failed" role="alert" class="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-100">Could not load Run All children. <button type="button" class="font-semibold underline" @click="load()">Retry</button></div>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+      {{else}}
+      <tbody class="border-t border-slate-100 dark:border-slate-800">
+        <tr>
+          <td class="px-4 py-3"><a class="font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="/runs/{{.ID}}">#{{.ID}}</a>{{if ne .Kind "run_all_child"}}<span class="block text-xs text-slate-500">{{.KindLabel}}</span>{{end}}</td>
+          <td class="px-4 py-3">{{if eq .Kind "run_all_child"}}<div class="pl-3"><span aria-hidden="true">↳</span> {{.JobName}}{{if .ParentRunID}}<a href="/runs/{{.ParentRunID}}" class="block text-xs text-slate-500 hover:underline">Run All #{{.ParentRunID}}</a>{{end}}</div>{{else}}{{if .JobName}}{{.JobName}}{{else}}Run All{{end}}{{end}}</td>
+          <td class="px-4 py-3">{{template "run-status-badge" .Status}}</td>
+          <td class="px-4 py-3">{{.Trigger}}</td>
+          <td class="whitespace-nowrap px-4 py-3">{{.CreatedAt}}</td>
+        </tr>
+      </tbody>
+      {{end}}
+      {{else}}
+      <tbody><tr><td colspan="5" class="px-4 py-12 text-center text-slate-500">No runs found.</td></tr></tbody>
+      {{end}}
+    </table>
+  </div>
   <div class="mt-4 flex items-center justify-between gap-4 text-sm"><p>{{.Data.Pagination.Total}} runs · Page {{.Data.Pagination.Page}} of {{.Data.Pagination.TotalPages}}</p><nav aria-label="Run pagination" class="flex gap-2">{{if .Data.PreviousURL}}<a href="{{.Data.PreviousURL}}" hx-get="{{.Data.PreviousURL}}" hx-target="#runs-table" hx-swap="outerHTML" hx-push-url="true" class="rounded-lg border px-3 py-2 dark:border-slate-700">Previous</a>{{end}}{{if .Data.NextURL}}<a href="{{.Data.NextURL}}" hx-get="{{.Data.NextURL}}" hx-target="#runs-table" hx-swap="outerHTML" hx-push-url="true" class="rounded-lg border px-3 py-2 dark:border-slate-700">Next</a>{{end}}</nav></div>
 </div>
 {{end}}

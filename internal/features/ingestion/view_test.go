@@ -66,6 +66,71 @@ func TestRunAllChildStatusesUseRunsListBadges(t *testing.T) {
 	}
 }
 
+func TestRunsListHierarchyFiltersAndParentSummaries(t *testing.T) {
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID := uint64(251)
+	page := RunPage{
+		Kinds: []RunKindOption{{"job", "Job"}, {"run_all_parent", "Run All parent"}, {"run_all_child", "Run All child"}},
+		Rows: []RunView{
+			{ID: 249, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("completed"), RunAllSummary: &RunAllSummary{}},
+			{ID: parentID, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("running"), RunAllSummary: &RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}},
+			{ID: 252, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("completed"), RunAllSummary: &RunAllSummary{Total: 36, Complete: 36}},
+			{ID: 253, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, JobName: "Journal Transaction Report", Status: PresentStatus("failed")},
+		},
+	}
+	response := httptest.NewRecorder()
+	if err := renderer.RenderPartial(response, http.StatusOK, "features/ingestion/runs", "content", render.PageData{Data: page}); err != nil {
+		t.Fatal(err)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		`value="run_all_parent"`,
+		`Run All parent`,
+		`aria-label="Expand Run All #251 children"`,
+		`aria-controls="run-all-children-251"`,
+		`hx-get="/runs/251/children"`,
+		`@htmx:before-request=`,
+		`@htmx:after-swap=`,
+		`@htmx:after-request=`,
+		`No children`,
+		`32 / 36 complete`,
+		`2 failed`,
+		`1 running`,
+		`36 / 36 complete`,
+		`href="/runs/253">#253</a>`,
+		`<span aria-hidden="true">↳</span> Journal Transaction Report`,
+		`href="/runs/251" class="block text-xs text-slate-500 hover:underline">Run All #251</a>`,
+		`aria-label="Status: Failed"`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("runs render missing %q: %s", expected, body)
+		}
+	}
+	for _, removed := range []string{`include_run_all_children`, `Include Run All children in All`, `hx-trigger="click once"`} {
+		if strings.Contains(body, removed) {
+			t.Errorf("runs render retained %q: %s", removed, body)
+		}
+	}
+
+	response = httptest.NewRecorder()
+	children := RunChildren{ParentID: parentID, Rows: []RunView{
+		{ID: 252, ChildPosition: 1, JobName: "CIF Opening Report", Status: PresentStatus("succeeded"), ProgressSucceeded: 3, ProgressTotal: 3},
+		{ID: 253, ChildPosition: 2, JobName: "Journal Transaction Report", Status: PresentStatus("failed")},
+	}}
+	if err := renderer.RenderPartial(response, http.StatusOK, "features/ingestion/runs", "run-all-children", render.PageData{Data: children}); err != nil {
+		t.Fatal(err)
+	}
+	fragment := response.Body.String()
+	for _, expected := range []string{`aria-label="Run All #251 children"`, `data-child-position="1"`, `href="/runs/252">#252</a>`, `CIF Opening Report`, `aria-label="Status: Failed"`} {
+		if !strings.Contains(fragment, expected) {
+			t.Errorf("child fragment missing %q: %s", expected, fragment)
+		}
+	}
+}
+
 func TestTechnicalDetailsRenderEscapedCopyableAndWithLegacyFallback(t *testing.T) {
 	renderer, err := render.New(webfiles.Files, false)
 	if err != nil {

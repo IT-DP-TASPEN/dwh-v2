@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	core "github.com/ibldzn/go-admin/internal/ingestion"
@@ -48,11 +47,37 @@ func (service *Service) ListRuns(ctx context.Context, filter RunFilter, page int
 			return RunPage{}, err
 		}
 	}
-	result := RunPage{Rows: service.views(rows), Filter: filter, Pagination: pageInfo, Jobs: service.catalog.Jobs(),
+	views := service.views(rows)
+	parentIDs := make([]uint64, 0, len(views))
+	for _, view := range views {
+		if view.Kind == string(ingestionrun.KindRunAllParent) {
+			parentIDs = append(parentIDs, view.ID)
+		}
+	}
+	summaries, err := service.repository.runAllSummaries(ctx, parentIDs)
+	if err != nil {
+		return RunPage{}, err
+	}
+	for index := range views {
+		if views[index].Kind == string(ingestionrun.KindRunAllParent) {
+			summary := summaries[views[index].ID]
+			views[index].RunAllSummary = &summary
+		}
+	}
+	result := RunPage{Rows: views, Filter: filter, Pagination: pageInfo, Jobs: service.catalog.Jobs(),
 		Statuses: []string{"planned", "queued", "running", "succeeded", "failed", "skipped", "cancelled", "abandoned", "completed", "completed_with_skips"},
-		Kinds:    []string{"job", "run_all_parent", "run_all_child"}, Triggers: []string{"direct", "scheduler", "run_all"}}
+		Kinds:    append([]RunKindOption(nil), runKindOptions...),
+		Triggers: []string{"direct", "scheduler", "run_all"}}
 	result.PreviousURL, result.NextURL = runPageURL(filter, pageInfo.Previous), runPageURL(filter, pageInfo.Next)
 	return result, nil
+}
+
+func (service *Service) RunAllChildren(ctx context.Context, parentID uint64) (RunChildren, error) {
+	rows, err := service.repository.RunAllChildren(ctx, parentID)
+	if err != nil {
+		return RunChildren{}, err
+	}
+	return RunChildren{ParentID: parentID, Rows: service.views(rows)}, nil
 }
 
 func (service *Service) FindRun(ctx context.Context, id uint64) (RunDetail, error) {
@@ -173,7 +198,7 @@ func (service *Service) views(rows []runRow) []RunView {
 
 func (service *Service) view(row runRow) RunView {
 	job, _ := service.catalog.Find(row.JobKey.String)
-	view := RunView{ID: row.ID, Kind: row.Kind, KindLabel: strings.ReplaceAll(row.Kind, "_", " "), JobKey: row.JobKey.String,
+	view := RunView{ID: row.ID, Kind: row.Kind, KindLabel: presentRunKind(row.Kind), JobKey: row.JobKey.String,
 		JobName: job.Name, Status: PresentStatus(row.Status), Trigger: row.TriggerType, TriggerReference: row.TriggerReference.String,
 		RequestedBy: row.RequestedByUsername.String, SkipReason: row.SkipReason.String, CancelRequested: row.CancelRequestedAt.Valid,
 		CancelReason: row.CancelReason.String, OwnerID: row.OwnerID.String, ProgressTotal: row.ProgressTotal, ProgressStarted: row.ProgressStarted,

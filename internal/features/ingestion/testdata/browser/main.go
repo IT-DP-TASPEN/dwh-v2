@@ -13,7 +13,9 @@ import (
 
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	reportsfeature "github.com/ibldzn/go-admin/internal/features/reports"
+	core "github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
+	"github.com/ibldzn/go-admin/internal/platform/pagination"
 	"github.com/ibldzn/go-admin/internal/render"
 	"github.com/ibldzn/go-admin/internal/reporting"
 	webfiles "github.com/ibldzn/go-admin/web"
@@ -25,6 +27,7 @@ type fixture struct {
 	renderer    *render.Renderer
 	mu          sync.Mutex
 	polls       map[uint64]int
+	childLoads  map[uint64]int
 	starred     map[uint64]bool
 	folders     map[uint64]*uint64
 	folderNames map[uint64]string
@@ -35,17 +38,74 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fixture := &fixture{renderer: renderer, polls: map[uint64]int{}}
+	fixture := &fixture{renderer: renderer, polls: map[uint64]int{}, childLoads: map[uint64]int{}}
 	fixture.resetReports()
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.FileServer(http.FS(webfiles.Files)))
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("/case/", fixture.page)
+	mux.HandleFunc("/runs", fixture.runsPage)
 	mux.HandleFunc("/runs/", fixture.status)
 	mux.HandleFunc("/reports", fixture.reportsPage)
 	mux.HandleFunc("/reports/", fixture.reportMutation)
 	log.Printf("Run Details browser fixture listening on %s", address)
 	log.Fatal(http.ListenAndServe(address, mux))
+}
+
+func (fixture *fixture) runsPage(writer http.ResponseWriter, request *http.Request) {
+	if request.Header.Get("HX-Request") != "true" {
+		fixture.mu.Lock()
+		fixture.childLoads = map[uint64]int{}
+		fixture.mu.Unlock()
+	}
+	filter := ingestionfeature.RunFilter{
+		Job: request.URL.Query().Get("job"), Status: request.URL.Query().Get("status"), Kind: request.URL.Query().Get("kind"), Trigger: request.URL.Query().Get("trigger"),
+	}
+	rows := make([]ingestionfeature.RunView, 0)
+	for _, row := range fixtureRuns() {
+		if filter.Kind == "" && row.Kind == "run_all_child" {
+			continue
+		}
+		if filter.Job != "" && row.JobKey != filter.Job || filter.Status != "" && row.Status.Key != filter.Status || filter.Kind != "" && row.Kind != filter.Kind || filter.Trigger != "" && row.Trigger != filter.Trigger {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	catalog, err := core.NewCatalog()
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	data := ingestionfeature.RunPage{
+		Rows: rows, Filter: filter, Pagination: pagination.New(1, ingestionfeature.RunPageSize, int64(len(rows))), Jobs: catalog.Jobs(),
+		Statuses: []string{"planned", "queued", "running", "succeeded", "failed", "skipped", "cancelled", "abandoned", "completed", "completed_with_skips"},
+		Kinds:    []ingestionfeature.RunKindOption{{Value: "job", Label: "Job"}, {Value: "run_all_parent", Label: "Run All parent"}, {Value: "run_all_child", Label: "Run All child"}},
+		Triggers: []string{"direct", "scheduler", "run_all"},
+	}
+	pageData := adminshell.PageData{Title: "Runs", AppName: "Browser fixture", Data: data}
+	name := "admin"
+	if request.Header.Get("HX-Request") == "true" {
+		name = "runs-table"
+	}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/ingestion/runs", name, pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func fixtureRuns() []ingestionfeature.RunView {
+	parentID, olderParentID, retryParentID := uint64(251), uint64(240), uint64(230)
+	return []ingestionfeature.RunView{
+		{ID: 260, Kind: "job", KindLabel: "job", JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "direct", CreatedAt: "2026-08-28 10:05:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
+		{ID: 259, Kind: "job", KindLabel: "job", JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "scheduler", CreatedAt: "2026-08-28 10:04:00 UTC", Status: ingestionfeature.PresentStatus("failed")},
+		{ID: 253, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, ChildPosition: 2, JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "run_all", CreatedAt: "2026-08-28 10:03:00 UTC", Status: ingestionfeature.PresentStatus("failed")},
+		{ID: 252, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, ChildPosition: 1, JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "run_all", CreatedAt: "2026-08-28 10:02:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
+		{ID: parentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 10:01:00 UTC", Status: ingestionfeature.PresentStatus("running"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}},
+		{ID: 242, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &olderParentID, ChildPosition: 2, JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "run_all", CreatedAt: "2026-08-28 09:03:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
+		{ID: 241, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &olderParentID, ChildPosition: 1, JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "run_all", CreatedAt: "2026-08-28 09:02:00 UTC", Status: ingestionfeature.PresentStatus("failed")},
+		{ID: olderParentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 09:01:00 UTC", Status: ingestionfeature.PresentStatus("completed"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 2, Complete: 2, Failed: 1}},
+		{ID: 231, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &retryParentID, ChildPosition: 1, JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "run_all", CreatedAt: "2026-08-28 08:02:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
+		{ID: retryParentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 08:01:00 UTC", Status: ingestionfeature.PresentStatus("completed"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 1, Complete: 1}},
+	}
 }
 
 func (fixture *fixture) page(writer http.ResponseWriter, request *http.Request) {
@@ -292,6 +352,10 @@ func boolCount(value bool) int {
 
 func (fixture *fixture) status(writer http.ResponseWriter, request *http.Request) {
 	parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
+	if len(parts) == 3 && parts[0] == "runs" && parts[2] == "children" {
+		fixture.runAllChildren(writer, request, parts[1])
+		return
+	}
 	if len(parts) != 3 || parts[0] != "runs" || parts[2] != "status" {
 		http.NotFound(writer, request)
 		return
@@ -321,6 +385,35 @@ func (fixture *fixture) status(writer http.ResponseWriter, request *http.Request
 	}
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = writer.Write([]byte(body))
+}
+
+func (fixture *fixture) runAllChildren(writer http.ResponseWriter, request *http.Request, rawID string) {
+	parentID, err := strconv.ParseUint(rawID, 10, 64)
+	if err != nil || parentID != 251 && parentID != 240 && parentID != 230 {
+		http.NotFound(writer, request)
+		return
+	}
+	fixture.mu.Lock()
+	fixture.childLoads[parentID]++
+	loads := fixture.childLoads[parentID]
+	fixture.mu.Unlock()
+	if parentID == 230 && loads == 1 {
+		http.Error(writer, "fixture child load failure", http.StatusInternalServerError)
+		return
+	}
+	children := ingestionfeature.RunChildren{ParentID: parentID}
+	for _, row := range fixtureRuns() {
+		if row.ParentRunID != nil && *row.ParentRunID == parentID {
+			children.Rows = append(children.Rows, row)
+		}
+	}
+	sort.Slice(children.Rows, func(left, right int) bool {
+		return children.Rows[left].ChildPosition < children.Rows[right].ChildPosition
+	})
+	pageData := adminshell.PageData{Title: "Run All children", AppName: "Browser fixture", Data: children}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/ingestion/runs", "run-all-children", pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (fixture *fixture) render(name string, detail ingestionfeature.RunDetail) (string, error) {

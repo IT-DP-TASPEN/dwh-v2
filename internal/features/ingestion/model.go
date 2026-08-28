@@ -83,6 +83,25 @@ func PresentStatus(status string) StatusView {
 
 type ParameterField struct{ Label, Value string }
 
+type RunAllSummary struct {
+	Total, Complete, Failed, Running uint64
+}
+
+type RunKindOption struct {
+	Value, Label string
+}
+
+var runKindOptions = []RunKindOption{{"job", "Job"}, {"run_all_parent", "Run All parent"}, {"run_all_child", "Run All child"}}
+
+func presentRunKind(value string) string {
+	for _, option := range runKindOptions {
+		if option.Value == value {
+			return option.Label
+		}
+	}
+	return strings.ReplaceAll(value, "_", " ")
+}
+
 type RunView struct {
 	ID                                           uint64
 	Kind, KindLabel, JobKey, JobName, Trigger    string
@@ -101,15 +120,22 @@ type RunView struct {
 	ErrorClass, ErrorMessage, ErrorStep          string
 	CreatedAt, StartedAt, FinishedAt             string
 	Terminal, CanCancel, CanRecover              bool
+	RunAllSummary                                *RunAllSummary
 }
 
 type RunPage struct {
-	Rows                      []RunView
-	Filter                    RunFilter
-	Pagination                pagination.Page
-	PreviousURL, NextURL      string
-	Jobs                      []core.JobDefinition
-	Statuses, Kinds, Triggers []string
+	Rows                 []RunView
+	Filter               RunFilter
+	Pagination           pagination.Page
+	PreviousURL, NextURL string
+	Jobs                 []core.JobDefinition
+	Statuses, Triggers   []string
+	Kinds                []RunKindOption
+}
+
+type RunChildren struct {
+	ParentID uint64
+	Rows     []RunView
 }
 
 type SchedulerProvenance struct {

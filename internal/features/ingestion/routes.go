@@ -9,6 +9,7 @@ func (handler *Handler) RegisterRoutes(router chi.Router) {
 	router.With(view).Get("/runs", handler.Runs)
 	router.With(view, handler.admin.RequirePermission(PermissionRunAll)).Get("/runs/run-all", handler.RunAllPage)
 	router.With(view, handler.admin.RequirePermission(PermissionRunAll)).Post("/runs/run-all", handler.SubmitRunAll)
+	router.With(view).Get("/runs/{id}/children", handler.RunAllChildren)
 	router.With(view).Get("/runs/{id}", handler.Run)
 	router.With(view).Get("/runs/{id}/status", handler.RunStatus)
 	router.With(view, handler.admin.RequirePermission(PermissionCancel)).Post("/runs/{id}/cancel", handler.Cancel)
