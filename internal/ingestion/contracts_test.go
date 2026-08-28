@@ -245,7 +245,7 @@ func TestFixedRequestPositionalLayouts(t *testing.T) {
 	accounts, _ := FreezeAccountCodes([]string{"1.2"})
 	want := map[string][]string{
 		"cif_opening_report":         {"", "2026-08-11", "2026-08-12"},
-		"journal_transaction_report": {"", "%", "2026-08-11", "2026-08-12", "", ""},
+		"journal_transaction_report": {"", "", "2026-08-11", "2026-08-12", "", ""},
 		"balance_sheet_report":       {"008", "2026-08-12"},
 		"profit_loss_statement":      {"008", "2026-08-11", "2026-08-12"},
 		"coa_movement_report":        {"1.2", "2026-08-11", "2026-08-12", ""},

@@ -24,6 +24,11 @@ type AccountCode struct {
 	Description string `json:"descr"`
 }
 
+type JournalTransactionType struct {
+	ID          string `json:"id"`
+	Description string `json:"descr"`
+}
+
 func (c *Client) FetchAccessibleLocations(ctx context.Context) ([]Location, error) {
 	var payload struct {
 		Status string `json:"status"`
@@ -60,6 +65,29 @@ func (c *Client) FetchAccountCodes(ctx context.Context) ([]AccountCode, error) {
 		return nil, applicationFailure("fetch account codes", "Fincloud reported a source failure", diagnostic, payload.Status, "")
 	}
 	return payload.Data.Result.AccountCodes, nil
+}
+
+func (c *Client) FetchJournalTransactionTypes(ctx context.Context) ([]JournalTransactionType, error) {
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result struct {
+				TransactionTypes *[]JournalTransactionType `json:"jenistransaksi"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	diagnostic, err := c.getJSON(ctx, "fetch journal transaction types", "/bukuBesar/laporan/jurnal//listvalues", &payload)
+	if err != nil {
+		return nil, err
+	}
+	if payload.Status != "ok" {
+		return nil, applicationFailure("fetch journal transaction types", "Fincloud reported a source failure", diagnostic, payload.Status, "")
+	}
+	if payload.Data.Result.TransactionTypes == nil {
+		diagnostic.FailureKind, diagnostic.DecodeStage = "missing_required", "journal_transaction_types"
+		return nil, &Error{Kind: ErrorMalformed, Operation: "fetch journal transaction types", Message: "Fincloud journal transaction-type listing omitted required result array", diagnostic: diagnostic}
+	}
+	return *payload.Data.Result.TransactionTypes, nil
 }
 
 func (c *Client) FetchCIFNumbers(ctx context.Context, throughDate string) ([]string, error) {

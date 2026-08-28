@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -465,6 +466,238 @@ func TestFixedPoolPreservesPrimaryErrorAndJoinsWorkers(t *testing.T) {
 	if len(results) != 2 || results[0].err == nil || results[0].err.Error() != "primary source failure" {
 		t.Fatalf("results=%+v", results)
 	}
+}
+
+func TestFreezeJournalTransactionTypesCanonicalizesByID(t *testing.T) {
+	got, err := freezeJournalTransactionTypes([]fincloud.JournalTransactionType{
+		{ID: " B ", Description: "Beta"},
+		{ID: "", Description: "Blank"},
+		{ID: " % ", Description: "Wildcard"},
+		{ID: "A", Description: "Alpha first"},
+		{ID: "A", Description: "Alpha duplicate"},
+		{ID: "1", Description: "One"},
+		{ID: "01", Description: "Zero one"},
+		{ID: "001", Description: "Zero zero one"},
+	})
+	want := []journalTransactionType{
+		{ID: "001", Description: "Zero zero one"},
+		{ID: "01", Description: "Zero one"},
+		{ID: "1", Description: "One"},
+		{ID: "A", Description: "Alpha first"},
+		{ID: "B", Description: "Beta"},
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("frozen=%+v error=%v want=%+v", got, err, want)
+	}
+	for _, rows := range [][]fincloud.JournalTransactionType{nil, {{ID: " "}, {ID: "%"}, {ID: " % "}}} {
+		if _, err := freezeJournalTransactionTypes(rows); err == nil {
+			t.Fatalf("zero usable transaction types accepted: %+v", rows)
+		}
+	}
+}
+
+func TestJournalTransactionRequestRequiresExactSelector(t *testing.T) {
+	definition := ingestion.FixedDefinitions()[1]
+	from, _ := ingestion.ParseCalendarDate("2026-08-11")
+	to, _ := ingestion.ParseCalendarDate("2026-08-12")
+	request, err := ingestion.BuildFixedRequestDescriptor(definition, ingestion.FixedDateRangeParams{From: from, To: to}, "", "", ingestion.SingleFixedMemberKey)
+	if err != nil || request.Parameters[1] != "" {
+		t.Fatalf("logical request=%+v error=%v", request, err)
+	}
+	exact, err := journalTransactionRequest(request, " 001 ")
+	if err != nil || exact.Parameters[1] != "001" || request.Parameters[1] != "" {
+		t.Fatalf("exact=%+v logical=%+v error=%v", exact, request, err)
+	}
+	for _, invalid := range []string{"", " ", "%", " % "} {
+		if _, err := journalTransactionRequest(request, invalid); err == nil {
+			t.Fatalf("selector %q accepted", invalid)
+		}
+	}
+}
+
+func TestJournalTransactionPartitionsAreSequentialAndAggregateOneCandidate(t *testing.T) {
+	definition := ingestion.FixedDefinitions()[1]
+	executor, requests := journalPartitionTestExecutor(t, func(parameters []string) (int, string) {
+		transactionType := parameters[1]
+		if transactionType == "B" {
+			return http.StatusOK, journalTestCSV(definition, "", true, false)
+		}
+		return http.StatusOK, journalTestCSV(definition, "same-row", false, false)
+	})
+	from, _ := ingestion.ParseCalendarDate("2026-01-01")
+	to, _ := ingestion.ParseCalendarDate("2026-03-31")
+	plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: from, To: to}, ingestion.FrozenLocations{}, ingestion.FrozenAccountCodes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	types := []journalTransactionType{{ID: "A"}, {ID: "B"}, {ID: "C"}}
+	segments, result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], types)
+	wantRequests := []string{
+		"2026-01-01/2026-01-30/A", "2026-01-01/2026-01-30/B", "2026-01-01/2026-01-30/C",
+		"2026-01-31/2026-03-01/A", "2026-01-31/2026-03-01/B", "2026-01-31/2026-03-01/C",
+		"2026-03-02/2026-03-31/A", "2026-03-02/2026-03-31/B", "2026-03-02/2026-03-31/C",
+	}
+	if result.err != nil || result.rows != 6 || !reflect.DeepEqual(requests(), wantRequests) || len(segments) != 9 {
+		t.Fatalf("result=%+v requests=%v segments=%d", result, requests(), len(segments))
+	}
+	var checksum string
+	for index, segment := range segments {
+		if segment.Index != index {
+			t.Fatalf("segment[%d].Index=%d", index, segment.Index)
+		}
+		wantDate := []string{"2026-01-30", "2026-03-01", "2026-03-31"}[index/3]
+		if segment.AsOfDate.String() != wantDate {
+			t.Fatalf("segment[%d].AsOfDate=%s want=%s", index, segment.AsOfDate, wantDate)
+		}
+		if index%3 == 1 {
+			if len(segment.SourceRows) != 0 {
+				t.Fatalf("valid empty segment[%d] rows=%d", index, len(segment.SourceRows))
+			}
+			continue
+		}
+		if len(segment.SourceRows) != 1 {
+			t.Fatalf("segment[%d] rows=%d", index, len(segment.SourceRows))
+		}
+		if checksum == "" {
+			checksum = segment.SourceRows[0].SourceRowChecksum
+		} else if segment.SourceRows[0].SourceRowChecksum != checksum {
+			t.Fatalf("cross-partition row checksum changed: %s != %s", segment.SourceRows[0].SourceRowChecksum, checksum)
+		}
+	}
+}
+
+func TestJournalTransactionPartitionsAcceptCompatibleCanonicalSchema(t *testing.T) {
+	definition := ingestion.FixedDefinitions()[1]
+	executor, _ := journalPartitionTestExecutor(t, func(parameters []string) (int, string) {
+		return http.StatusOK, journalTestCSV(definition, "same-row", false, parameters[1] == "B")
+	})
+	date, _ := ingestion.ParseCalendarDate("2026-01-01")
+	plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: date, To: date}, ingestion.FrozenLocations{}, ingestion.FrozenAccountCodes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], []journalTransactionType{{ID: "A"}, {ID: "B"}})
+	if result.err != nil || result.rows != 2 || len(segments) != 2 || !reflect.DeepEqual(segments[0].SourceRows[0].Values, segments[1].SourceRows[0].Values) {
+		t.Fatalf("result=%+v segments=%+v", result, segments)
+	}
+}
+
+func TestJournalTransactionPartitionFailureStopsRemainingWork(t *testing.T) {
+	definition := ingestion.FixedDefinitions()[1]
+	tests := []struct {
+		name, from, to string
+		types          []journalTransactionType
+		respond        func([]string) (int, string)
+		wantRequests   []string
+		wantLayer      fixedLayer
+	}{
+		{
+			name: "download failure skips later type", from: "2026-01-01", to: "2026-01-01",
+			types: []journalTransactionType{{ID: "A"}, {ID: "B"}, {ID: "C"}, {ID: "D"}},
+			respond: func(parameters []string) (int, string) {
+				if parameters[1] == "C" {
+					return http.StatusServiceUnavailable, ""
+				}
+				return http.StatusOK, journalTestCSV(definition, "same-row", false, false)
+			},
+			wantRequests: []string{"2026-01-01/2026-01-01/A", "2026-01-01/2026-01-01/B", "2026-01-01/2026-01-01/C"}, wantLayer: fixedLayerSource,
+		},
+		{
+			name: "later chunk failure", from: "2026-01-01", to: "2026-02-01",
+			types: []journalTransactionType{{ID: "A"}, {ID: "B"}},
+			respond: func(parameters []string) (int, string) {
+				if parameters[1] == "A" && parameters[2] == "2026-01-31" {
+					return http.StatusServiceUnavailable, ""
+				}
+				return http.StatusOK, journalTestCSV(definition, "same-row", false, false)
+			},
+			wantRequests: []string{"2026-01-01/2026-01-30/A", "2026-01-01/2026-01-30/B", "2026-01-31/2026-02-01/A"}, wantLayer: fixedLayerSource,
+		},
+		{
+			name: "incompatible schema", from: "2026-01-01", to: "2026-01-01",
+			types: []journalTransactionType{{ID: "A"}, {ID: "B"}, {ID: "C"}},
+			respond: func(parameters []string) (int, string) {
+				if parameters[1] == "B" {
+					return http.StatusOK, "Wrong Header\n"
+				}
+				return http.StatusOK, journalTestCSV(definition, "same-row", false, false)
+			},
+			wantRequests: []string{"2026-01-01/2026-01-01/A", "2026-01-01/2026-01-01/B"}, wantLayer: fixedLayerSourceContract,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			executor, requests := journalPartitionTestExecutor(t, test.respond)
+			from, _ := ingestion.ParseCalendarDate(test.from)
+			to, _ := ingestion.ParseCalendarDate(test.to)
+			plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: from, To: to}, ingestion.FrozenLocations{}, ingestion.FrozenAccountCodes{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			segments, result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], test.types)
+			if result.err == nil || result.layer != test.wantLayer || segments != nil || !reflect.DeepEqual(requests(), test.wantRequests) || strings.Contains(strings.Join(requests(), "/"), "%") {
+				t.Fatalf("result=%+v segments=%v requests=%v", result, segments, requests())
+			}
+		})
+	}
+}
+
+func journalPartitionTestExecutor(t *testing.T, respond func([]string) (int, string)) (*Executor, func() []string) {
+	t.Helper()
+	var mutex sync.Mutex
+	var requests []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/admin/access/login":
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session"}}}`)
+		case "/system/laporanUmum/data/lap":
+			var parameters []string
+			if err := json.Unmarshal([]byte(request.URL.Query().Get("p")), &parameters); err != nil {
+				t.Error(err)
+				response.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if request.URL.Query().Get("nm") != "Journal Transaction csv" || len(parameters) != 6 {
+				t.Errorf("journal request name=%q parameters=%v", request.URL.Query().Get("nm"), parameters)
+			}
+			mutex.Lock()
+			requests = append(requests, strings.Join([]string{parameters[2], parameters[3], parameters[1]}, "/"))
+			mutex.Unlock()
+			status, content := respond(parameters)
+			response.WriteHeader(status)
+			_, _ = io.WriteString(response, content)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := fincloud.NewClient(fincloud.Config{BaseURL: server.URL, Username: "user", Password: "pass", LocationID: "001", RoleID: "role", HTTPTimeout: time.Second, InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Executor{client: client}, func() []string {
+		mutex.Lock()
+		defer mutex.Unlock()
+		return append([]string(nil), requests...)
+	}
+}
+
+func journalTestCSV(definition ingestion.FixedDefinition, marker string, empty, reordered bool) string {
+	headers := append([]string(nil), definition.RequiredHeaders...)
+	if empty {
+		return strings.Join(headers, "|") + "\n"
+	}
+	values := make([]string, len(headers))
+	for index, header := range headers {
+		if header == "Journal ID" || header == "Transaction Type" {
+			values[index] = marker
+		}
+	}
+	if reordered {
+		headers[0], headers[1] = headers[1], headers[0]
+		values[0], values[1] = values[1], values[0]
+	}
+	return strings.Join(headers, "|") + "\n" + strings.Join(values, "|") + "\n"
 }
 
 func testMapperFailure(t *testing.T) error {

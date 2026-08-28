@@ -26,6 +26,8 @@ func TestSourceEnumerationReportProtocolAndTypedDetail(t *testing.T) {
 			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"locationid":[{"id":"000","descr":"HQ"},{"id":"008","descr":"Branch"}]}}}`)
 		case "/fincloud/bukuBesar/laporan/mutasiAkun//listvalues":
 			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"noakun":[{"id":"1.2","descr":"Cash"},{"id":"","descr":"Blank preserved for domain normalization"}]}}}`)
+		case "/fincloud/bukuBesar/laporan/jurnal//listvalues":
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"jenistransaksi":[{"id":"001","descr":"Cash deposit"},{"id":"TRX-2","descr":"Transfer"}]}}}`)
 		case "/fincloud/system/laporanUmum/data/lap":
 			body, _ := io.ReadAll(request.Body)
 			form, _ := url.ParseQuery(string(body))
@@ -83,6 +85,10 @@ func TestSourceEnumerationReportProtocolAndTypedDetail(t *testing.T) {
 	if err != nil || len(codes) != 2 || codes[1].ID != "" {
 		t.Fatalf("codes=%v error=%v", codes, err)
 	}
+	transactionTypes, err := client.FetchJournalTransactionTypes(context.Background())
+	if err != nil || !reflect.DeepEqual(transactionTypes, []JournalTransactionType{{ID: "001", Description: "Cash deposit"}, {ID: "TRX-2", Description: "Transfer"}}) {
+		t.Fatalf("journal transaction types=%v error=%v", transactionTypes, err)
+	}
 	cifs, err := client.FetchCIFNumbers(context.Background(), "2026-08-12")
 	if err != nil || !reflect.DeepEqual(cifs, []string{"C1", "C2"}) {
 		t.Fatalf("CIFs=%v error=%v", cifs, err)
@@ -110,6 +116,39 @@ func TestSourceEnumerationReportProtocolAndTypedDetail(t *testing.T) {
 	decimalValue, err := detail.Outstanding.Decimal()
 	if err != nil || decimalValue.String() != "1234567890.123456" || len(detail.Repayment) != 1 || string(detail.RawPayload) == "" {
 		t.Fatalf("detail=%+v decimal=%s error=%v", detail, decimalValue, err)
+	}
+}
+
+func TestJournalTransactionTypeListingRejectsInvalidContracts(t *testing.T) {
+	responseBody := `{"status":"ok","data":{"result":{"jenistransaksi":[]}}}`
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/fincloud/admin/access/login" {
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session"}}}`)
+			return
+		}
+		_, _ = io.WriteString(response, responseBody)
+	}))
+	defer server.Close()
+	client, err := newClient(testConfig(server.URL+"/fincloud"), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transactionTypes, err := client.FetchJournalTransactionTypes(context.Background())
+	if err != nil || len(transactionTypes) != 0 {
+		t.Fatalf("valid empty listing=%v error=%v", transactionTypes, err)
+	}
+	for _, invalid := range []string{
+		`{"status":"failed","data":{"result":{"jenistransaksi":[]}}}`,
+		`{"status":"ok","data":{"result":{}}}`,
+		`{"status":"ok","data":{"result":{"jenistransaksi":null}}}`,
+		`{"status":"ok","data":{"result":{"jenistransaksi":{}}}}`,
+		`{"status":"ok"`,
+	} {
+		responseBody = invalid
+		if _, err := client.FetchJournalTransactionTypes(context.Background()); err == nil {
+			t.Fatalf("invalid journal transaction-type listing accepted: %s", invalid)
+		}
 	}
 }
 

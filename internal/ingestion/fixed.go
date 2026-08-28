@@ -214,7 +214,7 @@ func descriptor(definition FixedDefinition, requested FixedDateRangeParams, loca
 	case "cif_opening_report":
 		parameters = []string{location, from, to}
 	case "journal_transaction_report":
-		parameters = []string{location, "%", from, to, "", ""}
+		parameters = []string{location, "", from, to, "", ""}
 	case "balance_sheet_report":
 		parameters = []string{location, to}
 	case "profit_loss_statement":

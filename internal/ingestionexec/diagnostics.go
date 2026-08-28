@@ -195,16 +195,16 @@ func recordParserDiagnostic(ctx context.Context, err error, terminal bool) {
 func recordFixedMemberDiagnostic(ctx context.Context, result fixedMemberResult, primary bool) {
 	switch result.layer {
 	case fixedLayerSource:
-		sourceCtx := diagnosticScope(ctx, "source", result.step, result.step, "", result.memberKey)
+		sourceCtx := diagnosticScope(ctx, "source", result.step, result.step, result.item, result.memberKey)
 		recordSourceDiagnostic(sourceCtx, result.err, primary, !primary)
 	case fixedLayerSourceContract:
-		parserCtx := diagnosticScope(ctx, "source_contract", result.step, result.step, "", result.memberKey)
+		parserCtx := diagnosticScope(ctx, "source_contract", result.step, result.step, result.item, result.memberKey)
 		recordParserDiagnostic(parserCtx, result.err, primary)
 	case fixedLayerPersistence:
-		persistCtx := diagnosticScope(ctx, "persistence", result.step, result.step, "", result.memberKey)
+		persistCtx := diagnosticScope(ctx, "persistence", result.step, result.step, result.item, result.memberKey)
 		recordPersistenceDiagnostic(persistCtx, result.err, primary)
 	case fixedLayerContract:
-		contractCtx := diagnosticScope(ctx, "contract", result.step, result.step, "", result.memberKey)
+		contractCtx := diagnosticScope(ctx, "contract", result.step, result.step, result.item, result.memberKey)
 		recordGenericDiagnostic(contractCtx, result.err, primary)
 	}
 }

@@ -55,7 +55,13 @@ type fixedMemberResult struct {
 	rows            uint64
 	layer           fixedLayer
 	step, memberKey string
+	item            string
 	err             error
+}
+
+type journalTransactionType struct {
+	ID          string
+	Description string
 }
 
 type maintenanceDateError struct {
@@ -141,7 +147,25 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	definition := *job.Fixed
 	var locations ingestion.FrozenLocations
 	var accounts ingestion.FrozenAccountCodes
+	var journalTransactionTypes []journalTransactionType
 	var err error
+	if definition.Key == "journal_transaction_report" {
+		rows, fetchErr := executor.client.FetchJournalTransactionTypes(ctx)
+		if fetchErr != nil {
+			return sourceFailure(ctx, fetchErr, "enumerate_journal_transaction_types")
+		}
+		journalTransactionTypes, err = freezeJournalTransactionTypes(rows)
+		if err != nil {
+			return failed("source_contract", "journal transaction-type set is empty", "enumerate_journal_transaction_types", err)
+		}
+		logged := make([]string, min(20, len(journalTransactionTypes)))
+		for index := range logged {
+			logged[index] = boundedJournalTransactionTypeID(journalTransactionTypes[index].ID)
+		}
+		executor.logger.InfoContext(ctx, "journal transaction types frozen", "run_id", run.ID, "job_key", run.JobKey,
+			"transaction_type_count", len(journalTransactionTypes), "transaction_type_ids", logged,
+			"transaction_type_ids_omitted", len(journalTransactionTypes)-len(logged))
+	}
 	if definition.LocationStrategy == ingestion.PerLocation {
 		rows, fetchErr := executor.client.FetchAccessibleLocations(ctx)
 		if fetchErr != nil {
@@ -204,7 +228,7 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	var progressFatal error
 	runFixedPool(poolCtx, plan.Members, executor.fixedConcurrency,
 		func(workCtx context.Context, descriptor ingestion.RequestDescriptor) fixedMemberResult {
-			result := executor.fetchAndStageFixedMember(workCtx, definition, loadID, descriptor)
+			result := executor.fetchAndStageFixedMember(workCtx, definition, loadID, descriptor, journalTransactionTypes)
 			result.memberKey = descriptor.MemberKey
 			return result
 		}, func(result fixedMemberResult) {
@@ -258,36 +282,101 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
 }
 
-func (executor *Executor) fetchAndStageFixedMember(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor) fixedMemberResult {
-	chunks, err := ingestion.ChunkDateRange(descriptor.RequestedFrom, descriptor.RequestedTo, definition.MaxChunkDays)
-	if err != nil {
-		return fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: err}
-	}
-	segments := make([]ingestionstore.FixedSegment, 0, len(chunks))
-	var rows uint64
-	for index, chunk := range chunks {
-		request, err := ingestion.BuildFixedRequestDescriptor(definition, ingestion.FixedDateRangeParams{From: chunk.From, To: chunk.To}, descriptor.SourceLocationID, descriptor.AccountCode, descriptor.MemberKey)
-		if err != nil {
-			return fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: err}
-		}
-		sourceCtx := diagnosticScope(ctx, "source", "download_report", "download_report", "", descriptor.MemberKey)
-		content, err := executor.client.DownloadReport(sourceCtx, request.ReportName, request.Parameters...)
-		if err != nil {
-			return fixedMemberResult{layer: fixedLayerSource, step: "download_report", err: err}
-		}
-		parserCtx := diagnosticScope(ctx, "source_contract", "parse_fixed_csv", "parse_fixed_csv", "", descriptor.MemberKey)
-		parsed, err := ingestion.ParseFixedCSV(parserCtx, definition, descriptor.SourceLocationID, content)
-		if err != nil {
-			return fixedMemberResult{layer: fixedLayerSourceContract, step: "parse_fixed_csv", err: err}
-		}
-		rows += uint64(len(parsed))
-		segments = append(segments, ingestionstore.FixedSegment{Index: index, AsOfDate: chunk.To, SourceRows: parsed})
+func (executor *Executor) fetchAndStageFixedMember(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, journalTransactionTypes []journalTransactionType) fixedMemberResult {
+	segments, result := executor.fetchFixedMemberSegments(ctx, definition, descriptor, journalTransactionTypes)
+	if result.err != nil {
+		return result
 	}
 	persistCtx := diagnosticScope(ctx, "persistence", "stage_fixed_member", "stage_fixed_member", "", descriptor.MemberKey)
 	if err := executor.fixed.StageMember(persistCtx, definition, loadID, descriptor, segments); err != nil {
 		return fixedMemberResult{layer: fixedLayerPersistence, step: "stage_fixed_member", err: err}
 	}
-	return fixedMemberResult{rows: rows}
+	return result
+}
+
+func (executor *Executor) fetchFixedMemberSegments(ctx context.Context, definition ingestion.FixedDefinition, descriptor ingestion.RequestDescriptor, journalTransactionTypes []journalTransactionType) ([]ingestionstore.FixedSegment, fixedMemberResult) {
+	chunks, err := ingestion.ChunkDateRange(descriptor.RequestedFrom, descriptor.RequestedTo, definition.MaxChunkDays)
+	if err != nil {
+		return nil, fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: err}
+	}
+	transactionTypes := journalTransactionTypes
+	if definition.Key != "journal_transaction_report" {
+		transactionTypes = []journalTransactionType{{}}
+	} else if len(transactionTypes) == 0 {
+		return nil, fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: fmt.Errorf("frozen journal transaction-type set is empty")}
+	}
+	segments := make([]ingestionstore.FixedSegment, 0, len(chunks)*len(transactionTypes))
+	var rows uint64
+	for chunkIndex, chunk := range chunks {
+		for typeIndex, transactionType := range transactionTypes {
+			item := ""
+			if definition.Key == "journal_transaction_report" {
+				item = fmt.Sprintf("journal chunk %d/%d, transaction type %d/%d (%s)", chunkIndex+1, len(chunks), typeIndex+1, len(transactionTypes), boundedJournalTransactionTypeID(transactionType.ID))
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, fixedMemberResult{layer: fixedLayerSource, step: "download_report", item: item, err: err}
+			}
+			request, err := ingestion.BuildFixedRequestDescriptor(definition, ingestion.FixedDateRangeParams{From: chunk.From, To: chunk.To}, descriptor.SourceLocationID, descriptor.AccountCode, descriptor.MemberKey)
+			if err == nil && definition.Key == "journal_transaction_report" {
+				request, err = journalTransactionRequest(request, transactionType.ID)
+			}
+			if err != nil {
+				return nil, fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", item: item, err: err}
+			}
+			sourceCtx := diagnosticScope(ctx, "source", "download_report", "download_report", item, descriptor.MemberKey)
+			content, err := executor.client.DownloadReport(sourceCtx, request.ReportName, request.Parameters...)
+			if err != nil {
+				return nil, fixedMemberResult{layer: fixedLayerSource, step: "download_report", item: item, err: err}
+			}
+			parserCtx := diagnosticScope(ctx, "source_contract", "parse_fixed_csv", "parse_fixed_csv", item, descriptor.MemberKey)
+			parsed, err := ingestion.ParseFixedCSV(parserCtx, definition, descriptor.SourceLocationID, content)
+			if err != nil {
+				return nil, fixedMemberResult{layer: fixedLayerSourceContract, step: "parse_fixed_csv", item: item, err: err}
+			}
+			rows += uint64(len(parsed))
+			segments = append(segments, ingestionstore.FixedSegment{Index: len(segments), AsOfDate: chunk.To, SourceRows: parsed})
+		}
+	}
+	return segments, fixedMemberResult{rows: rows}
+}
+
+func freezeJournalTransactionTypes(rows []fincloud.JournalTransactionType) ([]journalTransactionType, error) {
+	seen := make(map[string]struct{}, len(rows))
+	frozen := make([]journalTransactionType, 0, len(rows))
+	for _, row := range rows {
+		id := strings.TrimSpace(row.ID)
+		if id == "" || id == "%" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		frozen = append(frozen, journalTransactionType{ID: id, Description: row.Description})
+	}
+	if len(frozen) == 0 {
+		return nil, fmt.Errorf("captured journal transaction-type set is empty")
+	}
+	slices.SortFunc(frozen, func(left, right journalTransactionType) int { return strings.Compare(left.ID, right.ID) })
+	return frozen, nil
+}
+
+func journalTransactionRequest(request ingestion.RequestDescriptor, transactionTypeID string) (ingestion.RequestDescriptor, error) {
+	id := strings.TrimSpace(transactionTypeID)
+	if request.ReportName != "Journal Transaction csv" || len(request.Parameters) != 6 || id == "" || id == "%" {
+		return ingestion.RequestDescriptor{}, fmt.Errorf("valid exact Journal transaction type is required")
+	}
+	request.Parameters = append([]string(nil), request.Parameters...)
+	request.Parameters[1] = id
+	return request, nil
+}
+
+func boundedJournalTransactionTypeID(id string) string {
+	runes := []rune(id)
+	if len(runes) <= 64 {
+		return id
+	}
+	return string(runes[:64]) + "..."
 }
 
 func runFixedPool(ctx context.Context, descriptors []ingestion.RequestDescriptor, concurrency int,
