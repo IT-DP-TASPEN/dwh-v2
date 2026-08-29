@@ -125,7 +125,7 @@ func MaintenanceDefinitions() []MaintenanceDefinition {
 		maintenance("cbr_arrears", "CBR Arrears", MaintenanceCBR, "cbrarrears.csv", "fincloud_cbr_arrears", BusinessKeyIdentity, "loan_no", "installment_no"),
 		maintenance("cbr_collateral", "CBR Collateral", MaintenanceCBR, "cbrcollateral.csv", "fincloud_cbr_collateral", RowNumberIdentity),
 		maintenance("cbr_customer", "CBR Customer", MaintenanceCBR, "cbrcustomer.csv", "fincloud_cbr_customer", RowNumberIdentity),
-		maintenance("cbr_loan", "CBR Loan", MaintenanceCBR, "cbrloan.csv", "fincloud_cbr_loan", BusinessKeyIdentity, "loan_no", "administration_name"),
+		maintenance("cbr_loan", "CBR Loan", MaintenanceCBR, "cbrloan.csv", "fincloud_cbr_loan", RowNumberIdentity),
 		maintenance("cbr_savings", "CBR Savings", MaintenanceCBR, "cbrsavings.csv", "fincloud_cbr_savings", BusinessKeyIdentity, "acc_no"),
 		maintenance("cbr_time_deposit", "CBR Time Deposit", MaintenanceCBR, "cbrtimedeposit.csv", "fincloud_cbr_time_deposit", BusinessKeyIdentity, "acc_no"),
 	}
