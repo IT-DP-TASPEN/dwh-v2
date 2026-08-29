@@ -173,7 +173,7 @@ func (c *Client) FetchTimeDepositAccounts(ctx context.Context) ([]string, error)
 
 func (c *Client) FetchLoanAccounts(ctx context.Context) ([]string, error) {
 	var all []string
-	for _, status := range []string{"Aktif", "Closed", "WO"} {
+	for _, status := range []string{"Aktif", "Closed", "WO", "HT"} {
 		values, err := c.fetchAccountList(ctx, "fetch loan accounts", "/pinjaman/inquiry/rekening/cari", url.Values{
 			"cabang": {"ALL"}, "jenispinjaman": {""}, "pagenumber": {"0"}, "pagesize": {"9999999999999"}, "rowcount": {"0"}, "status": {status},
 		})
