@@ -42,7 +42,7 @@ func TestFeatureCompositionOwnsCompleteRouteMatrix(t *testing.T) {
 		"GET /report-templates", "GET /report-templates/new", "GET /report-templates/{id}", "GET /report-templates/{id}/edit", "GET /report-templates/{id}/access",
 		"GET /reports", "GET /reports/{id}", "GET /exports", "GET /exports/{id}/download",
 		"GET /roles", "GET /roles/new", "GET /roles/{id}", "GET /roles/{id}/edit",
-		"GET /runs", "GET /runs/run-all", "GET /runs/{id}", "GET /runs/{id}/children", "GET /runs/{id}/status",
+		"GET /runs", "GET /runs/run-all", "GET /runs/scheduler-wave", "GET /runs/{id}", "GET /runs/{id}/children", "GET /runs/{id}/status",
 		"GET /sources", "GET /sources/{jobKey}/run",
 		"GET /schedules", "GET /schedules/new", "GET /schedules/bulk/new", "GET /schedules/{id}", "GET /schedules/{id}/edit", "GET /schedules/{id}/occurrences/{occurrenceID}",
 		"GET /users", "GET /users/new", "GET /users/{id}", "GET /users/{id}/edit", "GET /users/{id}/reset-password",

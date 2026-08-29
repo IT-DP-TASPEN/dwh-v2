@@ -25,6 +25,7 @@ const maxRunFormBody = 32 << 10
 type runService interface {
 	ListRuns(context.Context, RunFilter, int) (RunPage, error)
 	RunAllChildren(context.Context, uint64) (RunChildren, error)
+	SchedulerWave(context.Context, time.Time) (SchedulerWaveDetail, error)
 	FindRun(context.Context, uint64) (RunDetail, error)
 	OverviewRuns(context.Context) (RunOverview, error)
 	OverviewSources(context.Context) (SourceOverview, error)
@@ -145,6 +146,35 @@ func (handler *Handler) RunAllChildren(writer http.ResponseWriter, request *http
 	if err := handler.admin.RenderPartial(writer, http.StatusOK, "features/ingestion/runs", "run-all-children", pageData); err != nil {
 		handler.admin.Internal(writer, request, "render Run All children", err)
 	}
+}
+
+func (handler *Handler) SchedulerWave(writer http.ResponseWriter, request *http.Request) {
+	scheduledFor, err := parseSchedulerWaveTime(request.URL.Query().Get("scheduled_for"))
+	if err != nil {
+		http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	wave, err := handler.service.SchedulerWave(request.Context(), scheduledFor)
+	if err != nil {
+		handler.readError(writer, request, "load scheduler wave", err)
+		return
+	}
+	pageData, ok := handler.admin.PageData(request, "Scheduler wave", wave)
+	if !ok {
+		handler.admin.Internal(writer, request, "prepare scheduler wave", errors.New("principal missing"))
+		return
+	}
+	if err := handler.admin.RenderPartial(writer, http.StatusOK, "features/ingestion/runs", "scheduler-wave-attempts", pageData); err != nil {
+		handler.admin.Internal(writer, request, "render scheduler wave", err)
+	}
+}
+
+func parseSchedulerWaveTime(value string) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil || parsed.Nanosecond()%1000 != 0 {
+		return time.Time{}, fmt.Errorf("invalid scheduled_for")
+	}
+	return parsed.UTC(), nil
 }
 
 func (handler *Handler) Run(writer http.ResponseWriter, request *http.Request) {

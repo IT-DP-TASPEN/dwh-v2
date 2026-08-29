@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	reportsfeature "github.com/ibldzn/go-admin/internal/features/reports"
@@ -28,6 +29,7 @@ type fixture struct {
 	mu          sync.Mutex
 	polls       map[uint64]int
 	childLoads  map[uint64]int
+	waveLoads   map[string]int
 	starred     map[uint64]bool
 	folders     map[uint64]*uint64
 	folderNames map[uint64]string
@@ -38,13 +40,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fixture := &fixture{renderer: renderer, polls: map[uint64]int{}, childLoads: map[uint64]int{}}
+	fixture := &fixture{renderer: renderer, polls: map[uint64]int{}, childLoads: map[uint64]int{}, waveLoads: map[string]int{}}
 	fixture.resetReports()
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.FileServer(http.FS(webfiles.Files)))
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("/case/", fixture.page)
 	mux.HandleFunc("/runs", fixture.runsPage)
+	mux.HandleFunc("/runs/scheduler-wave", fixture.schedulerWave)
 	mux.HandleFunc("/runs/", fixture.status)
 	mux.HandleFunc("/reports", fixture.reportsPage)
 	mux.HandleFunc("/reports/", fixture.reportMutation)
@@ -56,20 +59,30 @@ func (fixture *fixture) runsPage(writer http.ResponseWriter, request *http.Reque
 	if request.Header.Get("HX-Request") != "true" {
 		fixture.mu.Lock()
 		fixture.childLoads = map[uint64]int{}
+		fixture.waveLoads = map[string]int{}
 		fixture.mu.Unlock()
 	}
 	filter := ingestionfeature.RunFilter{
 		Job: request.URL.Query().Get("job"), Status: request.URL.Query().Get("status"), Kind: request.URL.Query().Get("kind"), Trigger: request.URL.Query().Get("trigger"),
 	}
-	rows := make([]ingestionfeature.RunView, 0)
+	grouped := filter.Kind == "" && filter.Trigger == ""
+	rows := make([]ingestionfeature.RunListItem, 0)
 	for _, row := range fixtureRuns() {
+		if grouped {
+			if wave, leader := fixtureSchedulerWave(row.ID); wave != nil {
+				if leader && fixtureWaveMatches(wave.ScheduledForKey, filter) {
+					rows = append(rows, ingestionfeature.RunListItem{SchedulerWave: wave})
+				}
+				continue
+			}
+		}
 		if filter.Kind == "" && row.Kind == "run_all_child" {
 			continue
 		}
 		if filter.Job != "" && row.JobKey != filter.Job || filter.Status != "" && row.Status.Key != filter.Status || filter.Kind != "" && row.Kind != filter.Kind || filter.Trigger != "" && row.Trigger != filter.Trigger {
 			continue
 		}
-		rows = append(rows, row)
+		rows = append(rows, ingestionfeature.RunListItem{RunView: row})
 	}
 	catalog, err := core.NewCatalog()
 	if err != nil {
@@ -97,14 +110,83 @@ func fixtureRuns() []ingestionfeature.RunView {
 	return []ingestionfeature.RunView{
 		{ID: 260, Kind: "job", KindLabel: "job", JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "direct", CreatedAt: "2026-08-28 10:05:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
 		{ID: 259, Kind: "job", KindLabel: "job", JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "scheduler", CreatedAt: "2026-08-28 10:04:00 UTC", Status: ingestionfeature.PresentStatus("failed")},
+		{ID: 258, Kind: "job", KindLabel: "job", JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "scheduler", CreatedAt: "2026-08-28 10:03:30 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
 		{ID: 253, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, ChildPosition: 2, JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "run_all", CreatedAt: "2026-08-28 10:03:00 UTC", Status: ingestionfeature.PresentStatus("failed")},
 		{ID: 252, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, ChildPosition: 1, JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "run_all", CreatedAt: "2026-08-28 10:02:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
 		{ID: parentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 10:01:00 UTC", Status: ingestionfeature.PresentStatus("running"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}},
+		{ID: 239, Kind: "job", KindLabel: "job", JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "scheduler", CreatedAt: "2026-08-28 09:04:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
 		{ID: 242, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &olderParentID, ChildPosition: 2, JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "run_all", CreatedAt: "2026-08-28 09:03:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
 		{ID: 241, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &olderParentID, ChildPosition: 1, JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "run_all", CreatedAt: "2026-08-28 09:02:00 UTC", Status: ingestionfeature.PresentStatus("failed")},
 		{ID: olderParentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 09:01:00 UTC", Status: ingestionfeature.PresentStatus("completed"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 2, Complete: 2, Failed: 1}},
 		{ID: 231, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &retryParentID, ChildPosition: 1, JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "run_all", CreatedAt: "2026-08-28 08:02:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
 		{ID: retryParentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 08:01:00 UTC", Status: ingestionfeature.PresentStatus("completed"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 1, Complete: 1}},
+	}
+}
+
+func fixtureSchedulerWave(runID uint64) (*ingestionfeature.SchedulerWaveView, bool) {
+	switch runID {
+	case 259:
+		return &ingestionfeature.SchedulerWaveView{ScheduledFor: time.Date(2026, 8, 27, 18, 0, 0, 0, time.UTC), ScheduledForLabel: "27 Aug 2026 18:00:00 UTC",
+			ScheduledForKey: "2026-08-27T18:00:00Z", URL: "/runs/scheduler-wave?scheduled_for=2026-08-27T18%3A00%3A00Z", DOMID: "1787853600000000",
+			ActivityAt: "2026-08-28 10:04:00 UTC", Summary: "2 occurrences · 1 resolved · 1 unresolved · 2 attempts", Total: 2, Resolved: 1, Unresolved: 1, Attempts: 2}, true
+	case 258:
+		wave, _ := fixtureSchedulerWave(259)
+		return wave, false
+	case 239:
+		return &ingestionfeature.SchedulerWaveView{ScheduledFor: time.Date(2026, 8, 27, 6, 0, 0, 0, time.UTC), ScheduledForLabel: "27 Aug 2026 06:00:00 UTC",
+			ScheduledForKey: "2026-08-27T06:00:00Z", URL: "/runs/scheduler-wave?scheduled_for=2026-08-27T06%3A00%3A00Z", DOMID: "1787810400000000",
+			ActivityAt: "2026-08-28 09:04:00 UTC", Summary: "1 occurrence · 1 resolved · 1 attempt", Total: 1, Resolved: 1, Attempts: 1}, true
+	}
+	return nil, false
+}
+
+func fixtureWaveMatches(key string, filter ingestionfeature.RunFilter) bool {
+	for _, row := range fixtureRuns() {
+		wave, _ := fixtureSchedulerWave(row.ID)
+		if wave == nil || wave.ScheduledForKey != key {
+			continue
+		}
+		if filter.Job != "" && row.JobKey != filter.Job || filter.Status != "" && row.Status.Key != filter.Status {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func (fixture *fixture) schedulerWave(writer http.ResponseWriter, request *http.Request) {
+	key := request.URL.Query().Get("scheduled_for")
+	fixture.mu.Lock()
+	fixture.waveLoads[key]++
+	loads := fixture.waveLoads[key]
+	fixture.mu.Unlock()
+	if key == "2026-08-27T06:00:00Z" && loads == 1 {
+		http.Error(writer, "temporary scheduler fragment failure", http.StatusInternalServerError)
+		return
+	}
+	var detail ingestionfeature.SchedulerWaveDetail
+	switch key {
+	case "2026-08-27T18:00:00Z":
+		detail = ingestionfeature.SchedulerWaveDetail{ScheduledFor: "27 Aug 2026 18:00:00 UTC", Occurrences: []ingestionfeature.SchedulerOccurrenceView{
+			{ScheduleID: 10, OccurrenceID: 700, ScheduleName: "Schedule A", JobName: "Journal Transaction Report", Status: ingestionfeature.PresentStatus("resolved"), Attempts: []ingestionfeature.SchedulerAttemptView{
+				{RunID: 259, AttemptNo: 1, JobName: "Journal Transaction Report", Status: ingestionfeature.PresentStatus("failed"), CreatedAt: "2026-08-28 10:04:00 UTC"},
+				{RunID: 258, AttemptNo: 2, JobName: "Journal Transaction Report", Status: ingestionfeature.PresentStatus("succeeded"), CreatedAt: "2026-08-28 10:03:30 UTC"},
+			}},
+			{ScheduleID: 11, OccurrenceID: 701, ScheduleName: "Schedule B", JobName: "Loan Detail", Status: ingestionfeature.PresentStatus("unresolved")},
+		}}
+	case "2026-08-27T06:00:00Z":
+		detail = ingestionfeature.SchedulerWaveDetail{ScheduledFor: "27 Aug 2026 06:00:00 UTC", Occurrences: []ingestionfeature.SchedulerOccurrenceView{{
+			ScheduleID: 12, OccurrenceID: 702, ScheduleName: "Schedule C", JobName: "CIF Opening Report", Status: ingestionfeature.PresentStatus("resolved"), Attempts: []ingestionfeature.SchedulerAttemptView{{
+				RunID: 239, AttemptNo: 1, JobName: "CIF Opening Report", Status: ingestionfeature.PresentStatus("succeeded"), CreatedAt: "2026-08-28 09:04:00 UTC",
+			}},
+		}}}
+	default:
+		http.NotFound(writer, request)
+		return
+	}
+	pageData := adminshell.PageData{Title: "Scheduler wave", AppName: "Browser fixture", Data: detail}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/ingestion/runs", "scheduler-wave-attempts", pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
 	}
 }
 

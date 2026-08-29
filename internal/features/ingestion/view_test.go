@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
+	"github.com/ibldzn/go-admin/internal/platform/pagination"
 	"github.com/ibldzn/go-admin/internal/render"
 	webfiles "github.com/ibldzn/go-admin/web"
 )
@@ -44,7 +46,7 @@ func TestRunAllChildStatusesUseRunsListBadges(t *testing.T) {
 	for _, key := range statuses {
 		t.Run(key, func(t *testing.T) {
 			status := PresentStatus(key)
-			list := renderPartial("features/ingestion/runs", "runs-table", RunPage{Rows: []RunView{{ID: 1, Status: status}}})
+			list := renderPartial("features/ingestion/runs", "runs-table", RunPage{Rows: listItems(RunView{ID: 1, Status: status})})
 			child := RunView{ID: 2, ChildPosition: 1, JobName: "Child", Status: status}
 			if key == "skipped" {
 				child.SkipReason = "not selected"
@@ -74,12 +76,12 @@ func TestRunsListHierarchyFiltersAndParentSummaries(t *testing.T) {
 	parentID := uint64(251)
 	page := RunPage{
 		Kinds: []RunKindOption{{"job", "Job"}, {"run_all_parent", "Run All parent"}, {"run_all_child", "Run All child"}},
-		Rows: []RunView{
-			{ID: 249, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("completed"), RunAllSummary: &RunAllSummary{}},
-			{ID: parentID, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("running"), RunAllSummary: &RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}},
-			{ID: 252, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("completed"), RunAllSummary: &RunAllSummary{Total: 36, Complete: 36}},
-			{ID: 253, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, JobName: "Journal Transaction Report", Status: PresentStatus("failed")},
-		},
+		Rows: listItems(
+			RunView{ID: 249, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("completed"), RunAllSummary: &RunAllSummary{}},
+			RunView{ID: parentID, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("running"), RunAllSummary: &RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}},
+			RunView{ID: 252, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("completed"), RunAllSummary: &RunAllSummary{Total: 36, Complete: 36}},
+			RunView{ID: 253, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, JobName: "Journal Transaction Report", Status: PresentStatus("failed")},
+		),
 	}
 	response := httptest.NewRecorder()
 	if err := renderer.RenderPartial(response, http.StatusOK, "features/ingestion/runs", "content", render.PageData{Data: page}); err != nil {
@@ -129,6 +131,68 @@ func TestRunsListHierarchyFiltersAndParentSummaries(t *testing.T) {
 			t.Errorf("child fragment missing %q: %s", expected, fragment)
 		}
 	}
+}
+
+func TestSchedulerWaveRendersLazySummaryAndFullAttempts(t *testing.T) {
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduledFor := time.Date(2026, 8, 27, 18, 0, 0, 123000000, time.UTC)
+	wave := schedulerWaveView(scheduledFor, time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC), schedulerWaveSummaryRow{
+		ScheduledFor: scheduledFor, Total: 2, Resolved: 1, Unresolved: 1, Attempts: 3,
+	})
+	page := RunPage{Rows: []RunListItem{
+		{RunView: RunView{ID: 300, Kind: "job", JobName: "Standalone", Status: PresentStatus("succeeded")}},
+		{SchedulerWave: wave},
+		{RunView: RunView{ID: 299, Kind: "run_all_parent", Status: PresentStatus("completed"), RunAllSummary: &RunAllSummary{}}},
+	}, Pagination: pagination.New(1, RunPageSize, 3)}
+	response := httptest.NewRecorder()
+	if err := renderer.RenderPartial(response, http.StatusOK, "features/ingestion/runs", "runs-table", render.PageData{Data: page}); err != nil {
+		t.Fatal(err)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		"Activity", "Scheduled · 27 Aug 2026 18:00:00 UTC", "2 occurrences · 1 resolved · 1 unresolved · 3 attempts",
+		`aria-label="Expand Scheduled 27 Aug 2026 18:00:00 UTC attempts"`, `hx-trigger="load-scheduler-wave"`,
+		`scheduled_for=2026-08-27T18%3A00%3A00.123Z`, "Could not load scheduler attempts", "3 activities",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("scheduler wave render missing %q: %s", expected, body)
+		}
+	}
+	if strings.Contains(body, `hx-trigger="click once"`) {
+		t.Fatal("scheduler wave load cannot retry")
+	}
+	if standalone, scheduled, runAll := strings.Index(body, ">#300</a>"), strings.Index(body, "Scheduled ·"), strings.Index(body, ">#299</a>"); !(standalone < scheduled && scheduled < runAll) {
+		t.Fatalf("mixed entity order changed: standalone=%d scheduled=%d runAll=%d", standalone, scheduled, runAll)
+	}
+
+	detail := SchedulerWaveDetail{ScheduledFor: "27 Aug 2026 18:00:00 UTC", Occurrences: []SchedulerOccurrenceView{
+		{ScheduleID: 10, OccurrenceID: 20, ScheduleName: "Schedule A", JobName: "CIF Detail", Status: presentOccurrenceStatus("resolved"), Attempts: []SchedulerAttemptView{
+			{RunID: 238, AttemptNo: 1, JobName: "CIF Detail", Status: PresentStatus("failed"), CreatedAt: "27 Aug 2026 18:00:03 UTC"},
+			{RunID: 269, AttemptNo: 2, JobName: "CIF Detail", Status: PresentStatus("succeeded"), CreatedAt: "28 Aug 2026 10:00:00 UTC"},
+		}},
+		{ScheduleID: 11, OccurrenceID: 21, ScheduleName: "Schedule B", JobName: "Loan Detail", Status: presentOccurrenceStatus("unresolved")},
+	}}
+	response = httptest.NewRecorder()
+	if err := renderer.RenderPartial(response, http.StatusOK, "features/ingestion/runs", "scheduler-wave-attempts", render.PageData{Data: detail}); err != nil {
+		t.Fatal(err)
+	}
+	fragment := response.Body.String()
+	for _, expected := range []string{`href="/schedules/10"`, `data-scheduler-occurrence="20"`, `data-scheduler-attempt="1"`, `href="/runs/238"`, `href="/runs/269"`, "No attempts submitted"} {
+		if !strings.Contains(fragment, expected) {
+			t.Errorf("scheduler wave fragment missing %q: %s", expected, fragment)
+		}
+	}
+}
+
+func listItems(views ...RunView) []RunListItem {
+	items := make([]RunListItem, len(views))
+	for index, view := range views {
+		items[index].RunView = view
+	}
+	return items
 }
 
 func TestTechnicalDetailsRenderEscapedCopyableAndWithLegacyFallback(t *testing.T) {

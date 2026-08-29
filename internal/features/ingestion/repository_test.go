@@ -1,6 +1,7 @@
 package ingestion
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -50,6 +51,32 @@ func TestRunAllSummaryUsesCanonicalTerminalStatuses(t *testing.T) {
 	}
 	if summary.Total != 41 || summary.Complete != 37 || summary.Failed != 2 || summary.Running != 1 {
 		t.Fatalf("terminal summary=%+v", summary)
+	}
+}
+
+func TestGroupedRunFiltersQualifyWithoutFilteringWaveAggregation(t *testing.T) {
+	query, arguments := groupedRunEntitiesSQL(RunFilter{Job: "journal_transaction_report", Status: "failed"})
+	for _, expected := range []string{
+		`r.job_key=?`, `r.status=?`, `member_run.job_key=?`, `member_run.status=?`,
+		`member_occurrence.scheduled_for=o.scheduled_for`, `MAX(attempt_run.created_at)`, `GROUP BY o.scheduled_for`,
+	} {
+		if !strings.Contains(query, expected) {
+			t.Fatalf("grouped query missing %q: %s", expected, query)
+		}
+	}
+	for _, forbidden := range []string{`attempt_run.job_key=?`, `attempt_run.status=?`} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("wave aggregation was filtered by %q: %s", forbidden, query)
+		}
+	}
+	want := []any{"journal_transaction_report", "failed", "journal_transaction_report", "failed"}
+	if len(arguments) != len(want) {
+		t.Fatalf("arguments=%v want=%v", arguments, want)
+	}
+	for index := range want {
+		if arguments[index] != want[index] {
+			t.Fatalf("arguments=%v want=%v", arguments, want)
+		}
 	}
 }
 

@@ -81,6 +81,19 @@ func PresentStatus(status string) StatusView {
 	return view
 }
 
+func presentOccurrenceStatus(status string) StatusView {
+	view := StatusView{Key: status, Label: strings.ReplaceAll(title(status), "_", " "), Class: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300"}
+	switch status {
+	case "unresolved":
+		view.Class = "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+	case "resolved":
+		view.Class = "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+	case "rejected_invalid":
+		view.Class = "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+	}
+	return view
+}
+
 type ParameterField struct{ Label, Value string }
 
 type RunAllSummary struct {
@@ -123,8 +136,21 @@ type RunView struct {
 	RunAllSummary                                *RunAllSummary
 }
 
+type RunListItem struct {
+	RunView
+	SchedulerWave *SchedulerWaveView
+}
+
+type SchedulerWaveView struct {
+	ScheduledFor                                     time.Time
+	ScheduledForLabel, ScheduledForKey, URL, DOMID   string
+	ActivityAt, Summary                              string
+	Total, Resolved, Unresolved, Discarded, Rejected uint64
+	Attempts                                         uint64
+}
+
 type RunPage struct {
-	Rows                 []RunView
+	Rows                 []RunListItem
 	Filter               RunFilter
 	Pagination           pagination.Page
 	PreviousURL, NextURL string
@@ -136,6 +162,57 @@ type RunPage struct {
 type RunChildren struct {
 	ParentID uint64
 	Rows     []RunView
+}
+
+type SchedulerWaveDetail struct {
+	ScheduledFor string
+	Occurrences  []SchedulerOccurrenceView
+}
+
+type SchedulerOccurrenceView struct {
+	ScheduleID, OccurrenceID uint64
+	ScheduleName, JobName    string
+	Status                   StatusView
+	Attempts                 []SchedulerAttemptView
+}
+
+type SchedulerAttemptView struct {
+	RunID     uint64
+	AttemptNo uint32
+	JobName   string
+	Status    StatusView
+	CreatedAt string
+}
+
+type runListEntityRow struct {
+	EntityKind   string       `db:"entity_kind"`
+	RunID        uint64       `db:"run_id"`
+	ScheduledFor sql.NullTime `db:"scheduled_for"`
+	ActivityAt   time.Time    `db:"activity_at"`
+	ActivityID   uint64       `db:"activity_id"`
+}
+
+type schedulerWaveSummaryRow struct {
+	ScheduledFor time.Time `db:"scheduled_for"`
+	Total        uint64    `db:"total"`
+	Resolved     uint64    `db:"resolved"`
+	Unresolved   uint64    `db:"unresolved"`
+	Discarded    uint64    `db:"discarded"`
+	Rejected     uint64    `db:"rejected"`
+	Attempts     uint64    `db:"attempts"`
+}
+
+type schedulerWaveOccurrenceRow struct {
+	ScheduleID       uint64         `db:"schedule_id"`
+	OccurrenceID     uint64         `db:"occurrence_id"`
+	ScheduleName     string         `db:"schedule_name"`
+	OccurrenceStatus string         `db:"occurrence_status"`
+	JobKey           string         `db:"job_key"`
+	AttemptNo        sql.NullInt64  `db:"attempt_no"`
+	RunID            sql.NullInt64  `db:"run_id"`
+	RunStatus        sql.NullString `db:"run_status"`
+	RunJobKey        sql.NullString `db:"run_job_key"`
+	RunCreatedAt     sql.NullTime   `db:"run_created_at"`
 }
 
 type SchedulerProvenance struct {

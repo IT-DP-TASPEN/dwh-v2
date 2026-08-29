@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -26,9 +27,11 @@ import (
 
 type childRouteService struct {
 	runService
-	calls int
-	id    uint64
-	err   error
+	calls     int
+	id        uint64
+	err       error
+	waveCalls int
+	waveTime  time.Time
 }
 
 func (service *childRouteService) RunAllChildren(_ context.Context, id uint64) (RunChildren, error) {
@@ -38,6 +41,18 @@ func (service *childRouteService) RunAllChildren(_ context.Context, id uint64) (
 		return RunChildren{}, service.err
 	}
 	return RunChildren{ParentID: id, Rows: []RunView{{ID: 252, ChildPosition: 1, JobName: "CIF Opening Report", Status: PresentStatus("succeeded")}}}, nil
+}
+
+func (service *childRouteService) SchedulerWave(_ context.Context, scheduledFor time.Time) (SchedulerWaveDetail, error) {
+	service.waveCalls++
+	service.waveTime = scheduledFor
+	if service.err != nil {
+		return SchedulerWaveDetail{}, service.err
+	}
+	return SchedulerWaveDetail{ScheduledFor: formatTime(scheduledFor), Occurrences: []SchedulerOccurrenceView{{
+		ScheduleID: 1, OccurrenceID: 2, ScheduleName: "Daily CIF", JobName: "CIF Opening Report", Status: presentOccurrenceStatus("resolved"),
+		Attempts: []SchedulerAttemptView{{RunID: 3, AttemptNo: 1, JobName: "CIF Opening Report", Status: PresentStatus("succeeded"), CreatedAt: formatTime(scheduledFor)}},
+	}}}, nil
 }
 
 type routeAuthentication struct{ principal browserauth.Principal }
@@ -80,6 +95,44 @@ func TestRunAllChildrenRouteRequiresViewPermission(t *testing.T) {
 			}
 			if test.wantStatus == http.StatusOK && (service.id != 251 || !strings.Contains(response.Body.String(), `href="/runs/252">#252</a>`)) {
 				t.Fatalf("id=%d body=%q", service.id, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestSchedulerWaveRouteAuthorizationAndExactTimestamp(t *testing.T) {
+	viewer := browserauth.Principal{UserID: 1, Username: "viewer", RoleSlug: access.UserRoleSlug, Permissions: access.NewPermissionSet([]string{PermissionView}),
+		Actor: browserauth.Identity{UserID: 1, Username: "viewer", RoleSlug: access.UserRoleSlug}}
+	for _, test := range []struct {
+		name       string
+		principal  browserauth.Principal
+		query      string
+		serviceErr error
+		wantStatus int
+		wantCalls  int
+	}{
+		{name: "permissionless", principal: browserauth.Principal{UserID: 1, Username: "viewer", RoleSlug: access.UserRoleSlug, Actor: viewer.Actor}, query: "2026-08-27T18:00:00.123456Z", wantStatus: http.StatusForbidden},
+		{name: "viewer", principal: viewer, query: "2026-08-28T01:00:00.123456+07:00", wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "invalid", principal: viewer, query: "not-a-time", wantStatus: http.StatusBadRequest},
+		{name: "sub-microsecond", principal: viewer, query: "2026-08-27T18:00:00.123456789Z", wantStatus: http.StatusBadRequest},
+		{name: "missing wave", principal: viewer, query: "2026-08-27T18:00:00Z", serviceErr: sql.ErrNoRows, wantStatus: http.StatusNotFound, wantCalls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &childRouteService{err: test.serviceErr}
+			router, token := runChildrenRouter(t, test.principal, service)
+			request := httptest.NewRequest(http.MethodGet, "/runs/scheduler-wave?scheduled_for="+url.QueryEscape(test.query), nil)
+			request.Header.Set("HX-Request", "true")
+			request.AddCookie(&http.Cookie{Name: "session", Value: token})
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || service.waveCalls != test.wantCalls {
+				t.Fatalf("status=%d calls=%d body=%q", response.Code, service.waveCalls, response.Body.String())
+			}
+			if test.wantStatus == http.StatusOK {
+				want := time.Date(2026, 8, 27, 18, 0, 0, 123456000, time.UTC)
+				if !service.waveTime.Equal(want) || !strings.Contains(response.Body.String(), `href="/runs/3"`) {
+					t.Fatalf("scheduled_for=%s body=%q", service.waveTime, response.Body.String())
+				}
 			}
 		})
 	}

@@ -250,10 +250,192 @@ func TestRunsListChildVisibilityAndParentSummaries(t *testing.T) {
 	}
 }
 
-func findRunView(rows []RunView, id uint64) *RunView {
+func TestSchedulerWaveGroupingFiltersRetriesAndPagination(t *testing.T) {
+	db := integrationdb.Open(t)
+	ctx := context.Background()
+	from, _ := core.ParseCalendarDate("2026-08-27")
+	parameters, _ := ingestionrun.NewRangeExecution("cif_opening_report", from, from)
+	checksum := make([]byte, 32)
+	checksum[0] = 1
+	var scheduleIDs, occurrenceIDs, runIDs []uint64
+	cleanup := func() {
+		for _, occurrenceID := range occurrenceIDs {
+			_, _ = db.Exec(`DELETE FROM schedule_attempts WHERE occurrence_id=?`, occurrenceID)
+		}
+		for _, occurrenceID := range occurrenceIDs {
+			_, _ = db.Exec(`DELETE FROM schedule_occurrences WHERE id=?`, occurrenceID)
+		}
+		for _, scheduleID := range scheduleIDs {
+			_, _ = db.Exec(`DELETE FROM schedules WHERE id=?`, scheduleID)
+		}
+		for _, runID := range runIDs {
+			_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, runID)
+		}
+	}
+	t.Cleanup(cleanup)
+
+	insertSchedule := func(name, jobKey string) uint64 {
+		t.Helper()
+		result, err := db.Exec(`INSERT INTO schedules
+			(name,job_key,cron_expression,timezone,policy_kind,policy_version,policy_json,policy_checksum,enabled,next_run_at)
+			VALUES (?,?,'0 * * * *','UTC','test',1,'{}',?,FALSE,NULL)`, name, jobKey, checksum)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := result.LastInsertId()
+		scheduleIDs = append(scheduleIDs, uint64(id))
+		return uint64(id)
+	}
+	insertOccurrence := func(scheduleID uint64, scheduledFor time.Time, jobKey, status string) uint64 {
+		t.Helper()
+		result, err := db.Exec(`INSERT INTO schedule_occurrences
+			(schedule_id,scheduled_for,identity_source,resolution_mode,status,schedule_revision,job_key,cron_expression,timezone,
+			 policy_kind,policy_version,policy_json,policy_checksum)
+			VALUES (?,?,'validated_cron','historical',?,1,?,'0 * * * *','UTC','test',1,'{}',?)`, scheduleID, scheduledFor, status, jobKey, checksum)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := result.LastInsertId()
+		occurrenceIDs = append(occurrenceIDs, uint64(id))
+		return uint64(id)
+	}
+	insertRun := func(jobKey, status, trigger string, createdAt time.Time) uint64 {
+		t.Helper()
+		reference := fmt.Sprintf("scheduler-wave-test-%d-%d", time.Now().UnixNano(), len(runIDs))
+		result, err := db.Exec(`INSERT INTO ingestion_runs
+			(kind,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,trigger_reference,created_at,finished_at)
+			VALUES ('job',?,?,?,?,?,?,?,?,?,?)`, jobKey, status, parameters.Kind, parameters.Version, parameters.JSON, parameters.Checksum[:], trigger, reference, createdAt, createdAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := result.LastInsertId()
+		runIDs = append(runIDs, uint64(id))
+		return uint64(id)
+	}
+	linkAttempt := func(occurrenceID uint64, attemptNo int, runID uint64, submittedAt time.Time) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO schedule_attempts (occurrence_id,attempt_no,ingestion_run_id,trigger_reference,submitted_at)
+			VALUES (?,?,?,?,?)`, occurrenceID, attemptNo, runID, fmt.Sprintf("scheduler-wave-attempt-%d-%d", occurrenceID, attemptNo), submittedAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE schedule_occurrences SET attempt_count=? WHERE id=?`, attemptNo, occurrenceID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	waveTime := time.Date(2098, 8, 27, 18, 0, 0, 123456000, time.UTC)
+	otherWaveTime := waveTime.Add(time.Microsecond)
+	zeroWaveTime := waveTime.Add(2 * time.Microsecond)
+	prefix := fmt.Sprintf("wave-%d", time.Now().UnixNano())
+	scheduleA := insertSchedule(prefix+"-A", "cif_opening_report")
+	scheduleB := insertSchedule(prefix+"-B", "journal_transaction_report")
+	scheduleC := insertSchedule(prefix+"-C", "loan_detail")
+	scheduleD := insertSchedule(prefix+"-D", "saving_detail")
+	scheduleE := insertSchedule(prefix+"-E", "time_deposit_detail")
+	occurrenceA := insertOccurrence(scheduleA, waveTime, "cif_opening_report", "resolved")
+	occurrenceB := insertOccurrence(scheduleB, waveTime, "journal_transaction_report", "unresolved")
+	_ = insertOccurrence(scheduleC, waveTime, "loan_detail", "resolved")
+	occurrenceD := insertOccurrence(scheduleD, otherWaveTime, "saving_detail", "discarded")
+	_ = insertOccurrence(scheduleE, zeroWaveTime, "time_deposit_detail", "unresolved")
+
+	activityBase := time.Date(2099, 1, 1, 8, 0, 0, 0, time.UTC)
+	a1 := insertRun("cif_opening_report", "failed", "scheduler", activityBase.Add(3*time.Second))
+	b1 := insertRun("journal_transaction_report", "succeeded", "scheduler", activityBase.Add(time.Minute+18*time.Second))
+	a2 := insertRun("cif_opening_report", "failed", "scheduler", activityBase.Add(2*time.Minute+3*time.Second))
+	a3Time := activityBase.Add(4 * time.Hour)
+	a3 := insertRun("cif_opening_report", "succeeded", "scheduler", a3Time)
+	d1 := insertRun("saving_detail", "succeeded", "scheduler", activityBase.Add(2*time.Minute+4*time.Second))
+	linkAttempt(occurrenceA, 1, a1, activityBase.Add(3*time.Second))
+	linkAttempt(occurrenceA, 2, a2, activityBase.Add(2*time.Minute+3*time.Second))
+	linkAttempt(occurrenceA, 3, a3, a3Time)
+	linkAttempt(occurrenceB, 1, b1, activityBase.Add(time.Minute+18*time.Second))
+	linkAttempt(occurrenceD, 1, d1, activityBase.Add(2*time.Minute+4*time.Second))
+
+	standalone := insertRun("cif_opening_report", "succeeded", "direct", activityBase.Add(3*time.Hour))
+	parentParameters, _ := ingestionrun.NewRunAllRange(from, from)
+	parentResult, err := db.Exec(`INSERT INTO ingestion_runs
+		(kind,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,trigger_reference,created_at,finished_at)
+		VALUES ('run_all_parent','completed',?,?,?,?,?,?,?,?)`, parentParameters.Kind, parentParameters.Version, parentParameters.JSON,
+		parentParameters.Checksum[:], "direct", prefix+"-parent", activityBase.Add(2*time.Hour), activityBase.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID, _ := parentResult.LastInsertId()
+	runIDs = append(runIDs, uint64(parentID))
+	legacyScheduler := insertRun("cif_opening_report", "failed", "scheduler", activityBase.Add(time.Hour))
+
+	repository := NewRepository(db)
+	service, _ := NewService(repository)
+	entities, _, err := repository.ListRunEntities(ctx, RunFilter{}, 5, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := service.runListItems(ctx, entities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) < 5 || items[0].SchedulerWave == nil || !items[0].SchedulerWave.ScheduledFor.Equal(waveTime) ||
+		items[1].ID != standalone || items[2].ID != uint64(parentID) || items[3].ID != legacyScheduler ||
+		items[4].SchedulerWave == nil || !items[4].SchedulerWave.ScheduledFor.Equal(otherWaveTime) {
+		t.Fatalf("hydrated mixed order=%+v", items)
+	}
+	wave := items[0].SchedulerWave
+	if wave.Total != 3 || wave.Resolved != 2 || wave.Unresolved != 1 || wave.Attempts != 4 || wave.ActivityAt != formatTime(a3Time) {
+		t.Fatalf("wave summary=%+v", wave)
+	}
+
+	failedPage, err := service.ListRuns(ctx, RunFilter{Status: "failed"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedWave := findSchedulerWave(failedPage.Rows, waveTime)
+	if failedWave == nil || failedWave.Total != 3 || failedWave.Attempts != 4 || failedWave.ActivityAt != formatTime(a3Time) {
+		t.Fatalf("failed membership changed full-wave data: %+v", failedWave)
+	}
+	jobPage, err := service.ListRuns(ctx, RunFilter{Job: "journal_transaction_report"}, 1)
+	if err != nil || findSchedulerWave(jobPage.Rows, waveTime) == nil {
+		t.Fatalf("job membership wave missing: error=%v", err)
+	}
+	if findSchedulerWave(jobPage.Rows, waveTime).Attempts != 4 {
+		t.Fatalf("job membership filtered wave attempts: %+v", findSchedulerWave(jobPage.Rows, waveTime))
+	}
+	if findSchedulerWave(failedPage.Rows, zeroWaveTime) != nil {
+		t.Fatal("all-zero-attempt wave appeared in run history")
+	}
+
+	detail, err := service.SchedulerWave(ctx, waveTime)
+	if err != nil || len(detail.Occurrences) != 3 || len(detail.Occurrences[0].Attempts) != 3 || len(detail.Occurrences[1].Attempts) != 1 || len(detail.Occurrences[2].Attempts) != 0 {
+		t.Fatalf("wave detail=%+v error=%v", detail, err)
+	}
+	if detail.Occurrences[0].Attempts[0].RunID != a1 || detail.Occurrences[0].Attempts[1].RunID != a2 || detail.Occurrences[0].Attempts[2].RunID != a3 {
+		t.Fatalf("attempt order=%+v", detail.Occurrences[0].Attempts)
+	}
+	if _, err := service.SchedulerWave(ctx, zeroWaveTime); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("all-zero wave detail error=%v", err)
+	}
+
+	flat, err := service.ListRuns(ctx, RunFilter{Trigger: "scheduler", Status: "failed"}, 1)
+	if err != nil || findRunView(flat.Rows, a1) == nil || findRunView(flat.Rows, a2) == nil || findRunView(flat.Rows, legacyScheduler) == nil {
+		t.Fatalf("flat scheduler failures rows=%d error=%v", len(flat.Rows), err)
+	}
+	if findSchedulerWave(flat.Rows, waveTime) != nil {
+		t.Fatal("explicit scheduler troubleshooting remained grouped")
+	}
+}
+
+func findRunView(rows []RunListItem, id uint64) *RunView {
 	for index := range rows {
 		if rows[index].ID == id {
-			return &rows[index]
+			return &rows[index].RunView
+		}
+	}
+	return nil
+}
+
+func findSchedulerWave(rows []RunListItem, scheduledFor time.Time) *SchedulerWaveView {
+	for _, row := range rows {
+		if row.SchedulerWave != nil && row.SchedulerWave.ScheduledFor.Equal(scheduledFor) {
+			return row.SchedulerWave
 		}
 	}
 	return nil

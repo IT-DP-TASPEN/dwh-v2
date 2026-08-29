@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	core "github.com/ibldzn/go-admin/internal/ingestion"
@@ -36,17 +37,40 @@ func (service *Service) ListRuns(ctx context.Context, filter RunFilter, page int
 	if err := service.validateFilter(filter); err != nil {
 		return RunPage{}, err
 	}
-	rows, total, err := service.repository.ListRuns(ctx, filter, RunPageSize, max(page-1, 0)*RunPageSize)
+	grouped := filter.Kind == "" && filter.Trigger == ""
+	offset := max(page-1, 0) * RunPageSize
+	var total int64
+	var items []RunListItem
+	var err error
+	if grouped {
+		entities, entityTotal, queryErr := service.repository.ListRunEntities(ctx, filter, RunPageSize, offset)
+		total, err = entityTotal, queryErr
+		if err == nil {
+			items, err = service.runListItems(ctx, entities)
+		}
+	} else {
+		var rows []runRow
+		rows, total, err = service.repository.ListRuns(ctx, filter, RunPageSize, offset)
+		if err == nil {
+			items, err = service.physicalRunItems(ctx, rows)
+		}
+	}
 	if err != nil {
 		return RunPage{}, err
 	}
 	pageInfo := pagination.New(page, RunPageSize, total)
-	if pageInfo.Offset() != max(page-1, 0)*RunPageSize {
-		rows, _, err = service.repository.ListRuns(ctx, filter, RunPageSize, pageInfo.Offset())
-		if err != nil {
-			return RunPage{}, err
-		}
+	if pageInfo.Offset() != offset {
+		return service.ListRuns(ctx, filter, pageInfo.Page)
 	}
+	result := RunPage{Rows: items, Filter: filter, Pagination: pageInfo, Jobs: service.catalog.Jobs(),
+		Statuses: []string{"planned", "queued", "running", "succeeded", "failed", "skipped", "cancelled", "abandoned", "completed", "completed_with_skips"},
+		Kinds:    append([]RunKindOption(nil), runKindOptions...),
+		Triggers: []string{"direct", "scheduler", "run_all"}}
+	result.PreviousURL, result.NextURL = runPageURL(filter, pageInfo.Previous), runPageURL(filter, pageInfo.Next)
+	return result, nil
+}
+
+func (service *Service) physicalRunItems(ctx context.Context, rows []runRow) ([]RunListItem, error) {
 	views := service.views(rows)
 	parentIDs := make([]uint64, 0, len(views))
 	for _, view := range views {
@@ -56,20 +80,129 @@ func (service *Service) ListRuns(ctx context.Context, filter RunFilter, page int
 	}
 	summaries, err := service.repository.runAllSummaries(ctx, parentIDs)
 	if err != nil {
-		return RunPage{}, err
+		return nil, err
 	}
+	items := make([]RunListItem, len(views))
 	for index := range views {
 		if views[index].Kind == string(ingestionrun.KindRunAllParent) {
 			summary := summaries[views[index].ID]
 			views[index].RunAllSummary = &summary
 		}
+		items[index].RunView = views[index]
 	}
-	result := RunPage{Rows: views, Filter: filter, Pagination: pageInfo, Jobs: service.catalog.Jobs(),
-		Statuses: []string{"planned", "queued", "running", "succeeded", "failed", "skipped", "cancelled", "abandoned", "completed", "completed_with_skips"},
-		Kinds:    append([]RunKindOption(nil), runKindOptions...),
-		Triggers: []string{"direct", "scheduler", "run_all"}}
-	result.PreviousURL, result.NextURL = runPageURL(filter, pageInfo.Previous), runPageURL(filter, pageInfo.Next)
-	return result, nil
+	return items, nil
+}
+
+func (service *Service) runListItems(ctx context.Context, entities []runListEntityRow) ([]RunListItem, error) {
+	runIDs := make([]uint64, 0, len(entities))
+	waveTimes := make([]time.Time, 0, len(entities))
+	for _, entity := range entities {
+		if entity.EntityKind == "run" {
+			runIDs = append(runIDs, entity.RunID)
+		} else if entity.EntityKind == "scheduler_wave" && entity.ScheduledFor.Valid {
+			waveTimes = append(waveTimes, entity.ScheduledFor.Time.UTC())
+		} else {
+			return nil, fmt.Errorf("invalid run list entity %q", entity.EntityKind)
+		}
+	}
+	runs, err := service.repository.runsByIDs(ctx, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	runItems, err := service.physicalRunItems(ctx, runs)
+	if err != nil {
+		return nil, err
+	}
+	runsByID := make(map[uint64]RunView, len(runItems))
+	for _, item := range runItems {
+		runsByID[item.ID] = item.RunView
+	}
+	summaries, err := service.repository.schedulerWaveSummaries(ctx, waveTimes)
+	if err != nil {
+		return nil, err
+	}
+	summariesByTime := make(map[int64]schedulerWaveSummaryRow, len(summaries))
+	for _, summary := range summaries {
+		summariesByTime[summary.ScheduledFor.UnixMicro()] = summary
+	}
+	items := make([]RunListItem, 0, len(entities))
+	for _, entity := range entities {
+		if entity.EntityKind == "run" {
+			id := entity.RunID
+			view, found := runsByID[id]
+			if !found {
+				return nil, fmt.Errorf("hydrate run list entity %d: missing run", id)
+			}
+			items = append(items, RunListItem{RunView: view})
+			continue
+		}
+		scheduledFor := entity.ScheduledFor.Time.UTC()
+		summary, found := summariesByTime[scheduledFor.UnixMicro()]
+		if !found {
+			return nil, fmt.Errorf("hydrate scheduler wave %s: missing summary", scheduledFor.Format(time.RFC3339Nano))
+		}
+		items = append(items, RunListItem{SchedulerWave: schedulerWaveView(scheduledFor, entity.ActivityAt, summary)})
+	}
+	return items, nil
+}
+
+func schedulerWaveView(scheduledFor, activityAt time.Time, summary schedulerWaveSummaryRow) *SchedulerWaveView {
+	key := scheduledFor.UTC().Format(time.RFC3339Nano)
+	values := url.Values{"scheduled_for": {key}}
+	view := &SchedulerWaveView{ScheduledFor: scheduledFor.UTC(), ScheduledForLabel: formatTime(scheduledFor), ScheduledForKey: key,
+		URL: "/runs/scheduler-wave?" + values.Encode(), DOMID: strconv.FormatInt(scheduledFor.UnixMicro(), 10), ActivityAt: formatTime(activityAt),
+		Total: summary.Total, Resolved: summary.Resolved, Unresolved: summary.Unresolved, Discarded: summary.Discarded,
+		Rejected: summary.Rejected, Attempts: summary.Attempts}
+	view.Summary = schedulerWaveSummary(view)
+	return view
+}
+
+func schedulerWaveSummary(wave *SchedulerWaveView) string {
+	parts := []string{plural(wave.Total, "occurrence")}
+	for _, value := range []struct {
+		count uint64
+		label string
+	}{{wave.Resolved, "resolved"}, {wave.Unresolved, "unresolved"}, {wave.Discarded, "discarded"}, {wave.Rejected, "rejected invalid"}} {
+		if value.count != 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", value.count, value.label))
+		}
+	}
+	parts = append(parts, plural(wave.Attempts, "attempt"))
+	return strings.Join(parts, " · ")
+}
+
+func plural(count uint64, noun string) string {
+	if count == 1 {
+		return fmt.Sprintf("1 %s", noun)
+	}
+	return fmt.Sprintf("%d %ss", count, noun)
+}
+
+func (service *Service) SchedulerWave(ctx context.Context, scheduledFor time.Time) (SchedulerWaveDetail, error) {
+	rows, err := service.repository.SchedulerWave(ctx, scheduledFor)
+	if err != nil {
+		return SchedulerWaveDetail{}, err
+	}
+	detail := SchedulerWaveDetail{ScheduledFor: formatTime(scheduledFor)}
+	for _, row := range rows {
+		if len(detail.Occurrences) == 0 || detail.Occurrences[len(detail.Occurrences)-1].OccurrenceID != row.OccurrenceID {
+			job, _ := service.catalog.Find(row.JobKey)
+			detail.Occurrences = append(detail.Occurrences, SchedulerOccurrenceView{ScheduleID: row.ScheduleID, OccurrenceID: row.OccurrenceID,
+				ScheduleName: row.ScheduleName, JobName: job.Name, Status: presentOccurrenceStatus(row.OccurrenceStatus)})
+		}
+		if !row.RunID.Valid {
+			continue
+		}
+		jobKey := row.RunJobKey.String
+		if jobKey == "" {
+			jobKey = row.JobKey
+		}
+		job, _ := service.catalog.Find(jobKey)
+		occurrence := &detail.Occurrences[len(detail.Occurrences)-1]
+		occurrence.Attempts = append(occurrence.Attempts, SchedulerAttemptView{RunID: uint64(row.RunID.Int64), AttemptNo: uint32(row.AttemptNo.Int64),
+			JobName: job.Name, Status: PresentStatus(row.RunStatus.String), CreatedAt: formatTime(row.RunCreatedAt.Time)})
+	}
+	return detail, nil
 }
 
 func (service *Service) RunAllChildren(ctx context.Context, parentID uint64) (RunChildren, error) {
