@@ -144,7 +144,7 @@ func (coordinator *Coordinator) Run(ctx context.Context) {
 func (coordinator *Coordinator) cleanupFixedStaging(ctx context.Context) {
 	cleanup := func() {
 		started := time.Now()
-		cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 		total := ingestionstore.FixedCleanupResult{RowsByTable: map[string]int64{}}
 		for cleanupCtx.Err() == nil {
@@ -188,7 +188,7 @@ func (coordinator *Coordinator) cleanupFixedStaging(ctx context.Context) {
 
 func (coordinator *Coordinator) cleanupDetailStaging(ctx context.Context) {
 	cleanup := func() {
-		cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 		for cleanupCtx.Err() == nil {
 			deleted, err := coordinator.details.CleanupTerminal(cleanupCtx, 100)
