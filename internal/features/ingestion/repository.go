@@ -232,12 +232,19 @@ func (repository *Repository) Children(ctx context.Context, parentID uint64) ([]
 	return rows, err
 }
 
-func (repository *Repository) RunAllChildren(ctx context.Context, parentID uint64) ([]runRow, error) {
-	var id uint64
-	if err := repository.db.GetContext(ctx, &id, `SELECT id FROM ingestion_runs WHERE id=? AND kind='run_all_parent'`, parentID); err != nil {
-		return nil, err
+func (repository *Repository) RunAllChildren(ctx context.Context, parentID uint64) (runRow, []runRow, error) {
+	rows := []runRow{}
+	err := repository.db.SelectContext(ctx, &rows, `SELECT `+runColumns+` FROM ingestion_runs r
+		LEFT JOIN users u ON u.id=r.requested_by_user_id
+		WHERE (r.id=? AND r.kind='run_all_parent') OR (r.parent_run_id=? AND r.kind='run_all_child')
+		ORDER BY CASE WHEN r.id=? THEN 0 ELSE 1 END,r.child_position ASC`, parentID, parentID, parentID)
+	if err != nil {
+		return runRow{}, nil, err
 	}
-	return repository.Children(ctx, id)
+	if len(rows) == 0 || rows[0].ID != parentID || rows[0].Kind != string(ingestionrun.KindRunAllParent) {
+		return runRow{}, nil, sql.ErrNoRows
+	}
+	return rows[0], rows[1:], nil
 }
 
 func (repository *Repository) ActiveRunID(ctx context.Context, jobKey string) (uint64, bool, error) {

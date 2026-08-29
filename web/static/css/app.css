@@ -379,6 +379,9 @@
   .mx-auto {
     margin-inline: auto;
   }
+  .-mt-3 {
+    margin-top: calc(var(--spacing) * -3);
+  }
   .mt-0\.5 {
     margin-top: calc(var(--spacing) * 0.5);
   }
@@ -1396,6 +1399,11 @@
     }
     .sm\:justify-between {
       justify-content: space-between;
+    }
+    .sm\:truncate {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .sm\:p-6 {
       padding: calc(var(--spacing) * 6);

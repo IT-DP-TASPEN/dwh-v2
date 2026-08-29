@@ -183,15 +183,32 @@ func (service *Service) SchedulerWave(ctx context.Context, scheduledFor time.Tim
 	if err != nil {
 		return SchedulerWaveDetail{}, err
 	}
-	detail := SchedulerWaveDetail{ScheduledFor: formatTime(scheduledFor)}
+	detail := SchedulerWaveDetail{}
+	summary := schedulerWaveSummaryRow{ScheduledFor: scheduledFor.UTC()}
+	var activityAt time.Time
 	for _, row := range rows {
 		if len(detail.Occurrences) == 0 || detail.Occurrences[len(detail.Occurrences)-1].OccurrenceID != row.OccurrenceID {
 			job, _ := service.catalog.Find(row.JobKey)
 			detail.Occurrences = append(detail.Occurrences, SchedulerOccurrenceView{ScheduleID: row.ScheduleID, OccurrenceID: row.OccurrenceID,
 				ScheduleName: row.ScheduleName, JobName: job.Name, Status: presentOccurrenceStatus(row.OccurrenceStatus)})
+			summary.Total++
+			switch row.OccurrenceStatus {
+			case "resolved":
+				summary.Resolved++
+			case "unresolved":
+				summary.Unresolved++
+			case "discarded":
+				summary.Discarded++
+			case "rejected_invalid":
+				summary.Rejected++
+			}
 		}
 		if !row.RunID.Valid {
 			continue
+		}
+		summary.Attempts++
+		if row.RunCreatedAt.Valid && row.RunCreatedAt.Time.After(activityAt) {
+			activityAt = row.RunCreatedAt.Time
 		}
 		jobKey := row.RunJobKey.String
 		if jobKey == "" {
@@ -202,15 +219,22 @@ func (service *Service) SchedulerWave(ctx context.Context, scheduledFor time.Tim
 		occurrence.Attempts = append(occurrence.Attempts, SchedulerAttemptView{RunID: uint64(row.RunID.Int64), AttemptNo: uint32(row.AttemptNo.Int64),
 			JobName: job.Name, Status: PresentStatus(row.RunStatus.String), CreatedAt: formatTime(row.RunCreatedAt.Time)})
 	}
+	detail.Wave = *schedulerWaveView(scheduledFor, activityAt, summary)
 	return detail, nil
 }
 
 func (service *Service) RunAllChildren(ctx context.Context, parentID uint64) (RunChildren, error) {
-	rows, err := service.repository.RunAllChildren(ctx, parentID)
+	parentRow, rows, err := service.repository.RunAllChildren(ctx, parentID)
 	if err != nil {
 		return RunChildren{}, err
 	}
-	return RunChildren{ParentID: parentID, Rows: service.views(rows)}, nil
+	parent := service.view(parentRow)
+	summary := RunAllSummary{}
+	for _, row := range rows {
+		summary.add(row.Status, 1)
+	}
+	parent.RunAllSummary = &summary
+	return RunChildren{Parent: parent, Rows: service.views(rows)}, nil
 }
 
 func (service *Service) FindRun(ctx context.Context, id uint64) (RunDetail, error) {

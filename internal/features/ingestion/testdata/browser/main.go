@@ -106,20 +106,22 @@ func (fixture *fixture) runsPage(writer http.ResponseWriter, request *http.Reque
 }
 
 func fixtureRuns() []ingestionfeature.RunView {
-	parentID, olderParentID, retryParentID := uint64(251), uint64(240), uint64(230)
+	parentID, olderParentID, retryParentID, refreshParentID := uint64(251), uint64(240), uint64(230), uint64(220)
 	return []ingestionfeature.RunView{
 		{ID: 260, Kind: "job", KindLabel: "job", JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "direct", CreatedAt: "2026-08-28 10:05:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
 		{ID: 259, Kind: "job", KindLabel: "job", JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "scheduler", CreatedAt: "2026-08-28 10:04:00 UTC", Status: ingestionfeature.PresentStatus("failed")},
 		{ID: 258, Kind: "job", KindLabel: "job", JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "scheduler", CreatedAt: "2026-08-28 10:03:30 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
-		{ID: 253, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, ChildPosition: 2, JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "run_all", CreatedAt: "2026-08-28 10:03:00 UTC", Status: ingestionfeature.PresentStatus("failed")},
+		{ID: 253, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, ChildPosition: 2, JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "run_all", CreatedAt: "2026-08-28 10:03:00 UTC", Status: ingestionfeature.PresentStatus("running")},
 		{ID: 252, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, ChildPosition: 1, JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "run_all", CreatedAt: "2026-08-28 10:02:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
-		{ID: parentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 10:01:00 UTC", Status: ingestionfeature.PresentStatus("running"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}},
+		{ID: parentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 10:01:00 UTC", Status: ingestionfeature.PresentStatus("running"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 2, Complete: 1, Running: 1}},
 		{ID: 239, Kind: "job", KindLabel: "job", JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "scheduler", CreatedAt: "2026-08-28 09:04:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
 		{ID: 242, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &olderParentID, ChildPosition: 2, JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "run_all", CreatedAt: "2026-08-28 09:03:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
 		{ID: 241, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &olderParentID, ChildPosition: 1, JobKey: "journal_transaction_report", JobName: "Journal Transaction Report", Trigger: "run_all", CreatedAt: "2026-08-28 09:02:00 UTC", Status: ingestionfeature.PresentStatus("failed")},
-		{ID: olderParentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 09:01:00 UTC", Status: ingestionfeature.PresentStatus("completed"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 2, Complete: 2, Failed: 1}},
-		{ID: 231, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &retryParentID, ChildPosition: 1, JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "run_all", CreatedAt: "2026-08-28 08:02:00 UTC", Status: ingestionfeature.PresentStatus("succeeded")},
-		{ID: retryParentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 08:01:00 UTC", Status: ingestionfeature.PresentStatus("completed"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 1, Complete: 1}},
+		{ID: olderParentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 09:01:00 UTC", Status: ingestionfeature.PresentStatus("completed"), Terminal: true, RunAllSummary: &ingestionfeature.RunAllSummary{Total: 2, Complete: 2, Failed: 1}},
+		{ID: 231, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &retryParentID, ChildPosition: 1, JobKey: "cif_opening_report", JobName: "CIF Opening Report", Trigger: "run_all", CreatedAt: "2026-08-28 08:02:00 UTC", Status: ingestionfeature.PresentStatus("queued")},
+		{ID: retryParentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 08:01:00 UTC", Status: ingestionfeature.PresentStatus("queued"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 1}},
+		{ID: 221, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &refreshParentID, ChildPosition: 1, JobKey: "loan_detail", JobName: "Loan Detail", Trigger: "run_all", CreatedAt: "2026-08-28 07:02:00 UTC", Status: ingestionfeature.PresentStatus("running")},
+		{ID: refreshParentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", CreatedAt: "2026-08-28 07:01:00 UTC", Status: ingestionfeature.PresentStatus("running"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 1, Running: 1}},
 	}
 }
 
@@ -128,7 +130,7 @@ func fixtureSchedulerWave(runID uint64) (*ingestionfeature.SchedulerWaveView, bo
 	case 259:
 		return &ingestionfeature.SchedulerWaveView{ScheduledFor: time.Date(2026, 8, 27, 18, 0, 0, 0, time.UTC), ScheduledForLabel: "27 Aug 2026 18:00:00 UTC",
 			ScheduledForKey: "2026-08-27T18:00:00Z", URL: "/runs/scheduler-wave?scheduled_for=2026-08-27T18%3A00%3A00Z", DOMID: "1787853600000000",
-			ActivityAt: "2026-08-28 10:04:00 UTC", Summary: "2 occurrences · 1 resolved · 1 unresolved · 2 attempts", Total: 2, Resolved: 1, Unresolved: 1, Attempts: 2}, true
+			ActivityAt: "2026-08-28 10:04:00 UTC", Summary: "1 occurrence · 1 unresolved · 1 attempt", Total: 1, Unresolved: 1, Attempts: 1}, true
 	case 258:
 		wave, _ := fixtureSchedulerWave(259)
 		return wave, false
@@ -167,15 +169,26 @@ func (fixture *fixture) schedulerWave(writer http.ResponseWriter, request *http.
 	var detail ingestionfeature.SchedulerWaveDetail
 	switch key {
 	case "2026-08-27T18:00:00Z":
-		detail = ingestionfeature.SchedulerWaveDetail{ScheduledFor: "27 Aug 2026 18:00:00 UTC", Occurrences: []ingestionfeature.SchedulerOccurrenceView{
-			{ScheduleID: 10, OccurrenceID: 700, ScheduleName: "Schedule A", JobName: "Journal Transaction Report", Status: ingestionfeature.PresentStatus("resolved"), Attempts: []ingestionfeature.SchedulerAttemptView{
-				{RunID: 259, AttemptNo: 1, JobName: "Journal Transaction Report", Status: ingestionfeature.PresentStatus("failed"), CreatedAt: "2026-08-28 10:04:00 UTC"},
-				{RunID: 258, AttemptNo: 2, JobName: "Journal Transaction Report", Status: ingestionfeature.PresentStatus("succeeded"), CreatedAt: "2026-08-28 10:03:30 UTC"},
-			}},
-			{ScheduleID: 11, OccurrenceID: 701, ScheduleName: "Schedule B", JobName: "Loan Detail", Status: ingestionfeature.PresentStatus("unresolved")},
-		}}
+		wave, _ := fixtureSchedulerWave(259)
+		attempts := []ingestionfeature.SchedulerAttemptView{{RunID: 259, AttemptNo: 1, JobName: "Journal Transaction Report", Status: ingestionfeature.PresentStatus("failed"), CreatedAt: "2026-08-28 10:04:00 UTC"}}
+		occurrenceStatus := "unresolved"
+		if loads >= 2 {
+			attemptStatus := "running"
+			if loads >= 3 {
+				attemptStatus, occurrenceStatus = "succeeded", "resolved"
+			}
+			attempts = append(attempts, ingestionfeature.SchedulerAttemptView{RunID: 258, AttemptNo: 2, JobName: "Journal Transaction Report", Status: ingestionfeature.PresentStatus(attemptStatus), CreatedAt: "2026-08-28 10:10:00 UTC"})
+			wave.Attempts, wave.Summary, wave.ActivityAt = 2, "1 occurrence · 1 unresolved · 2 attempts", "2026-08-28 10:10:00 UTC"
+		}
+		if loads >= 3 {
+			wave.Resolved, wave.Unresolved, wave.Summary = 1, 0, "1 occurrence · 1 resolved · 2 attempts"
+		}
+		detail = ingestionfeature.SchedulerWaveDetail{Wave: *wave, Occurrences: []ingestionfeature.SchedulerOccurrenceView{{
+			ScheduleID: 10, OccurrenceID: 700, ScheduleName: "Schedule A", JobName: "Journal Transaction Report", Status: ingestionfeature.PresentStatus(occurrenceStatus), Attempts: attempts,
+		}}}
 	case "2026-08-27T06:00:00Z":
-		detail = ingestionfeature.SchedulerWaveDetail{ScheduledFor: "27 Aug 2026 06:00:00 UTC", Occurrences: []ingestionfeature.SchedulerOccurrenceView{{
+		wave, _ := fixtureSchedulerWave(239)
+		detail = ingestionfeature.SchedulerWaveDetail{Wave: *wave, Occurrences: []ingestionfeature.SchedulerOccurrenceView{{
 			ScheduleID: 12, OccurrenceID: 702, ScheduleName: "Schedule C", JobName: "CIF Opening Report", Status: ingestionfeature.PresentStatus("resolved"), Attempts: []ingestionfeature.SchedulerAttemptView{{
 				RunID: 239, AttemptNo: 1, JobName: "CIF Opening Report", Status: ingestionfeature.PresentStatus("succeeded"), CreatedAt: "2026-08-28 09:04:00 UTC",
 			}},
@@ -471,7 +484,7 @@ func (fixture *fixture) status(writer http.ResponseWriter, request *http.Request
 
 func (fixture *fixture) runAllChildren(writer http.ResponseWriter, request *http.Request, rawID string) {
 	parentID, err := strconv.ParseUint(rawID, 10, 64)
-	if err != nil || parentID != 251 && parentID != 240 && parentID != 230 {
+	if err != nil || parentID != 251 && parentID != 240 && parentID != 230 && parentID != 220 {
 		http.NotFound(writer, request)
 		return
 	}
@@ -483,18 +496,57 @@ func (fixture *fixture) runAllChildren(writer http.ResponseWriter, request *http
 		http.Error(writer, "fixture child load failure", http.StatusInternalServerError)
 		return
 	}
-	children := ingestionfeature.RunChildren{ParentID: parentID}
-	for _, row := range fixtureRuns() {
-		if row.ParentRunID != nil && *row.ParentRunID == parentID {
-			children.Rows = append(children.Rows, row)
-		}
+	if parentID == 220 && loads == 2 {
+		http.Error(writer, "fixture child refresh failure", http.StatusInternalServerError)
+		return
 	}
-	sort.Slice(children.Rows, func(left, right int) bool {
-		return children.Rows[left].ChildPosition < children.Rows[right].ChildPosition
-	})
+	children := fixtureRunAllDetail(parentID, loads)
 	pageData := adminshell.PageData{Title: "Run All children", AppName: "Browser fixture", Data: children}
 	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/ingestion/runs", "run-all-children", pageData); err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func fixtureRunAllDetail(parentID uint64, loads int) ingestionfeature.RunChildren {
+	parent := ingestionfeature.RunView{ID: parentID, Kind: "run_all_parent", KindLabel: "run all parent", Trigger: "direct", Status: ingestionfeature.PresentStatus("running")}
+	child := func(id uint64, position uint16, job, status string) ingestionfeature.RunView {
+		return ingestionfeature.RunView{ID: id, Kind: "run_all_child", ChildPosition: position, JobName: job, Trigger: "run_all", Status: ingestionfeature.PresentStatus(status)}
+	}
+	switch parentID {
+	case 251:
+		secondStatus := "running"
+		summary := ingestionfeature.RunAllSummary{Total: 2, Complete: 1, Running: 1}
+		if loads >= 2 {
+			secondStatus, summary = "succeeded", ingestionfeature.RunAllSummary{Total: 2, Complete: 2}
+		}
+		if loads >= 3 {
+			parent.Status, parent.Terminal = ingestionfeature.PresentStatus("completed"), true
+		}
+		parent.RunAllSummary = &summary
+		return ingestionfeature.RunChildren{Parent: parent, Rows: []ingestionfeature.RunView{child(252, 1, "CIF Opening Report", "succeeded"), child(253, 2, "Journal Transaction Report", secondStatus)}}
+	case 240:
+		summary := ingestionfeature.RunAllSummary{Total: 2, Complete: 2, Failed: 1}
+		parent.Status, parent.Terminal, parent.RunAllSummary = ingestionfeature.PresentStatus("completed"), true, &summary
+		return ingestionfeature.RunChildren{Parent: parent, Rows: []ingestionfeature.RunView{child(241, 1, "Journal Transaction Report", "failed"), child(242, 2, "CIF Opening Report", "succeeded")}}
+	case 230:
+		status := "queued"
+		summary := ingestionfeature.RunAllSummary{Total: 1}
+		if loads >= 3 {
+			status, summary.Running = "running", 1
+			parent.Status = ingestionfeature.PresentStatus("running")
+		} else {
+			parent.Status = ingestionfeature.PresentStatus("queued")
+		}
+		parent.RunAllSummary = &summary
+		return ingestionfeature.RunChildren{Parent: parent, Rows: []ingestionfeature.RunView{child(231, 1, "CIF Opening Report", status)}}
+	default:
+		status := "running"
+		summary := ingestionfeature.RunAllSummary{Total: 1, Running: 1}
+		if loads >= 3 {
+			status, summary = "succeeded", ingestionfeature.RunAllSummary{Total: 1, Complete: 1}
+		}
+		parent.RunAllSummary = &summary
+		return ingestionfeature.RunChildren{Parent: parent, Rows: []ingestionfeature.RunView{child(221, 1, "Loan Detail", status)}}
 	}
 }
 

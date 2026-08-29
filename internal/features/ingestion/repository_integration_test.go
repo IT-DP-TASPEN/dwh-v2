@@ -219,7 +219,8 @@ func TestRunsListChildVisibilityAndParentSummaries(t *testing.T) {
 	}
 
 	children, err := service.RunAllChildren(ctx, parentID)
-	if err != nil || len(children.Rows) != 36 {
+	if err != nil || len(children.Rows) != 36 || children.Parent.ID != parentID || children.Parent.Terminal || children.Parent.RunAllSummary == nil ||
+		*children.Parent.RunAllSummary != (RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}) {
 		t.Fatalf("fragment children=%d error=%v", len(children.Rows), err)
 	}
 	for index, child := range children.Rows {
@@ -228,7 +229,7 @@ func TestRunsListChildVisibilityAndParentSummaries(t *testing.T) {
 		}
 	}
 	emptyChildren, err := service.RunAllChildren(ctx, uint64(emptyParentID))
-	if err != nil || len(emptyChildren.Rows) != 0 {
+	if err != nil || len(emptyChildren.Rows) != 0 || emptyChildren.Parent.ID != uint64(emptyParentID) || emptyChildren.Parent.RunAllSummary == nil || *emptyChildren.Parent.RunAllSummary != (RunAllSummary{}) {
 		t.Fatalf("empty fragment=%+v error=%v", emptyChildren, err)
 	}
 	for _, invalidID := range []uint64{manualID, ^uint64(0)} {
@@ -404,7 +405,8 @@ func TestSchedulerWaveGroupingFiltersRetriesAndPagination(t *testing.T) {
 	}
 
 	detail, err := service.SchedulerWave(ctx, waveTime)
-	if err != nil || len(detail.Occurrences) != 3 || len(detail.Occurrences[0].Attempts) != 3 || len(detail.Occurrences[1].Attempts) != 1 || len(detail.Occurrences[2].Attempts) != 0 {
+	if err != nil || len(detail.Occurrences) != 3 || len(detail.Occurrences[0].Attempts) != 3 || len(detail.Occurrences[1].Attempts) != 1 || len(detail.Occurrences[2].Attempts) != 0 ||
+		detail.Wave.Total != 3 || detail.Wave.Resolved != 2 || detail.Wave.Unresolved != 1 || detail.Wave.Attempts != 4 || detail.Wave.ActivityAt != formatTime(a3Time) {
 		t.Fatalf("wave detail=%+v error=%v", detail, err)
 	}
 	if detail.Occurrences[0].Attempts[0].RunID != a1 || detail.Occurrences[0].Attempts[1].RunID != a2 || detail.Occurrences[0].Attempts[2].RunID != a3 {

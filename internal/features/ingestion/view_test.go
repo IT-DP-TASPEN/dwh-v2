@@ -28,6 +28,23 @@ func TestMaintenanceParameterFieldsContainOnlyRequestedDates(t *testing.T) {
 	}
 }
 
+func TestRunViewUsesCanonicalTerminalLifecycle(t *testing.T) {
+	catalog, err := core.NewCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := Service{catalog: catalog}
+	for _, status := range []ingestionrun.Status{
+		ingestionrun.StatusPlanned, ingestionrun.StatusQueued, ingestionrun.StatusRunning, ingestionrun.StatusSucceeded,
+		ingestionrun.StatusFailed, ingestionrun.StatusSkipped, ingestionrun.StatusCancelled, ingestionrun.StatusAbandoned,
+		ingestionrun.StatusCompleted, ingestionrun.StatusCompletedWithSkips,
+	} {
+		if got, want := service.view(runRow{Status: string(status)}).Terminal, ingestionrun.IsTerminal(status); got != want {
+			t.Errorf("status %q terminal=%t want %t", status, got, want)
+		}
+	}
+}
+
 func TestRunAllChildStatusesUseRunsListBadges(t *testing.T) {
 	renderer, err := render.New(webfiles.Files, false)
 	if err != nil {
@@ -77,9 +94,9 @@ func TestRunsListHierarchyFiltersAndParentSummaries(t *testing.T) {
 	page := RunPage{
 		Kinds: []RunKindOption{{"job", "Job"}, {"run_all_parent", "Run All parent"}, {"run_all_child", "Run All child"}},
 		Rows: listItems(
-			RunView{ID: 249, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("completed"), RunAllSummary: &RunAllSummary{}},
+			RunView{ID: 249, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("completed"), Terminal: true, RunAllSummary: &RunAllSummary{}},
 			RunView{ID: parentID, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("running"), RunAllSummary: &RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}},
-			RunView{ID: 252, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("completed"), RunAllSummary: &RunAllSummary{Total: 36, Complete: 36}},
+			RunView{ID: 252, Kind: "run_all_parent", KindLabel: "run all parent", Status: PresentStatus("completed"), Terminal: true, RunAllSummary: &RunAllSummary{Total: 36, Complete: 36}},
 			RunView{ID: 253, Kind: "run_all_child", KindLabel: "run all child", ParentRunID: &parentID, JobName: "Journal Transaction Report", Status: PresentStatus("failed")},
 		),
 	}
@@ -97,6 +114,9 @@ func TestRunsListHierarchyFiltersAndParentSummaries(t *testing.T) {
 		`@htmx:before-request=`,
 		`@htmx:after-swap=`,
 		`@htmx:after-request=`,
+		`data-runs-accordion`,
+		`:data-open="open.toString()"`,
+		`every 5s [this.dataset.loaded === 'true' && this.closest('[data-runs-accordion]').dataset.open === 'true']`,
 		`No children`,
 		`32 / 36 complete`,
 		`2 failed`,
@@ -118,7 +138,7 @@ func TestRunsListHierarchyFiltersAndParentSummaries(t *testing.T) {
 	}
 
 	response = httptest.NewRecorder()
-	children := RunChildren{ParentID: parentID, Rows: []RunView{
+	children := RunChildren{Parent: RunView{ID: parentID, Status: PresentStatus("running"), RunAllSummary: &RunAllSummary{Total: 2, Complete: 2}}, Rows: []RunView{
 		{ID: 252, ChildPosition: 1, JobName: "CIF Opening Report", Status: PresentStatus("succeeded"), ProgressSucceeded: 3, ProgressTotal: 3},
 		{ID: 253, ChildPosition: 2, JobName: "Journal Transaction Report", Status: PresentStatus("failed")},
 	}}
@@ -126,10 +146,19 @@ func TestRunsListHierarchyFiltersAndParentSummaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	fragment := response.Body.String()
-	for _, expected := range []string{`aria-label="Run All #251 children"`, `data-child-position="1"`, `href="/runs/252">#252</a>`, `CIF Opening Report`, `aria-label="Status: Failed"`} {
+	for _, expected := range []string{`aria-label="Run All #251 children"`, `data-loaded="true"`, `every 5s`, `data-child-position="1"`, `href="/runs/252">#252</a>`, `CIF Opening Report`, `aria-label="Status: Failed"`, `id="run-all-summary-251" hx-swap-oob="outerHTML"`, `2 / 2 complete`, `id="run-all-status-251" hx-swap-oob="outerHTML"`} {
 		if !strings.Contains(fragment, expected) {
 			t.Errorf("child fragment missing %q: %s", expected, fragment)
 		}
+	}
+	children.Parent.Terminal = true
+	children.Parent.Status = PresentStatus("completed")
+	response = httptest.NewRecorder()
+	if err := renderer.RenderPartial(response, http.StatusOK, "features/ingestion/runs", "run-all-children", render.PageData{Data: children}); err != nil {
+		t.Fatal(err)
+	}
+	if terminal := response.Body.String(); strings.Contains(terminal, "every 5s") || !strings.Contains(terminal, `aria-label="Status: Completed"`) {
+		t.Fatalf("terminal Run All fragment polling/status=%s", terminal)
 	}
 }
 
@@ -145,7 +174,7 @@ func TestSchedulerWaveRendersLazySummaryAndFullAttempts(t *testing.T) {
 	page := RunPage{Rows: []RunListItem{
 		{RunView: RunView{ID: 300, Kind: "job", JobName: "Standalone", Status: PresentStatus("succeeded")}},
 		{SchedulerWave: wave},
-		{RunView: RunView{ID: 299, Kind: "run_all_parent", Status: PresentStatus("completed"), RunAllSummary: &RunAllSummary{}}},
+		{RunView: RunView{ID: 299, Kind: "run_all_parent", Status: PresentStatus("completed"), Terminal: true, RunAllSummary: &RunAllSummary{}}},
 	}, Pagination: pagination.New(1, RunPageSize, 3)}
 	response := httptest.NewRecorder()
 	if err := renderer.RenderPartial(response, http.StatusOK, "features/ingestion/runs", "runs-table", render.PageData{Data: page}); err != nil {
@@ -154,7 +183,7 @@ func TestSchedulerWaveRendersLazySummaryAndFullAttempts(t *testing.T) {
 	body := response.Body.String()
 	for _, expected := range []string{
 		"Activity", "Scheduled · 27 Aug 2026 18:00:00 UTC", "2 occurrences · 1 resolved · 1 unresolved · 3 attempts",
-		`aria-label="Expand Scheduled 27 Aug 2026 18:00:00 UTC attempts"`, `hx-trigger="load-scheduler-wave"`,
+		`aria-label="Expand Scheduled 27 Aug 2026 18:00:00 UTC attempts"`, `hx-trigger="load-scheduler-wave, every 5s`,
 		`scheduled_for=2026-08-27T18%3A00%3A00.123Z`, "Could not load scheduler attempts", "3 activities",
 	} {
 		if !strings.Contains(body, expected) {
@@ -168,7 +197,7 @@ func TestSchedulerWaveRendersLazySummaryAndFullAttempts(t *testing.T) {
 		t.Fatalf("mixed entity order changed: standalone=%d scheduled=%d runAll=%d", standalone, scheduled, runAll)
 	}
 
-	detail := SchedulerWaveDetail{ScheduledFor: "27 Aug 2026 18:00:00 UTC", Occurrences: []SchedulerOccurrenceView{
+	detail := SchedulerWaveDetail{Wave: *wave, Occurrences: []SchedulerOccurrenceView{
 		{ScheduleID: 10, OccurrenceID: 20, ScheduleName: "Schedule A", JobName: "CIF Detail", Status: presentOccurrenceStatus("resolved"), Attempts: []SchedulerAttemptView{
 			{RunID: 238, AttemptNo: 1, JobName: "CIF Detail", Status: PresentStatus("failed"), CreatedAt: "27 Aug 2026 18:00:03 UTC"},
 			{RunID: 269, AttemptNo: 2, JobName: "CIF Detail", Status: PresentStatus("succeeded"), CreatedAt: "28 Aug 2026 10:00:00 UTC"},
@@ -180,10 +209,21 @@ func TestSchedulerWaveRendersLazySummaryAndFullAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	fragment := response.Body.String()
-	for _, expected := range []string{`href="/schedules/10"`, `data-scheduler-occurrence="20"`, `data-scheduler-attempt="1"`, `href="/runs/238"`, `href="/runs/269"`, "No attempts submitted"} {
+	for _, expected := range []string{`data-loaded="true"`, `every 5s`, `href="/schedules/10"`, `data-scheduler-occurrence="20"`, `data-scheduler-attempt="1"`, `href="/runs/238"`, `href="/runs/269"`, "No attempts submitted", `id="scheduler-wave-summary-1787853600123000" hx-swap-oob="outerHTML"`} {
 		if !strings.Contains(fragment, expected) {
 			t.Errorf("scheduler wave fragment missing %q: %s", expected, fragment)
 		}
+	}
+	if strings.Contains(fragment, `hx-swap-oob="outerHTML">28 Aug 2026 10:00:00 UTC`) || strings.Contains(fragment, `scheduler-wave-activity`) {
+		t.Fatalf("scheduler fragment updated frozen Activity: %s", fragment)
+	}
+	detail.Wave.Unresolved, detail.Wave.Resolved, detail.Wave.Summary = 0, 2, "2 occurrences · 2 resolved · 3 attempts"
+	response = httptest.NewRecorder()
+	if err := renderer.RenderPartial(response, http.StatusOK, "features/ingestion/runs", "scheduler-wave-attempts", render.PageData{Data: detail}); err != nil {
+		t.Fatal(err)
+	}
+	if terminal := response.Body.String(); strings.Contains(terminal, "every 5s") || !strings.Contains(terminal, "2 occurrences · 2 resolved · 3 attempts") {
+		t.Fatalf("resolved Scheduler fragment polling/summary=%s", terminal)
 	}
 }
 

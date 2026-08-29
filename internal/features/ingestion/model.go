@@ -160,13 +160,13 @@ type RunPage struct {
 }
 
 type RunChildren struct {
-	ParentID uint64
-	Rows     []RunView
+	Parent RunView
+	Rows   []RunView
 }
 
 type SchedulerWaveDetail struct {
-	ScheduledFor string
-	Occurrences  []SchedulerOccurrenceView
+	Wave        SchedulerWaveView
+	Occurrences []SchedulerOccurrenceView
 }
 
 type SchedulerOccurrenceView struct {

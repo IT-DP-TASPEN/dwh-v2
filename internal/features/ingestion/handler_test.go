@@ -40,7 +40,8 @@ func (service *childRouteService) RunAllChildren(_ context.Context, id uint64) (
 	if service.err != nil {
 		return RunChildren{}, service.err
 	}
-	return RunChildren{ParentID: id, Rows: []RunView{{ID: 252, ChildPosition: 1, JobName: "CIF Opening Report", Status: PresentStatus("succeeded")}}}, nil
+	return RunChildren{Parent: RunView{ID: id, Status: PresentStatus("completed"), Terminal: true, RunAllSummary: &RunAllSummary{Total: 1, Complete: 1}},
+		Rows: []RunView{{ID: 252, ChildPosition: 1, JobName: "CIF Opening Report", Status: PresentStatus("succeeded")}}}, nil
 }
 
 func (service *childRouteService) SchedulerWave(_ context.Context, scheduledFor time.Time) (SchedulerWaveDetail, error) {
@@ -49,7 +50,8 @@ func (service *childRouteService) SchedulerWave(_ context.Context, scheduledFor 
 	if service.err != nil {
 		return SchedulerWaveDetail{}, service.err
 	}
-	return SchedulerWaveDetail{ScheduledFor: formatTime(scheduledFor), Occurrences: []SchedulerOccurrenceView{{
+	wave := schedulerWaveView(scheduledFor, scheduledFor, schedulerWaveSummaryRow{ScheduledFor: scheduledFor, Total: 1, Resolved: 1, Attempts: 1})
+	return SchedulerWaveDetail{Wave: *wave, Occurrences: []SchedulerOccurrenceView{{
 		ScheduleID: 1, OccurrenceID: 2, ScheduleName: "Daily CIF", JobName: "CIF Opening Report", Status: presentOccurrenceStatus("resolved"),
 		Attempts: []SchedulerAttemptView{{RunID: 3, AttemptNo: 1, JobName: "CIF Opening Report", Status: PresentStatus("succeeded"), CreatedAt: formatTime(scheduledFor)}},
 	}}}, nil
@@ -93,7 +95,8 @@ func TestRunAllChildrenRouteRequiresViewPermission(t *testing.T) {
 			if response.Code != test.wantStatus || service.calls != test.wantCalls {
 				t.Fatalf("status=%d calls=%d body=%q", response.Code, service.calls, response.Body.String())
 			}
-			if test.wantStatus == http.StatusOK && (service.id != 251 || !strings.Contains(response.Body.String(), `href="/runs/252">#252</a>`)) {
+			if test.wantStatus == http.StatusOK && (service.id != 251 || !strings.Contains(response.Body.String(), `href="/runs/252">#252</a>`) ||
+				!strings.Contains(response.Body.String(), `id="run-all-summary-251" hx-swap-oob="outerHTML"`) || strings.Contains(response.Body.String(), "every 5s")) {
 				t.Fatalf("id=%d body=%q", service.id, response.Body.String())
 			}
 		})
@@ -130,7 +133,8 @@ func TestSchedulerWaveRouteAuthorizationAndExactTimestamp(t *testing.T) {
 			}
 			if test.wantStatus == http.StatusOK {
 				want := time.Date(2026, 8, 27, 18, 0, 0, 123456000, time.UTC)
-				if !service.waveTime.Equal(want) || !strings.Contains(response.Body.String(), `href="/runs/3"`) {
+				if !service.waveTime.Equal(want) || !strings.Contains(response.Body.String(), `href="/runs/3"`) ||
+					!strings.Contains(response.Body.String(), `hx-swap-oob="outerHTML"`) || strings.Contains(response.Body.String(), "every 5s") {
 					t.Fatalf("scheduled_for=%s body=%q", service.waveTime, response.Body.String())
 				}
 			}
