@@ -1,0 +1,3 @@
+{{define "run-status-badge"}}<span aria-label="Status: {{.Label}}" class="rounded-full px-2 py-1 text-xs {{.Class}}">{{.Label}}</span>{{end}}
+
+{{define "run-all-summary"}}{{with .RunAllSummary}}{{if .Total}}{{.Complete}} / {{.Total}} complete{{if .Failed}} · <span class="text-red-700 dark:text-red-300">{{.Failed}} failed</span>{{end}}{{if .Running}} · {{.Running}} running{{end}}{{else}}No children{{end}}{{end}}{{end}}

@@ -16,7 +16,6 @@ import (
 	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/auth"
 	"github.com/ibldzn/go-admin/internal/features/auditlogs"
-	"github.com/ibldzn/go-admin/internal/features/dashboard"
 	featureRoles "github.com/ibldzn/go-admin/internal/features/roles"
 	"github.com/ibldzn/go-admin/internal/securityctx"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
@@ -24,8 +23,7 @@ import (
 )
 
 func integrationDefinitions() []access.PermissionDefinition {
-	definitions := dashboard.PermissionDefinitions()
-	definitions = append(definitions, PermissionDefinitions()...)
+	definitions := PermissionDefinitions()
 	definitions = append(definitions, featureRoles.PermissionDefinitions()...)
 	definitions = append(definitions, auditlogs.PermissionDefinitions()...)
 	return definitions

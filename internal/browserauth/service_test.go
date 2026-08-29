@@ -296,7 +296,7 @@ func TestResolveSessionPermissions(t *testing.T) {
 	})
 
 	t.Run("non-admin loads permission set once", func(t *testing.T) {
-		roles := &fakeRoles{byID: access.Role{ID: 2, Name: "User", Slug: access.UserRoleSlug}, permissionKeys: []string{"dashboard.view"}}
+		roles := &fakeRoles{byID: access.Role{ID: 2, Name: "User", Slug: access.UserRoleSlug}, permissionKeys: []string{"sample.view"}}
 		service := newTestService(t,
 			&fakeUsers{byID: user.User{ID: 2, RoleID: 2, IsActive: true}},
 			roles,
@@ -304,7 +304,7 @@ func TestResolveSessionPermissions(t *testing.T) {
 		)
 
 		principal, err := service.ResolveSession(context.Background(), auth.HashToken("token"), now)
-		if err != nil || !principal.Can("dashboard.view") || principal.Can("users.view") || roles.permissionCalls != 1 {
+		if err != nil || !principal.Can("sample.view") || principal.Can("users.view") || roles.permissionCalls != 1 {
 			t.Fatalf("unexpected permission resolution: principal=%+v calls=%d err=%v", principal, roles.permissionCalls, err)
 		}
 	})
@@ -318,7 +318,7 @@ func TestResolveSessionPermissions(t *testing.T) {
 		)
 
 		principal, err := service.ResolveSession(context.Background(), auth.HashToken("token"), now)
-		if err != nil || principal.Can("dashboard.view") || roles.permissionCalls != 1 {
+		if err != nil || principal.Can("sample.view") || roles.permissionCalls != 1 {
 			t.Fatalf("unexpected empty permission resolution: principal=%+v calls=%d err=%v", principal, roles.permissionCalls, err)
 		}
 	})
@@ -353,7 +353,7 @@ func TestResolveImpersonatedSessionUsesTargetIdentityAndPermissions(t *testing.T
 			1: {ID: 1, Name: "Administrator", Slug: access.AdminRoleSlug},
 			3: {ID: 3, Name: "Branch", Slug: "branch-user"},
 		},
-		permissionKeys: []string{"dashboard.view", "users.view"},
+		permissionKeys: []string{"sample.view", "users.view"},
 	}
 	service := newTestService(t, users, roles, sessions)
 
@@ -367,7 +367,7 @@ func TestResolveImpersonatedSessionUsesTargetIdentityAndPermissions(t *testing.T
 	if principal.Actor.UserID != 1 || principal.Actor.Username != "admin" || principal.Actor.RoleSlug != access.AdminRoleSlug {
 		t.Fatalf("unexpected actor identity: %+v", principal.Actor)
 	}
-	if !principal.Can("dashboard.view") || !principal.Can("users.view") || principal.Can("roles.view") || roles.permissionCalls != 1 {
+	if !principal.Can("sample.view") || !principal.Can("users.view") || principal.Can("roles.view") || roles.permissionCalls != 1 {
 		t.Fatalf("administrator permissions leaked: principal=%+v calls=%d", principal, roles.permissionCalls)
 	}
 }

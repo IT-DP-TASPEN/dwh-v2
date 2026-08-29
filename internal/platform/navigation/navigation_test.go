@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	permissionDashboard = "dashboard.view"
+	permissionDashboard = "sample.view"
 	permissionUsers     = "users.view"
 	permissionRoles     = "roles.view"
 )

@@ -70,8 +70,12 @@ func TestRunReadModelsPaginationAndPlans(t *testing.T) {
 		t.Fatalf("second page rows=%d error=%v", len(second.Rows), err)
 	}
 	overview, err := service.OverviewRuns(context.Background())
-	if err != nil || len(overview.RecentProblems) == 0 || len(overview.RecentSuccesses) == 0 {
+	if err != nil || overview.Queued != 0 || overview.Running != 0 {
 		t.Fatalf("overview=%+v error=%v", overview, err)
+	}
+	attention, err := service.NeedsAttention(context.Background(), true, false, 5)
+	if err != nil || len(attention) == 0 || attention[0].Status.Key != "failed" {
+		t.Fatalf("attention=%+v error=%v", attention, err)
 	}
 	sources, err := service.OverviewSources(context.Background())
 	if err != nil || sources.Enabled+sources.Disabled != 36 {
@@ -383,6 +387,112 @@ func TestSchedulerWaveGroupingFiltersRetriesAndPagination(t *testing.T) {
 	wave := items[0].SchedulerWave
 	if wave.Total != 3 || wave.Resolved != 2 || wave.Unresolved != 1 || wave.Attempts != 4 || wave.ActivityAt != formatTime(a3Time) {
 		t.Fatalf("wave summary=%+v", wave)
+	}
+
+	beforeActive, err := service.OperationalActivity(ctx, 100, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeWaveTime := waveTime.Add(3 * time.Microsecond)
+	activeScheduleA := insertSchedule(prefix+"-active-A", "loan_detail")
+	activeScheduleB := insertSchedule(prefix+"-active-B", "saving_detail")
+	activeOccurrenceA := insertOccurrence(activeScheduleA, activeWaveTime, "loan_detail", "unresolved")
+	activeOccurrenceB := insertOccurrence(activeScheduleB, activeWaveTime, "saving_detail", "resolved")
+	activeAttemptA := insertRun("loan_detail", "running", "scheduler", activityBase.Add(5*time.Hour))
+	activeAttemptB := insertRun("saving_detail", "queued", "scheduler", activityBase.Add(5*time.Hour+time.Second))
+	linkAttempt(activeOccurrenceA, 1, activeAttemptA, activityBase.Add(5*time.Hour))
+	linkAttempt(activeOccurrenceB, 1, activeAttemptB, activityBase.Add(5*time.Hour+time.Second))
+	directActive := insertRun("time_deposit_detail", "queued", "direct", activityBase.Add(6*time.Hour))
+	activeParentResult, err := db.Exec(`INSERT INTO ingestion_runs
+		(kind,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,trigger_reference,created_at)
+		VALUES ('run_all_parent','running',?,?,?,?,?,?,?)`, parentParameters.Kind, parentParameters.Version, parentParameters.JSON,
+		parentParameters.Checksum[:], "direct", prefix+"-active-parent", activityBase.Add(7*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeParentID, _ := activeParentResult.LastInsertId()
+	runIDs = append(runIDs, uint64(activeParentID))
+	activeChildResult, err := db.Exec(`INSERT INTO ingestion_runs
+		(kind,parent_run_id,child_position,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,trigger_reference,created_at)
+		VALUES ('run_all_child',?,1,'cif_opening_report','planned',?,?,?,?,?,?,?)`, activeParentID, parameters.Kind, parameters.Version,
+		parameters.JSON, parameters.Checksum[:], "run_all", fmt.Sprint(activeParentID), activityBase.Add(7*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeChildID, _ := activeChildResult.LastInsertId()
+	runIDs = append(runIDs, uint64(activeChildID))
+	afterActive, err := service.OperationalActivity(ctx, 100, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterActive.ActiveCount != beforeActive.ActiveCount+3 {
+		t.Fatalf("active count before=%d after=%d", beforeActive.ActiveCount, afterActive.ActiveCount)
+	}
+	activeRunFound := map[uint64]bool{}
+	activeWaveCount := 0
+	for _, item := range afterActive.Active {
+		if item.SchedulerWave != nil {
+			if item.SchedulerWave.ScheduledFor.Equal(activeWaveTime) {
+				activeWaveCount++
+			}
+			if item.SchedulerWave.ScheduledFor.Equal(zeroWaveTime) {
+				t.Fatal("unresolved occurrence without an active attempt counted as active ingestion")
+			}
+			continue
+		}
+		activeRunFound[item.ID] = true
+	}
+	if activeWaveCount != 1 || !activeRunFound[directActive] || !activeRunFound[uint64(activeParentID)] || activeRunFound[uint64(activeChildID)] || activeRunFound[activeAttemptA] || activeRunFound[activeAttemptB] || activeRunFound[standalone] || activeRunFound[uint64(parentID)] || activeRunFound[legacyScheduler] {
+		t.Fatalf("active hierarchy wave=%d runs=%v", activeWaveCount, activeRunFound)
+	}
+
+	beforeSummary, err := repository.DashboardSummary(ctx, activityBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaryOnlySchedule := insertSchedule(prefix+"-summary-only", "time_deposit_detail")
+	_ = insertOccurrence(summaryOnlySchedule, activeWaveTime.Add(time.Microsecond), "time_deposit_detail", "unresolved")
+	failedDirect := insertRun("journal_transaction_report", "failed", "direct", activityBase.Add(8*time.Hour))
+	_ = insertRun("cif_opening_report", "cancelled", "direct", activityBase.Add(8*time.Hour+time.Second))
+	abandonedDirect := insertRun("cif_opening_report", "abandoned", "direct", activityBase.Add(8*time.Hour+2*time.Second))
+	failedParentResult, err := db.Exec(`INSERT INTO ingestion_runs
+		(kind,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,trigger_reference,created_at,finished_at)
+		VALUES ('run_all_parent','failed',?,?,?,?,?,?,?,?)`, parentParameters.Kind, parentParameters.Version, parentParameters.JSON,
+		parentParameters.Checksum[:], "direct", prefix+"-failed-parent", activityBase.Add(9*time.Hour), activityBase.Add(9*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedParentID, _ := failedParentResult.LastInsertId()
+	runIDs = append(runIDs, uint64(failedParentID))
+	failedChildResult, err := db.Exec(`INSERT INTO ingestion_runs
+		(kind,parent_run_id,child_position,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,trigger_reference,created_at,finished_at)
+		VALUES ('run_all_child',?,1,'journal_transaction_report','failed',?,?,?,?,?,?,?,?)`, failedParentID, parameters.Kind, parameters.Version,
+		parameters.JSON, parameters.Checksum[:], "run_all", fmt.Sprint(failedParentID), activityBase.Add(9*time.Hour), activityBase.Add(9*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedChildID, _ := failedChildResult.LastInsertId()
+	runIDs = append(runIDs, uint64(failedChildID))
+	afterSummary, err := repository.DashboardSummary(ctx, activityBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterSummary.FailedIngestion24h != beforeSummary.FailedIngestion24h+2 {
+		t.Fatalf("failed headline before=%d after=%d", beforeSummary.FailedIngestion24h, afterSummary.FailedIngestion24h)
+	}
+	if afterSummary.SchedulerUnresolved != beforeSummary.SchedulerUnresolved+1 {
+		t.Fatalf("scheduler unresolved before=%d after=%d", beforeSummary.SchedulerUnresolved, afterSummary.SchedulerUnresolved)
+	}
+	attention, err := service.NeedsAttention(ctx, true, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attentionIDs := map[uint64]int{}
+	for _, item := range attention {
+		attentionIDs[item.ID]++
+	}
+	if attentionIDs[failedDirect] != 1 || attentionIDs[uint64(failedParentID)] != 1 || attentionIDs[abandonedDirect] != 1 || attentionIDs[uint64(failedChildID)] != 0 || attentionIDs[legacyScheduler] != 0 {
+		t.Fatalf("top-level attention=%v", attentionIDs)
 	}
 
 	failedPage, err := service.ListRuns(ctx, RunFilter{Status: "failed"}, 1)

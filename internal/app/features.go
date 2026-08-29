@@ -29,8 +29,7 @@ import (
 )
 
 func PermissionDefinitions() []access.PermissionDefinition {
-	definitions := make([]access.PermissionDefinition, 0, 38)
-	definitions = append(definitions, dashboard.PermissionDefinitions()...)
+	definitions := make([]access.PermissionDefinition, 0, 37)
 	definitions = append(definitions, users.PermissionDefinitions()...)
 	definitions = append(definitions, roles.PermissionDefinitions()...)
 	definitions = append(definitions, auditlogs.PermissionDefinitions()...)
@@ -85,7 +84,7 @@ func registerFeatureRoutes(router chi.Router, dependencies featureDependencies) 
 	templateHandler := reporttemplates.NewHandler(dependencies.admin, dependencies.reportingRepository, dependencies.reportingService)
 	reportHandler := reports.NewHandler(dependencies.admin, dependencies.reportingRepository, dependencies.reportingService, dependencies.exportRepository, dependencies.exportStorage, dependencies.downloadTimeout)
 
-	dashboard.NewHandler(dependencies.admin).RegisterRoutes(router)
+	dashboard.NewHandler(dependencies.admin, dashboard.NewService(ingestionService, dependencies.exportRepository)).RegisterRoutes(router)
 	users.NewHandler(dependencies.admin, userService, dependencies.cookies, roles.PermissionAssign, impersonation.CanStart).RegisterRoutes(router)
 	roles.NewHandler(dependencies.admin, roleService).RegisterRoutes(router)
 	impersonation.NewHandler(dependencies.admin, impersonationService, dependencies.cookies).RegisterRoutes(router)

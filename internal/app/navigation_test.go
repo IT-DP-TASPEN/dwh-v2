@@ -5,7 +5,6 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/access"
 	"github.com/ibldzn/go-admin/internal/features/auditlogs"
-	"github.com/ibldzn/go-admin/internal/features/dashboard"
 	"github.com/ibldzn/go-admin/internal/features/datasources"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	"github.com/ibldzn/go-admin/internal/features/reports"
@@ -30,14 +29,15 @@ func TestPhaseFourNavigation(t *testing.T) {
 		active      string
 		open        string
 	}{
-		{name: "dashboard", path: "/", permissions: []string{dashboard.PermissionView}, groups: 1, active: "dashboard"},
+		{name: "dashboard", path: "/", permissions: []string{ingestionfeature.PermissionView}, groups: 2, active: "dashboard"},
+		{name: "reporting only", path: "/reports", permissions: []string{reports.PermissionView}, groups: 1, active: "reports"},
 		{name: "users", path: "/users/7", permissions: []string{users.PermissionView}, groups: 1, active: "users"},
 		{name: "roles", path: "/roles/7", permissions: []string{roles.PermissionView}, groups: 1, active: "roles", open: "access-control"},
 		{name: "audit", path: "/audit-logs/7", permissions: []string{auditlogs.PermissionView}, groups: 1, active: "audit-logs"},
-		{name: "ingestion overview", path: "/ingestion", permissions: []string{ingestionfeature.PermissionView}, groups: 1, active: "ingestion-overview"},
+		{name: "ingestion overview", path: "/ingestion", permissions: []string{ingestionfeature.PermissionView}, groups: 2, active: "ingestion-overview"},
 		{name: "source-only overview", path: "/ingestion", permissions: []string{sourcesfeature.PermissionView}, groups: 1, active: "ingestion-overview"},
 		{name: "sources", path: "/sources", permissions: []string{sourcesfeature.PermissionView}, groups: 1, active: "sources"},
-		{name: "runs", path: "/runs/7", permissions: []string{ingestionfeature.PermissionView}, groups: 1, active: "ingestion-runs"},
+		{name: "runs", path: "/runs/7", permissions: []string{ingestionfeature.PermissionView}, groups: 2, active: "ingestion-runs"},
 		{name: "schedules", path: "/schedules/7", permissions: []string{schedulesfeature.PermissionView}, groups: 1, active: "schedules"},
 		{name: "management hidden", path: "/", permissions: nil, groups: 0},
 	}
@@ -60,15 +60,14 @@ func TestPhaseFourNavigation(t *testing.T) {
 
 func TestPermissionAggregation(t *testing.T) {
 	definitions := PermissionDefinitions()
-	if len(definitions) != 38 {
-		t.Fatalf("got %d permissions, want 38", len(definitions))
+	if len(definitions) != 37 {
+		t.Fatalf("got %d permissions, want 37", len(definitions))
 	}
 	if err := access.ValidateRegistry(definitions); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]bool{
-		dashboard.PermissionView: true,
-		users.PermissionView:     true, users.PermissionCreate: true, users.PermissionUpdate: true,
+		users.PermissionView: true, users.PermissionCreate: true, users.PermissionUpdate: true,
 		users.PermissionDisable: true, users.PermissionResetPassword: true,
 		roles.PermissionView: true, roles.PermissionCreate: true, roles.PermissionUpdate: true,
 		roles.PermissionDelete: true, roles.PermissionAssign: true, roles.PermissionManagePermissions: true,

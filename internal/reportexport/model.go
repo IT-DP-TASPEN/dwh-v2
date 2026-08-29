@@ -48,6 +48,12 @@ type Job struct {
 	UpdatedAt         time.Time       `db:"updated_at"`
 }
 
+type Health struct {
+	Queued, Running, Failed uint64
+}
+
+func (health Health) Processing() uint64 { return health.Queued + health.Running }
+
 type Snapshot struct {
 	Version    uint16                          `json:"version"`
 	Parameters []reporting.Parameter           `json:"parameters"`

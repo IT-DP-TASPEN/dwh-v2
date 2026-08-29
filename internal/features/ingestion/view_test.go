@@ -45,6 +45,42 @@ func TestRunViewUsesCanonicalTerminalLifecycle(t *testing.T) {
 	}
 }
 
+func TestOverviewKeepsControlsAndUsesBoundedNeedsAttention(t *testing.T) {
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := OverviewData{
+		Runs: &RunOverview{Running: 2, Queued: 1}, Sources: &SourceOverview{Enabled: 35, Disabled: 1},
+		Schedules: &ScheduleOverview{Overdue: 1, Retrying: 2, BlockedBusy: 1}, CanRunAll: true, AttentionVisible: true,
+		Attention: []AttentionItem{{Name: "Run All #9", Detail: "Run #9", Time: "29 Aug 2026 10:00:00 UTC", URL: "/runs/9", Status: PresentStatus("failed"), RunAllSummary: &RunAllSummary{Total: 36, Complete: 36, Failed: 1}}},
+	}
+	response := httptest.NewRecorder()
+	if err := renderer.RenderPartial(response, http.StatusOK, "features/ingestion/index", "content", render.PageData{Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{"Executable runs", "Sources", "Schedule backlog", `href="/runs/run-all"`, "Needs attention", "Run All #9", "1 failed"} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("overview missing %q: %s", expected, body)
+		}
+	}
+	for _, removed := range []string{"Recent successes", "Recent failures / abandoned", "Export #"} {
+		if strings.Contains(body, removed) {
+			t.Errorf("overview retained %q", removed)
+		}
+	}
+
+	data.Attention = nil
+	response = httptest.NewRecorder()
+	if err := renderer.RenderPartial(response, http.StatusOK, "features/ingestion/index", "ingestion-summary", render.PageData{Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	if healthy := response.Body.String(); !strings.Contains(healthy, "No ingestion issues currently require attention.") || !strings.Contains(healthy, `hx-trigger="every 10s"`) {
+		t.Fatalf("overview healthy/refresh state=%s", healthy)
+	}
+}
+
 func TestRunAllChildStatusesUseRunsListBadges(t *testing.T) {
 	renderer, err := render.New(webfiles.Files, false)
 	if err != nil {

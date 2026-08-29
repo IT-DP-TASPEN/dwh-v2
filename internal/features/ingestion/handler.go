@@ -30,6 +30,7 @@ type runService interface {
 	OverviewRuns(context.Context) (RunOverview, error)
 	OverviewSources(context.Context) (SourceOverview, error)
 	OverviewSchedules(context.Context) (ScheduleOverview, error)
+	NeedsAttention(context.Context, bool, bool, int) ([]AttentionItem, error)
 	ActiveRunID(context.Context, string) (uint64, bool, error)
 }
 
@@ -84,6 +85,11 @@ func (handler *Handler) renderOverview(writer http.ResponseWriter, request *http
 		if err == nil {
 			data.Schedules = &value
 		}
+	}
+	includeRuns, includeSchedules := principal.Can(PermissionView), principal.Can("schedules.view")
+	data.AttentionVisible = includeRuns || includeSchedules
+	if err == nil && data.AttentionVisible {
+		data.Attention, err = handler.service.NeedsAttention(request.Context(), includeRuns, includeSchedules, 5)
 	}
 	if err != nil {
 		handler.admin.Internal(writer, request, "load ingestion overview", err)

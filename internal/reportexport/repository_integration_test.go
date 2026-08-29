@@ -126,6 +126,22 @@ func TestExportAuthorizationClaimFencingAndDownloadRules(t *testing.T) {
 	if err != nil || owned {
 		t.Fatalf("lost claim owned=%v error=%v", owned, err)
 	}
+	health, err := repository.HealthForUser(context.Background(), user.ID)
+	if err != nil || health.Queued != 0 || health.Running != 1 || health.Failed != 0 || health.Processing() != 1 {
+		t.Fatalf("running health=%+v error=%v", health, err)
+	}
+	if failed, err := repository.Fail(context.Background(), second.ID, owner('c'), 2, "source", "failed", now.Add(7*time.Second)); err != nil || !failed {
+		t.Fatalf("fail export=%t error=%v", failed, err)
+	}
+	health, err = repository.HealthForUser(context.Background(), user.ID)
+	failures, failureErr := repository.RecentFailuresForUser(context.Background(), user.ID, 8)
+	if err != nil || failureErr != nil || health.Running != 0 || health.Failed != 1 || len(failures) != 1 || failures[0].ID != second.ID {
+		t.Fatalf("failed health=%+v failures=%+v errors=%v/%v", health, failures, err, failureErr)
+	}
+	otherHealth, err := repository.HealthForUser(context.Background(), user.ID+1000)
+	if err != nil || otherHealth != (reportexport.Health{}) {
+		t.Fatalf("other user health=%+v error=%v", otherHealth, err)
+	}
 
 	var audits []struct {
 		Action   string `db:"action"`

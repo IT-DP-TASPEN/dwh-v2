@@ -91,6 +91,38 @@ func (repository *Repository) ListForUser(ctx context.Context, userID uint64, li
 	return jobs, nil
 }
 
+func (repository *Repository) HealthForUser(ctx context.Context, userID uint64) (Health, error) {
+	var rows []struct {
+		Status Status `db:"status"`
+		Count  uint64 `db:"count"`
+	}
+	if err := repository.database.SelectContext(ctx, &rows, `SELECT status,COUNT(*) count FROM report_export_jobs
+		WHERE submitted_by_user_id=? AND status IN ('queued','running','failed') GROUP BY status`, userID); err != nil {
+		return Health{}, err
+	}
+	var health Health
+	for _, row := range rows {
+		switch row.Status {
+		case StatusQueued:
+			health.Queued = row.Count
+		case StatusRunning:
+			health.Running = row.Count
+		case StatusFailed:
+			health.Failed = row.Count
+		}
+	}
+	return health, nil
+}
+
+func (repository *Repository) RecentFailuresForUser(ctx context.Context, userID uint64, limit int) ([]Job, error) {
+	jobs := make([]Job, 0, limit)
+	if err := repository.database.SelectContext(ctx, &jobs, `SELECT * FROM report_export_jobs
+		WHERE submitted_by_user_id=? AND status=? ORDER BY COALESCE(finished_at,updated_at) DESC,id DESC LIMIT ?`, userID, StatusFailed, limit); err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
 func (repository *Repository) Claim(ctx context.Context, owner string, now time.Time) (*Job, error) {
 	if len(owner) != 64 {
 		return nil, fmt.Errorf("opaque export owner is required")

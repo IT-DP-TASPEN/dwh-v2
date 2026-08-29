@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -63,7 +64,7 @@ func (service *Service) ListRuns(ctx context.Context, filter RunFilter, page int
 		return service.ListRuns(ctx, filter, pageInfo.Page)
 	}
 	result := RunPage{Rows: items, Filter: filter, Pagination: pageInfo, Jobs: service.catalog.Jobs(),
-		Statuses: []string{"planned", "queued", "running", "succeeded", "failed", "skipped", "cancelled", "abandoned", "completed", "completed_with_skips"},
+		Statuses: append([]string(nil), runStatuses...),
 		Kinds:    append([]RunKindOption(nil), runKindOptions...),
 		Triggers: []string{"direct", "scheduler", "run_all"}}
 	result.PreviousURL, result.NextURL = runPageURL(filter, pageInfo.Previous), runPageURL(filter, pageInfo.Next)
@@ -327,7 +328,109 @@ func (service *Service) OverviewRuns(ctx context.Context) (RunOverview, error) {
 	if err != nil {
 		return RunOverview{}, err
 	}
-	return RunOverview{Queued: value.Queued, Running: value.Running, RecentProblems: service.views(value.Problems), RecentSuccesses: service.views(value.Successes)}, nil
+	return RunOverview{Queued: value.Queued, Running: value.Running}, nil
+}
+
+func (service *Service) OperationalActivity(ctx context.Context, activeLimit, recentLimit int) (OperationalActivity, error) {
+	activeEntities, activeCount, err := service.repository.ActiveRunEntities(ctx, activeLimit)
+	if err != nil {
+		return OperationalActivity{}, err
+	}
+	recentEntities, err := service.repository.RecentRunEntities(ctx, recentLimit)
+	if err != nil {
+		return OperationalActivity{}, err
+	}
+	entities := append(append([]runListEntityRow(nil), activeEntities...), recentEntities...)
+	items, err := service.runListItems(ctx, entities)
+	if err != nil {
+		return OperationalActivity{}, err
+	}
+	activeItems := items[:len(activeEntities)]
+	parentIDs := make([]uint64, 0, len(activeItems))
+	for _, item := range activeItems {
+		if item.SchedulerWave == nil && item.Kind == string(ingestionrun.KindRunAllParent) {
+			parentIDs = append(parentIDs, item.ID)
+		}
+	}
+	interesting, err := service.repository.interestingRunAllChildren(ctx, parentIDs)
+	if err != nil {
+		return OperationalActivity{}, err
+	}
+	active := make([]OperationalItem, len(activeItems))
+	for index, item := range activeItems {
+		active[index].RunListItem = item
+		if rows := interesting[item.ID]; len(rows) != 0 {
+			active[index].InterestingChildren = service.views(rows)
+		}
+	}
+	return OperationalActivity{ActiveCount: activeCount, Active: active, Recent: items[len(activeEntities):]}, nil
+}
+
+func (service *Service) DashboardSummary(ctx context.Context, since time.Time) (DashboardSummary, error) {
+	return service.repository.DashboardSummary(ctx, since)
+}
+
+func (service *Service) NeedsAttention(ctx context.Context, includeRuns, includeSchedules bool, limit int) ([]AttentionItem, error) {
+	items := make([]AttentionItem, 0, limit*2)
+	if includeRuns {
+		rows, err := service.repository.attentionRuns(ctx, limit)
+		if err != nil {
+			return nil, err
+		}
+		views, err := service.physicalRunItems(ctx, rows)
+		if err != nil {
+			return nil, err
+		}
+		for index, row := range rows {
+			view := views[index].RunView
+			activityAt := row.CreatedAt.UTC()
+			if row.FinishedAt.Valid {
+				activityAt = row.FinishedAt.Time.UTC()
+			}
+			name := view.JobName
+			if view.Kind == string(ingestionrun.KindRunAllParent) {
+				name = fmt.Sprintf("Run All #%d", view.ID)
+			}
+			items = append(items, AttentionItem{ID: view.ID, Kind: "ingestion", Name: name, Detail: fmt.Sprintf("Run #%d", view.ID),
+				URL: fmt.Sprintf("/runs/%d", view.ID), Time: formatTime(activityAt), ActivityAt: activityAt, Status: view.Status, RunAllSummary: view.RunAllSummary})
+		}
+	}
+	if includeSchedules {
+		rows, err := service.repository.attentionSchedules(ctx, limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			job, _ := service.catalog.Find(row.JobKey)
+			status := presentOccurrenceStatus("unresolved")
+			switch row.DeliveryBlockReason.String {
+			case "job_busy":
+				status.Key, status.Label = "job_busy", "Job busy"
+			case "source_disabled":
+				status.Key, status.Label = "source_disabled", "Source disabled"
+			default:
+				if row.RetryWaiting {
+					status.Key, status.Label = "retry_waiting", "Retry waiting"
+				}
+			}
+			items = append(items, AttentionItem{ID: row.OccurrenceID, Kind: "scheduler", Name: row.ScheduleName,
+				Detail: job.Name + fmt.Sprintf(" · Occurrence #%d", row.OccurrenceID),
+				URL:    fmt.Sprintf("/schedules/%d/occurrences/%d", row.ScheduleID, row.OccurrenceID), Time: formatTime(row.ActivityAt), ActivityAt: row.ActivityAt, Status: status})
+		}
+	}
+	sort.SliceStable(items, func(left, right int) bool {
+		if !items[left].ActivityAt.Equal(items[right].ActivityAt) {
+			return items[left].ActivityAt.After(items[right].ActivityAt)
+		}
+		if items[left].Kind != items[right].Kind {
+			return items[left].Kind < items[right].Kind
+		}
+		return items[left].ID > items[right].ID
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
 }
 
 func (service *Service) OverviewSources(ctx context.Context) (SourceOverview, error) {
@@ -421,7 +524,7 @@ func (service *Service) validateFilter(filter RunFilter) error {
 			return fmt.Errorf("invalid job filter")
 		}
 	}
-	if err := validateChoice("status", filter.Status, []string{"planned", "queued", "running", "succeeded", "failed", "skipped", "cancelled", "abandoned", "completed", "completed_with_skips"}); err != nil {
+	if err := validateChoice("status", filter.Status, runStatuses); err != nil {
 		return err
 	}
 	if err := validateChoice("kind", filter.Kind, []string{"job", "run_all_parent", "run_all_child"}); err != nil {

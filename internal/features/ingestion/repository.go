@@ -53,13 +53,68 @@ func (repository *Repository) ListRunEntities(ctx context.Context, filter RunFil
 	if err := repository.db.SelectContext(ctx, &rows, query, queryArguments...); err != nil {
 		return nil, 0, fmt.Errorf("list run entities: %w", err)
 	}
+	normalizeRunListEntities(rows)
+	return rows, total, nil
+}
+
+func (repository *Repository) ActiveRunEntities(ctx context.Context, limit int) ([]runListEntityRow, uint64, error) {
+	entities, arguments, err := activeRunEntitiesSQL()
+	if err != nil {
+		return nil, 0, err
+	}
+	var total uint64
+	if err := repository.db.GetContext(ctx, &total, `SELECT COUNT(*) FROM (`+entities+`) active_entities`, arguments...); err != nil {
+		return nil, 0, fmt.Errorf("count active run entities: %w", err)
+	}
+	rows := make([]runListEntityRow, 0, limit)
+	queryArguments := append(append([]any(nil), arguments...), limit)
+	if err := repository.db.SelectContext(ctx, &rows, `SELECT entity_kind,run_id,scheduled_for,activity_at,activity_id FROM (`+entities+`)
+		active_entities ORDER BY activity_at DESC,activity_id DESC,entity_kind ASC LIMIT ?`, queryArguments...); err != nil {
+		return nil, 0, fmt.Errorf("list active run entities: %w", err)
+	}
+	normalizeRunListEntities(rows)
+	return rows, total, nil
+}
+
+func (repository *Repository) RecentRunEntities(ctx context.Context, limit int) ([]runListEntityRow, error) {
+	entities, arguments := groupedRunEntitiesSQL(RunFilter{})
+	rows := make([]runListEntityRow, 0, limit)
+	arguments = append(arguments, limit)
+	if err := repository.db.SelectContext(ctx, &rows, `SELECT entity_kind,run_id,scheduled_for,activity_at,activity_id FROM (`+entities+`)
+		entities ORDER BY activity_at DESC,activity_id DESC,entity_kind ASC LIMIT ?`, arguments...); err != nil {
+		return nil, fmt.Errorf("list recent run entities: %w", err)
+	}
+	normalizeRunListEntities(rows)
+	return rows, nil
+}
+
+func activeRunEntitiesSQL() (string, []any, error) {
+	active := activeRunStatuses()
+	query, arguments, err := sqlx.In(`SELECT 'run' entity_kind,r.id run_id,NULL scheduled_for,r.created_at activity_at,r.id activity_id
+		FROM ingestion_runs r
+		WHERE ((r.kind='job' AND r.trigger_type='direct') OR r.kind='run_all_parent')
+		AND NOT EXISTS (SELECT 1 FROM schedule_attempts linked WHERE linked.ingestion_run_id=r.id)
+		AND r.status IN (?)
+		UNION ALL
+		SELECT 'scheduler_wave' entity_kind,0 run_id,o.scheduled_for,MAX(attempt_run.created_at) activity_at,MAX(attempt_run.id) activity_id
+		FROM schedule_occurrences o
+		JOIN schedule_attempts attempt ON attempt.occurrence_id=o.id
+		JOIN ingestion_runs attempt_run ON attempt_run.id=attempt.ingestion_run_id
+		WHERE attempt_run.status IN (?)
+		GROUP BY o.scheduled_for`, active, active)
+	if err != nil {
+		return "", nil, fmt.Errorf("prepare active run entities: %w", err)
+	}
+	return query, arguments, nil
+}
+
+func normalizeRunListEntities(rows []runListEntityRow) {
 	for index := range rows {
 		if rows[index].ScheduledFor.Valid {
 			rows[index].ScheduledFor.Time = rows[index].ScheduledFor.Time.UTC()
 		}
 		rows[index].ActivityAt = rows[index].ActivityAt.UTC()
 	}
-	return rows, total, nil
 }
 
 func groupedRunEntitiesSQL(filter RunFilter) (string, []any) {
@@ -207,6 +262,31 @@ func (repository *Repository) runAllSummaries(ctx context.Context, parentIDs []u
 	return result, nil
 }
 
+func (repository *Repository) interestingRunAllChildren(ctx context.Context, parentIDs []uint64) (map[uint64][]runRow, error) {
+	result := make(map[uint64][]runRow, len(parentIDs))
+	if len(parentIDs) == 0 {
+		return result, nil
+	}
+	query, arguments, err := sqlx.In(`SELECT `+runColumns+` FROM ingestion_runs r
+		LEFT JOIN users u ON u.id=r.requested_by_user_id
+		WHERE r.parent_run_id IN (?) AND r.kind='run_all_child' AND r.status IN ('running','failed')
+		ORDER BY r.parent_run_id,r.child_position`, parentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("prepare interesting Run All children: %w", err)
+	}
+	rows := []runRow{}
+	if err := repository.db.SelectContext(ctx, &rows, query, arguments...); err != nil {
+		return nil, fmt.Errorf("list interesting Run All children: %w", err)
+	}
+	for _, row := range rows {
+		parentID := uint64(row.ParentRunID.Int64)
+		if len(result[parentID]) < 3 {
+			result[parentID] = append(result[parentID], row)
+		}
+	}
+	return result, nil
+}
+
 func (summary *RunAllSummary) add(status string, count uint64) {
 	summary.Total += count
 	if ingestionrun.IsTerminal(ingestionrun.Status(status)) {
@@ -287,8 +367,7 @@ func (repository *Repository) SchedulerProvenance(ctx context.Context, runID uin
 }
 
 type runOverviewRows struct {
-	Queued, Running     uint64
-	Problems, Successes []runRow
+	Queued, Running uint64
 }
 
 func (repository *Repository) RunOverview(ctx context.Context) (runOverviewRows, error) {
@@ -308,22 +387,53 @@ func (repository *Repository) RunOverview(ctx context.Context) (runOverviewRows,
 			result.Running = count.Count
 		}
 	}
-	problems, err := repository.recentRuns(ctx, `('failed','abandoned')`)
-	if err != nil {
-		return result, err
-	}
-	successes, err := repository.recentRuns(ctx, `('succeeded','completed','completed_with_skips')`)
-	if err != nil {
-		return result, err
-	}
-	result.Problems, result.Successes = problems, successes
 	return result, nil
 }
 
-func (repository *Repository) recentRuns(ctx context.Context, statuses string) ([]runRow, error) {
-	rows := []runRow{}
-	query := `SELECT ` + runColumns + ` FROM ingestion_runs r LEFT JOIN users u ON u.id=r.requested_by_user_id WHERE r.status IN ` + statuses + ` ORDER BY r.id DESC LIMIT 10`
-	return rows, repository.db.SelectContext(ctx, &rows, query)
+func (repository *Repository) DashboardSummary(ctx context.Context, since time.Time) (DashboardSummary, error) {
+	var result DashboardSummary
+	err := repository.db.GetContext(ctx, &result, `SELECT
+		(SELECT COUNT(*) FROM ingestion_runs r
+		 WHERE r.status=? AND r.finished_at>=?
+		 AND ((r.kind='job' AND r.trigger_type='direct') OR r.kind='run_all_parent')
+		 AND NOT EXISTS (SELECT 1 FROM schedule_attempts linked WHERE linked.ingestion_run_id=r.id)) failed_ingestion_24h,
+		(SELECT COUNT(*) FROM schedule_occurrences WHERE status='unresolved') scheduler_unresolved`,
+		string(ingestionrun.StatusFailed), since.UTC())
+	return result, err
+}
+
+func (repository *Repository) attentionRuns(ctx context.Context, limit int) ([]runRow, error) {
+	rows := make([]runRow, 0, limit)
+	err := repository.db.SelectContext(ctx, &rows, `SELECT `+runColumns+` FROM ingestion_runs r
+		LEFT JOIN users u ON u.id=r.requested_by_user_id
+		WHERE (r.kind='run_all_parent' OR (r.kind='job' AND r.trigger_type='direct'))
+		AND r.status IN ('failed','abandoned')
+		AND NOT EXISTS (SELECT 1 FROM schedule_attempts linked WHERE linked.ingestion_run_id=r.id)
+		ORDER BY COALESCE(r.finished_at,r.created_at) DESC,r.id DESC LIMIT ?`, limit)
+	return rows, err
+}
+
+type schedulerAttentionRow struct {
+	ScheduleID          uint64         `db:"schedule_id"`
+	OccurrenceID        uint64         `db:"occurrence_id"`
+	ScheduleName        string         `db:"schedule_name"`
+	JobKey              string         `db:"job_key"`
+	RetryWaiting        bool           `db:"retry_waiting"`
+	DeliveryBlockReason sql.NullString `db:"delivery_block_reason"`
+	ActivityAt          time.Time      `db:"activity_at"`
+}
+
+func (repository *Repository) attentionSchedules(ctx context.Context, limit int) ([]schedulerAttentionRow, error) {
+	rows := make([]schedulerAttentionRow, 0, limit)
+	err := repository.db.SelectContext(ctx, &rows, `SELECT s.id schedule_id,o.id occurrence_id,s.name schedule_name,o.job_key,
+		COALESCE(o.retry_not_before>UTC_TIMESTAMP(6),FALSE) retry_waiting,s.delivery_block_reason,o.updated_at activity_at
+		FROM schedule_occurrences o JOIN schedules s ON s.id=o.schedule_id
+		WHERE o.status='unresolved'
+		ORDER BY o.updated_at DESC,o.id DESC LIMIT ?`, limit)
+	for index := range rows {
+		rows[index].ActivityAt = rows[index].ActivityAt.UTC()
+	}
+	return rows, err
 }
 
 func (repository *Repository) SourceOverview(ctx context.Context, sourceKeys []string) (SourceOverview, error) {

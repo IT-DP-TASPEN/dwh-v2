@@ -106,6 +106,18 @@ type RunKindOption struct {
 
 var runKindOptions = []RunKindOption{{"job", "Job"}, {"run_all_parent", "Run All parent"}, {"run_all_child", "Run All child"}}
 
+var runStatuses = []string{"planned", "queued", "running", "succeeded", "failed", "skipped", "cancelled", "abandoned", "completed", "completed_with_skips"}
+
+func activeRunStatuses() []string {
+	result := make([]string, 0, len(runStatuses))
+	for _, status := range runStatuses {
+		if !ingestionrun.IsTerminal(ingestionrun.Status(status)) {
+			result = append(result, status)
+		}
+	}
+	return result
+}
+
 func presentRunKind(value string) string {
 	for _, option := range runKindOptions {
 		if option.Value == value {
@@ -255,8 +267,6 @@ type TechnicalEventView struct {
 
 type RunOverview struct {
 	Queued, Running uint64
-	RecentProblems  []RunView
-	RecentSuccesses []RunView
 }
 
 type SourceOverview struct {
@@ -271,10 +281,40 @@ type ScheduleOverview struct {
 }
 
 type OverviewData struct {
-	Runs      *RunOverview
-	Sources   *SourceOverview
-	Schedules *ScheduleOverview
-	CanRunAll bool
+	Runs             *RunOverview
+	Sources          *SourceOverview
+	Schedules        *ScheduleOverview
+	Attention        []AttentionItem
+	AttentionVisible bool
+	CanRunAll        bool
+}
+
+type AttentionItem struct {
+	ID            uint64
+	Kind          string
+	Name          string
+	Detail        string
+	URL           string
+	Time          string
+	ActivityAt    time.Time
+	Status        StatusView
+	RunAllSummary *RunAllSummary
+}
+
+type OperationalItem struct {
+	RunListItem
+	InterestingChildren []RunView
+}
+
+type OperationalActivity struct {
+	ActiveCount uint64
+	Active      []OperationalItem
+	Recent      []RunListItem
+}
+
+type DashboardSummary struct {
+	FailedIngestion24h  uint64 `db:"failed_ingestion_24h"`
+	SchedulerUnresolved uint64 `db:"scheduler_unresolved"`
 }
 
 type RunAllForm struct {

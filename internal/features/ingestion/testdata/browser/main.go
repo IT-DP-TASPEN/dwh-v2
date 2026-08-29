@@ -12,10 +12,12 @@ import (
 	"sync"
 	"time"
 
+	dashboardfeature "github.com/ibldzn/go-admin/internal/features/dashboard"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	reportsfeature "github.com/ibldzn/go-admin/internal/features/reports"
 	core "github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
+	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/platform/pagination"
 	"github.com/ibldzn/go-admin/internal/render"
 	"github.com/ibldzn/go-admin/internal/reporting"
@@ -45,7 +47,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.FileServer(http.FS(webfiles.Files)))
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
+	mux.HandleFunc("/", fixture.dashboardPage)
 	mux.HandleFunc("/case/", fixture.page)
+	mux.HandleFunc("/ingestion", fixture.ingestionOverview)
+	mux.HandleFunc("/ingestion/summary", fixture.ingestionOverview)
 	mux.HandleFunc("/runs", fixture.runsPage)
 	mux.HandleFunc("/runs/scheduler-wave", fixture.schedulerWave)
 	mux.HandleFunc("/runs/", fixture.status)
@@ -53,6 +58,69 @@ func main() {
 	mux.HandleFunc("/reports/", fixture.reportMutation)
 	log.Printf("Run Details browser fixture listening on %s", address)
 	log.Fatal(http.ListenAndServe(address, mux))
+}
+
+func (fixture *fixture) dashboardPage(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path != "/" {
+		http.NotFound(writer, request)
+		return
+	}
+	if request.URL.Query().Get("persona") == "reporting" {
+		http.Redirect(writer, request, "/reports?persona=reporting", http.StatusSeeOther)
+		return
+	}
+	wave, _ := fixtureSchedulerWave(259)
+	data := dashboardfeature.Data{
+		Summary: dashboardfeature.Summary{ActiveIngestion: 3, FailedIngestion24h: 2, SchedulerUnresolved: 1, ExportQueued: 1, ExportRunning: 1, ExportFailed: 1},
+		Attention: []ingestionfeature.AttentionItem{
+			{ID: 240, Kind: "ingestion", Name: "Run All #240", Detail: "Run #240", Time: "28 Aug 2026 09:01:00 UTC", URL: "/runs/240", Status: ingestionfeature.PresentStatus("failed"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 2, Complete: 2, Failed: 1}},
+			{ID: 700, Kind: "scheduler", Name: "Schedule A", Detail: "Journal Transaction Report · Occurrence #700", Time: "28 Aug 2026 10:04:00 UTC", URL: "/schedules/10/occurrences/700", Status: ingestionfeature.StatusView{Key: "retry_waiting", Label: "Retry waiting", Class: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"}},
+			{ID: 12, Kind: "export", Name: "NPL Report", Detail: "Export #12", Time: "28 Aug 2026 08:00:00 UTC", URL: "/exports#export-12", Status: ingestionfeature.PresentStatus("failed")},
+		},
+		Active: []ingestionfeature.OperationalItem{
+			{RunListItem: ingestionfeature.RunListItem{RunView: fixtureRuns()[5]}, InterestingChildren: []ingestionfeature.RunView{fixtureRuns()[3]}},
+			{RunListItem: ingestionfeature.RunListItem{RunView: ingestionfeature.RunView{ID: 261, Kind: "job", JobName: "Loan Detail", Trigger: "direct", CreatedAt: "2026-08-28 10:06:00 UTC", Status: ingestionfeature.PresentStatus("running")}}},
+			{RunListItem: ingestionfeature.RunListItem{SchedulerWave: wave}},
+		},
+		Recent: []ingestionfeature.RunListItem{
+			{RunView: fixtureRuns()[0]}, {RunView: fixtureRuns()[9]}, {SchedulerWave: wave},
+		},
+		CanViewSchedules: true, CanViewExports: true,
+	}
+	pageData := adminshell.PageData{Title: "Dashboard", AppName: "Browser fixture", CurrentPath: "/", Navigation: fixtureNavigation(true, "/"), Data: data}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/dashboard/index", "admin", pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (fixture *fixture) ingestionOverview(writer http.ResponseWriter, request *http.Request) {
+	data := ingestionfeature.OverviewData{
+		Runs: &ingestionfeature.RunOverview{Running: 2, Queued: 1}, Sources: &ingestionfeature.SourceOverview{Enabled: 35, Disabled: 1},
+		Schedules: &ingestionfeature.ScheduleOverview{Overdue: 1, Retrying: 1, BlockedBusy: 1}, CanRunAll: true, AttentionVisible: true,
+	}
+	if request.URL.Query().Get("healthy") != "1" {
+		data.Attention = []ingestionfeature.AttentionItem{{ID: 240, Kind: "ingestion", Name: "Run All #240", Detail: "Run #240", Time: "28 Aug 2026 09:01:00 UTC", URL: "/runs/240", Status: ingestionfeature.PresentStatus("failed"), RunAllSummary: &ingestionfeature.RunAllSummary{Total: 2, Complete: 2, Failed: 1}}}
+	}
+	pageData := adminshell.PageData{Title: "Ingestion Overview", AppName: "Browser fixture", CurrentPath: "/ingestion", Navigation: fixtureNavigation(true, "/ingestion"), Data: data}
+	name := "admin"
+	if request.Header.Get("HX-Request") == "true" {
+		name = "ingestion-summary"
+	}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/ingestion/index", name, pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func fixtureNavigation(operational bool, path string) []navigation.GroupView {
+	groups := make([]navigation.GroupView, 0, 3)
+	if operational {
+		groups = append(groups,
+			navigation.GroupView{Key: "general", Label: "General", Items: []navigation.ItemView{{Key: "dashboard", Label: "Dashboard", Icon: "layout-dashboard", Path: "/", Depth: 1, Active: path == "/"}}},
+			navigation.GroupView{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.ItemView{{Key: "ingestion-overview", Label: "Overview", Icon: "activity", Path: "/ingestion", Depth: 1, Active: path == "/ingestion"}, {Key: "ingestion-runs", Label: "Runs", Icon: "history", Path: "/runs", Depth: 1}}},
+		)
+	}
+	groups = append(groups, navigation.GroupView{Key: "reporting", Label: "Reporting", Items: []navigation.ItemView{{Key: "reports", Label: "Reports", Icon: "file-chart-column", Path: "/reports", Depth: 1, Active: path == "/reports"}}})
+	return groups
 }
 
 func (fixture *fixture) runsPage(writer http.ResponseWriter, request *http.Request) {
@@ -238,7 +306,10 @@ func (fixture *fixture) resetReports() {
 
 func (fixture *fixture) reportsPage(writer http.ResponseWriter, request *http.Request) {
 	data := fixture.reportData(request, 0, "", "")
-	pageData := adminshell.PageData{Title: "Reports", AppName: "Browser fixture", Data: data}
+	pageData := adminshell.PageData{Title: "Reports", AppName: "Browser fixture", CurrentPath: "/reports", Data: data}
+	if request.URL.Query().Get("persona") == "reporting" {
+		pageData.Navigation = fixtureNavigation(false, "/reports")
+	}
 	name := "admin"
 	if request.Header.Get("HX-Request") == "true" {
 		name = "report-browser"

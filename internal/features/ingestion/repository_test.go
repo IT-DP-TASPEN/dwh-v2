@@ -54,6 +54,32 @@ func TestRunAllSummaryUsesCanonicalTerminalStatuses(t *testing.T) {
 	}
 }
 
+func TestActiveRunEntitiesUseCanonicalExecutionStateAndGroupSchedulerWaves(t *testing.T) {
+	query, arguments, err := activeRunEntitiesSQL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`((r.kind='job' AND r.trigger_type='direct') OR r.kind='run_all_parent')`,
+		`JOIN ingestion_runs attempt_run ON attempt_run.id=attempt.ingestion_run_id`,
+		`attempt_run.status IN`,
+		`GROUP BY o.scheduled_for`,
+	} {
+		if !strings.Contains(query, expected) {
+			t.Fatalf("active query missing %q: %s", expected, query)
+		}
+	}
+	for _, forbidden := range []string{`r.kind='run_all_child'`, `o.status='unresolved'`} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("active query contains %q: %s", forbidden, query)
+		}
+	}
+	wantStatuses := activeRunStatuses()
+	if len(arguments) != len(wantStatuses)*2 {
+		t.Fatalf("active args=%v statuses=%v", arguments, wantStatuses)
+	}
+}
+
 func TestGroupedRunFiltersQualifyWithoutFilteringWaveAggregation(t *testing.T) {
 	query, arguments := groupedRunEntitiesSQL(RunFilter{Job: "journal_transaction_report", Status: "failed"})
 	for _, expected := range []string{
