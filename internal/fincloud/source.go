@@ -162,13 +162,13 @@ func decodeCIFReportValue(value string) (string, error) {
 func (c *Client) FetchSavingAccounts(ctx context.Context) ([]string, error) {
 	return c.fetchAccountList(ctx, "fetch saving accounts", "/tabungan/inquiry/rekening/cari", url.Values{
 		"cabang": {"ALL"}, "datamutasi": {"false"}, "pagenumber": {"0"}, "pagesize": {"9999999999999"}, "rowcount": {"0"},
-	})
+	}, false)
 }
 
 func (c *Client) FetchTimeDepositAccounts(ctx context.Context) ([]string, error) {
 	return c.fetchAccountList(ctx, "fetch time-deposit accounts", "/deposito/inquiry/rekening/cari", url.Values{
 		"cabang": {"ALL"}, "pagenumber": {"0"}, "pagesize": {"9999999999999"}, "rowcount": {"0"}, "status": {""},
-	})
+	}, false)
 }
 
 func (c *Client) FetchLoanAccounts(ctx context.Context) ([]string, error) {
@@ -176,7 +176,7 @@ func (c *Client) FetchLoanAccounts(ctx context.Context) ([]string, error) {
 	for _, status := range []string{"Aktif", "Closed", "WO", "HT"} {
 		values, err := c.fetchAccountList(ctx, "fetch loan accounts", "/pinjaman/inquiry/rekening/cari", url.Values{
 			"cabang": {"ALL"}, "jenispinjaman": {""}, "pagenumber": {"0"}, "pagesize": {"9999999999999"}, "rowcount": {"0"}, "status": {status},
-		})
+		}, true)
 		if err != nil {
 			return nil, fmt.Errorf("loan status %s: %w", status, err)
 		}
@@ -185,12 +185,10 @@ func (c *Client) FetchLoanAccounts(ctx context.Context) ([]string, error) {
 	return normalizeIdentifiers(all), nil
 }
 
-func (c *Client) fetchAccountList(ctx context.Context, operation, endpoint string, query url.Values) ([]string, error) {
+func (c *Client) fetchAccountList(ctx context.Context, operation, endpoint string, query url.Values, nullResultIsEmpty bool) ([]string, error) {
 	var payload struct {
-		Status string `json:"status"`
-		Data   struct {
-			Result json.RawMessage `json:"result"`
-		} `json:"data"`
+		Status string          `json:"status"`
+		Data   json.RawMessage `json:"data"`
 	}
 	diagnostic, err := c.getJSON(ctx, operation, endpoint+"?"+query.Encode(), &payload)
 	if err != nil {
@@ -199,8 +197,31 @@ func (c *Client) fetchAccountList(ctx context.Context, operation, endpoint strin
 	if payload.Status != "ok" {
 		return nil, applicationFailure(operation, "Fincloud reported a source failure", diagnostic, payload.Status, "")
 	}
-	result := bytes.TrimSpace(payload.Data.Result)
-	if len(result) == 0 || bytes.Equal(result, []byte("null")) {
+	data := bytes.TrimSpace(payload.Data)
+	if len(data) == 0 {
+		diagnostic.FailureKind, diagnostic.DecodeStage = "missing_required", "account_list_data"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud account listing omitted required data object", diagnostic: diagnostic}
+	}
+	if bytes.Equal(data, []byte("null")) {
+		diagnostic.FailureKind, diagnostic.DecodeStage = "dto_decode", "account_list_data"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud account listing data was malformed", Cause: fmt.Errorf("data must be a JSON object"), diagnostic: diagnostic}
+	}
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		diagnostic.FailureKind, diagnostic.DecodeStage = decodeFailureKind(err), "account_list_data"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud account listing data was malformed", Cause: err, diagnostic: diagnostic}
+	}
+	result := bytes.TrimSpace(envelope.Result)
+	if len(result) == 0 {
+		diagnostic.FailureKind, diagnostic.DecodeStage = "missing_required", "account_list_result"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud account listing omitted required result array", diagnostic: diagnostic}
+	}
+	if bytes.Equal(result, []byte("null")) {
+		if nullResultIsEmpty {
+			return []string{}, nil
+		}
 		diagnostic.FailureKind, diagnostic.DecodeStage = "missing_required", "account_list_result"
 		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud account listing omitted required result array", diagnostic: diagnostic}
 	}

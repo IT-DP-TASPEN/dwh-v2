@@ -3,6 +3,7 @@ package fincloud
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -181,10 +182,15 @@ func TestDetailListingsAcceptOnlyContractValidEmptyResults(t *testing.T) {
 			t.Fatalf("%s empty listing=%v error=%v", name, values, err)
 		}
 	}
-	for _, invalid := range []string{"null", `{}`} {
-		accountResult.Store(invalid)
-		if _, err := client.FetchSavingAccounts(context.Background()); err == nil {
-			t.Fatalf("invalid result %s accepted", invalid)
+	for name, fetch := range map[string]func(context.Context) ([]string, error){
+		"saving":       client.FetchSavingAccounts,
+		"time deposit": client.FetchTimeDepositAccounts,
+	} {
+		for _, invalid := range []string{"null", `{}`} {
+			accountResult.Store(invalid)
+			if _, err := fetch(context.Background()); err == nil {
+				t.Fatalf("%s invalid result %s accepted", name, invalid)
+			}
 		}
 	}
 	accountResult.Store(`[]`)
@@ -197,6 +203,84 @@ func TestDetailListingsAcceptOnlyContractValidEmptyResults(t *testing.T) {
 	})
 	if _, err := client.FetchSavingAccounts(context.Background()); err == nil {
 		t.Fatal("missing result accepted")
+	}
+}
+
+func TestLoanAccountListingNullAndMalformedContracts(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		bodies    map[string]string
+		want      []string
+		wantKind  ErrorKind
+		wantCalls []string
+	}{
+		{
+			name:      "explicit null is empty",
+			body:      `{"data":{"result":null},"status":"ok"}`,
+			want:      []string{},
+			wantCalls: []string{"Aktif", "Closed", "WO", "HT"},
+		},
+		{
+			name: "null status among populated statuses",
+			bodies: map[string]string{
+				"Aktif":  `{"status":"ok","data":{"result":[{"id":"L2"},{"id":"L1"}]}}`,
+				"Closed": `{"status":"ok","data":{"result":null}}`,
+				"WO":     `{"status":"ok","data":{"result":[{"id":"L3"}]}}`,
+				"HT":     `{"status":"ok","data":{"result":null}}`,
+			},
+			want:      []string{"L1", "L2", "L3"},
+			wantCalls: []string{"Aktif", "Closed", "WO", "HT"},
+		},
+		{name: "missing data", body: `{"status":"ok"}`, wantKind: ErrorMalformed, wantCalls: []string{"Aktif"}},
+		{name: "null data", body: `{"status":"ok","data":null}`, wantKind: ErrorMalformed, wantCalls: []string{"Aktif"}},
+		{name: "wrong data type", body: `{"status":"ok","data":[]}`, wantKind: ErrorMalformed, wantCalls: []string{"Aktif"}},
+		{name: "missing result", body: `{"status":"ok","data":{}}`, wantKind: ErrorMalformed, wantCalls: []string{"Aktif"}},
+		{name: "application failure", body: `{"status":"failed","data":{"result":null}}`, wantKind: ErrorUpstream, wantCalls: []string{"Aktif"}},
+		{name: "wrong non-null result type", body: `{"status":"ok","data":{"result":{}}}`, wantKind: ErrorMalformed, wantCalls: []string{"Aktif"}},
+		{name: "malformed JSON", body: `{"status":"ok"`, wantKind: ErrorMalformed, wantCalls: []string{"Aktif"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := []string{}
+			server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/fincloud/admin/access/login":
+					_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session"}}}`)
+				case "/fincloud/pinjaman/inquiry/rekening/cari":
+					status := request.URL.Query().Get("status")
+					calls = append(calls, status)
+					body := test.body
+					if test.bodies != nil {
+						body = test.bodies[status]
+					}
+					_, _ = io.WriteString(response, body)
+				default:
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+			client, err := newClient(testConfig(server.URL+"/fincloud"), server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			values, err := client.FetchLoanAccounts(context.Background())
+			if test.wantKind == "" {
+				if err != nil || !reflect.DeepEqual(values, test.want) {
+					t.Fatalf("values=%v error=%v want=%v", values, err, test.want)
+				}
+			} else {
+				var sourceError *Error
+				if !errors.As(err, &sourceError) || sourceError.Kind != test.wantKind {
+					t.Fatalf("error=%v kind=%v want=%v", err, sourceError, test.wantKind)
+				}
+			}
+			if !reflect.DeepEqual(calls, test.wantCalls) {
+				t.Fatalf("calls=%v want=%v", calls, test.wantCalls)
+			}
+		})
 	}
 }
 
