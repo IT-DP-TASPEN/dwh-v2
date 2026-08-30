@@ -249,7 +249,7 @@ func newFixedCleanupFixture(t *testing.T, db *sqlx.DB, repository *FixedReposito
 	}
 	for _, member := range plan.Members {
 		segment := FixedSegment{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, member.SourceLocationID)}
-		if err := repository.StageMember(context.Background(), definition, loadID, member, []FixedSegment{segment}); err != nil {
+		if err := stageMemberFixture(repository, context.Background(), definition, loadID, member, []FixedSegment{segment}); err != nil {
 			t.Fatal(err)
 		}
 	}

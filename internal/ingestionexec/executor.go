@@ -2,6 +2,7 @@ package ingestionexec
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -53,6 +54,8 @@ const (
 
 type fixedMemberResult struct {
 	rows            uint64
+	segments        int
+	checksum        [sha256.Size]byte
 	layer           fixedLayer
 	step, memberKey string
 	item            string
@@ -283,29 +286,33 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 }
 
 func (executor *Executor) fetchAndStageFixedMember(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, journalTransactionTypes []journalTransactionType) fixedMemberResult {
-	segments, result := executor.fetchFixedMemberSegments(ctx, definition, descriptor, journalTransactionTypes)
+	result := executor.fetchFixedMemberSegments(ctx, definition, descriptor, journalTransactionTypes,
+		func(stageCtx context.Context, segment ingestionstore.FixedSegment) error {
+			return executor.fixed.StageMemberSegment(stageCtx, definition, loadID, descriptor, segment)
+		})
 	if result.err != nil {
 		return result
 	}
-	persistCtx := diagnosticScope(ctx, "persistence", "stage_fixed_member", "stage_fixed_member", "", descriptor.MemberKey)
-	if err := executor.fixed.StageMember(persistCtx, definition, loadID, descriptor, segments); err != nil {
-		return fixedMemberResult{layer: fixedLayerPersistence, step: "stage_fixed_member", err: err}
+	persistCtx := diagnosticScope(ctx, "persistence", "finalize_fixed_member_candidate", "finalize_fixed_member_candidate", "", descriptor.MemberKey)
+	if err := executor.fixed.FinalizeMemberCandidate(persistCtx, definition, loadID, descriptor, result.segments, result.rows, result.checksum); err != nil {
+		return fixedMemberResult{layer: fixedLayerPersistence, step: "finalize_fixed_member_candidate", err: err}
 	}
 	return result
 }
 
-func (executor *Executor) fetchFixedMemberSegments(ctx context.Context, definition ingestion.FixedDefinition, descriptor ingestion.RequestDescriptor, journalTransactionTypes []journalTransactionType) ([]ingestionstore.FixedSegment, fixedMemberResult) {
+func (executor *Executor) fetchFixedMemberSegments(ctx context.Context, definition ingestion.FixedDefinition, descriptor ingestion.RequestDescriptor, journalTransactionTypes []journalTransactionType, stage func(context.Context, ingestionstore.FixedSegment) error) fixedMemberResult {
 	chunks, err := ingestion.ChunkDateRange(descriptor.RequestedFrom, descriptor.RequestedTo, definition.MaxChunkDays)
 	if err != nil {
-		return nil, fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: err}
+		return fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: err}
 	}
 	transactionTypes := journalTransactionTypes
 	if definition.Key != "journal_transaction_report" {
 		transactionTypes = []journalTransactionType{{}}
 	} else if len(transactionTypes) == 0 {
-		return nil, fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: fmt.Errorf("frozen journal transaction-type set is empty")}
+		return fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: fmt.Errorf("frozen journal transaction-type set is empty")}
 	}
-	segments := make([]ingestionstore.FixedSegment, 0, len(chunks)*len(transactionTypes))
+	segmentCount := len(chunks) * len(transactionTypes)
+	memberHash := sha256.New()
 	var rows uint64
 	for chunkIndex, chunk := range chunks {
 		for typeIndex, transactionType := range transactionTypes {
@@ -314,30 +321,39 @@ func (executor *Executor) fetchFixedMemberSegments(ctx context.Context, definiti
 				item = fmt.Sprintf("journal chunk %d/%d, transaction type %d/%d (%s)", chunkIndex+1, len(chunks), typeIndex+1, len(transactionTypes), boundedJournalTransactionTypeID(transactionType.ID))
 			}
 			if err := ctx.Err(); err != nil {
-				return nil, fixedMemberResult{layer: fixedLayerSource, step: "download_report", item: item, err: err}
+				return fixedMemberResult{layer: fixedLayerSource, step: "download_report", item: item, err: err}
 			}
 			request, err := ingestion.BuildFixedRequestDescriptor(definition, ingestion.FixedDateRangeParams{From: chunk.From, To: chunk.To}, descriptor.SourceLocationID, descriptor.AccountCode, descriptor.MemberKey)
 			if err == nil && definition.Key == "journal_transaction_report" {
 				request, err = journalTransactionRequest(request, transactionType.ID)
 			}
 			if err != nil {
-				return nil, fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", item: item, err: err}
+				return fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", item: item, err: err}
 			}
 			sourceCtx := diagnosticScope(ctx, "source", "download_report", "download_report", item, descriptor.MemberKey)
 			content, err := executor.client.DownloadReport(sourceCtx, request.ReportName, request.Parameters...)
 			if err != nil {
-				return nil, fixedMemberResult{layer: fixedLayerSource, step: "download_report", item: item, err: err}
+				return fixedMemberResult{layer: fixedLayerSource, step: "download_report", item: item, err: err}
 			}
 			parserCtx := diagnosticScope(ctx, "source_contract", "parse_fixed_csv", "parse_fixed_csv", item, descriptor.MemberKey)
 			parsed, err := ingestion.ParseFixedCSV(parserCtx, definition, descriptor.SourceLocationID, content)
 			if err != nil {
-				return nil, fixedMemberResult{layer: fixedLayerSourceContract, step: "parse_fixed_csv", item: item, err: err}
+				return fixedMemberResult{layer: fixedLayerSourceContract, step: "parse_fixed_csv", item: item, err: err}
+			}
+			segment := ingestionstore.FixedSegment{Index: chunkIndex*len(transactionTypes) + typeIndex, AsOfDate: chunk.To, SourceRows: parsed}
+			persistCtx := diagnosticScope(ctx, "persistence", "stage_fixed_member_segment", "stage_fixed_member_segment", item, descriptor.MemberKey)
+			if err := stage(persistCtx, segment); err != nil {
+				return fixedMemberResult{layer: fixedLayerPersistence, step: "stage_fixed_member_segment", item: item, err: err}
 			}
 			rows += uint64(len(parsed))
-			segments = append(segments, ingestionstore.FixedSegment{Index: len(segments), AsOfDate: chunk.To, SourceRows: parsed})
+			for _, row := range parsed {
+				ingestion.WriteFixedMemberChecksumPart(memberHash, row.SourceRowChecksum)
+			}
 		}
 	}
-	return segments, fixedMemberResult{rows: rows}
+	var checksum [sha256.Size]byte
+	copy(checksum[:], memberHash.Sum(nil))
+	return fixedMemberResult{rows: rows, segments: segmentCount, checksum: checksum}
 }
 
 func freezeJournalTransactionTypes(rows []fincloud.JournalTransactionType) ([]journalTransactionType, error) {

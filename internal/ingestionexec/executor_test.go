@@ -20,6 +20,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestiondiag"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
+	"github.com/ibldzn/go-admin/internal/ingestionstore"
 )
 
 func TestProgressPersistenceFailureAndDiagnosticFailureAreNonFatal(t *testing.T) {
@@ -413,7 +414,7 @@ func TestFixedFailureLayersAndCancellationCause(t *testing.T) {
 	}{
 		{fixedMemberResult{layer: fixedLayerSource, step: "download_report", err: context.DeadlineExceeded}, "source", "download_report"},
 		{fixedMemberResult{layer: fixedLayerSourceContract, step: "parse_fixed_csv", err: errors.New("bad header")}, "source_contract", "parse_fixed_csv"},
-		{fixedMemberResult{layer: fixedLayerPersistence, step: "stage_fixed_member", err: errors.New("database unavailable")}, "persistence", "stage_fixed_member"},
+		{fixedMemberResult{layer: fixedLayerPersistence, step: "stage_fixed_member_segment", err: errors.New("database unavailable")}, "persistence", "stage_fixed_member_segment"},
 	} {
 		got := fixedFailure(context.Background(), test.result)
 		if got.Error.Class != test.class || got.Error.Step != test.step {
@@ -531,13 +532,20 @@ func TestJournalTransactionPartitionsAreSequentialAndAggregateOneCandidate(t *te
 		t.Fatal(err)
 	}
 	types := []journalTransactionType{{ID: "A"}, {ID: "B"}, {ID: "C"}}
-	segments, result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], types)
+	var segments []ingestionstore.FixedSegment
+	result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], types, func(_ context.Context, segment ingestionstore.FixedSegment) error {
+		if fetched := len(requests()); fetched != len(segments)+1 {
+			t.Fatalf("segment %d staged after %d source requests", segment.Index, fetched)
+		}
+		segments = append(segments, segment)
+		return nil
+	})
 	wantRequests := []string{
 		"2026-01-01/2026-01-30/A", "2026-01-01/2026-01-30/B", "2026-01-01/2026-01-30/C",
 		"2026-01-31/2026-03-01/A", "2026-01-31/2026-03-01/B", "2026-01-31/2026-03-01/C",
 		"2026-03-02/2026-03-31/A", "2026-03-02/2026-03-31/B", "2026-03-02/2026-03-31/C",
 	}
-	if result.err != nil || result.rows != 6 || !reflect.DeepEqual(requests(), wantRequests) || len(segments) != 9 {
+	if result.err != nil || result.rows != 6 || result.segments != 9 || !reflect.DeepEqual(requests(), wantRequests) || len(segments) != 9 {
 		t.Fatalf("result=%+v requests=%v segments=%d", result, requests(), len(segments))
 	}
 	var checksum string
@@ -576,7 +584,11 @@ func TestJournalTransactionPartitionsAcceptCompatibleCanonicalSchema(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	segments, result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], []journalTransactionType{{ID: "A"}, {ID: "B"}})
+	var segments []ingestionstore.FixedSegment
+	result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], []journalTransactionType{{ID: "A"}, {ID: "B"}}, func(_ context.Context, segment ingestionstore.FixedSegment) error {
+		segments = append(segments, segment)
+		return nil
+	})
 	if result.err != nil || result.rows != 2 || len(segments) != 2 || !reflect.DeepEqual(segments[0].SourceRows[0].Values, segments[1].SourceRows[0].Values) {
 		t.Fatalf("result=%+v segments=%+v", result, segments)
 	}
@@ -634,11 +646,105 @@ func TestJournalTransactionPartitionFailureStopsRemainingWork(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			segments, result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], test.types)
-			if result.err == nil || result.layer != test.wantLayer || segments != nil || !reflect.DeepEqual(requests(), test.wantRequests) || strings.Contains(strings.Join(requests(), "/"), "%") {
-				t.Fatalf("result=%+v segments=%v requests=%v", result, segments, requests())
+			var staged []int
+			result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], test.types, func(_ context.Context, segment ingestionstore.FixedSegment) error {
+				staged = append(staged, segment.Index)
+				return nil
+			})
+			if result.err == nil || result.layer != test.wantLayer || !reflect.DeepEqual(requests(), test.wantRequests) || strings.Contains(strings.Join(requests(), "/"), "%") {
+				t.Fatalf("result=%+v staged=%v requests=%v", result, staged, requests())
 			}
 		})
+	}
+}
+
+func TestFixedSegmentStageFailureStopsBeforeNextFetch(t *testing.T) {
+	definition := ingestion.FixedDefinitions()[1]
+	executor, requests := journalPartitionTestExecutor(t, func([]string) (int, string) {
+		return http.StatusOK, journalTestCSV(definition, "row", false, false)
+	})
+	date, _ := ingestion.ParseCalendarDate("2026-01-01")
+	plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: date, To: date}, ingestion.FrozenLocations{}, ingestion.FrozenAccountCodes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var staged []int
+	result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], []journalTransactionType{{ID: "A"}, {ID: "B"}, {ID: "C"}, {ID: "D"}}, func(_ context.Context, segment ingestionstore.FixedSegment) error {
+		if segment.Index == 2 {
+			return errors.New("forced segment staging failure")
+		}
+		staged = append(staged, segment.Index)
+		return nil
+	})
+	if result.layer != fixedLayerPersistence || result.step != "stage_fixed_member_segment" || !reflect.DeepEqual(staged, []int{0, 1}) {
+		t.Fatalf("result=%+v staged=%v", result, staged)
+	}
+	wantRequests := []string{"2026-01-01/2026-01-01/A", "2026-01-01/2026-01-01/B", "2026-01-01/2026-01-01/C"}
+	if got := requests(); !reflect.DeepEqual(got, wantRequests) {
+		t.Fatalf("requests=%v want=%v", got, wantRequests)
+	}
+}
+
+func TestGenericFixedSegmentsStageIncrementallyAndSingleSegmentStaysEquivalent(t *testing.T) {
+	definition := ingestion.FixedDefinitions()[5]
+	var mutex sync.Mutex
+	var requests []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/admin/access/login":
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session"}}}`)
+		case "/system/laporanUmum/data/lap":
+			var parameters []string
+			if err := json.Unmarshal([]byte(request.URL.Query().Get("p")), &parameters); err != nil {
+				t.Error(err)
+				response.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mutex.Lock()
+			requests = append(requests, parameters[4]+"/"+parameters[5])
+			mutex.Unlock()
+			values := make([]string, len(definition.RequiredHeaders))
+			_, _ = io.WriteString(response, strings.Join(definition.RequiredHeaders, "|")+"\n"+strings.Join(values, "|")+"\n")
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	client, err := fincloud.NewClient(fincloud.Config{BaseURL: server.URL, Username: "user", Password: "pass", LocationID: "001", RoleID: "role", HTTPTimeout: time.Second, InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &Executor{client: client}
+	requestCount := func() int {
+		mutex.Lock()
+		defer mutex.Unlock()
+		return len(requests)
+	}
+	run := func(fromValue, toValue string) (fixedMemberResult, []int) {
+		from, _ := ingestion.ParseCalendarDate(fromValue)
+		to, _ := ingestion.ParseCalendarDate(toValue)
+		plan, planErr := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: from, To: to}, ingestion.FrozenLocations{}, ingestion.FrozenAccountCodes{})
+		if planErr != nil {
+			t.Fatal(planErr)
+		}
+		requestOffset := requestCount()
+		var staged []int
+		result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], nil, func(_ context.Context, segment ingestionstore.FixedSegment) error {
+			if requestCount()-requestOffset != len(staged)+1 {
+				t.Fatalf("segment %d was not staged before next fetch", segment.Index)
+			}
+			staged = append(staged, segment.Index)
+			return nil
+		})
+		return result, staged
+	}
+	multi, staged := run("2026-01-01", "2026-02-01")
+	if multi.err != nil || multi.segments != 2 || multi.rows != 2 || !reflect.DeepEqual(staged, []int{0, 1}) {
+		t.Fatalf("multi result=%+v staged=%v", multi, staged)
+	}
+	single, staged := run("2026-02-02", "2026-02-02")
+	if single.err != nil || single.segments != 1 || single.rows != 1 || !reflect.DeepEqual(staged, []int{0}) {
+		t.Fatalf("single result=%+v staged=%v", single, staged)
 	}
 }
 

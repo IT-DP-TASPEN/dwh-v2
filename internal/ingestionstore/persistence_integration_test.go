@@ -4,10 +4,12 @@ package ingestionstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +24,119 @@ import (
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 	"github.com/shopspring/decimal"
 )
+
+// stageMemberFixture keeps existing integration fixtures compact while production uses
+// only incremental segment staging and explicit finalization.
+func stageMemberFixture(repository *FixedRepository, ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segments []FixedSegment) error {
+	segments = append([]FixedSegment(nil), segments...)
+	sort.Slice(segments, func(left, right int) bool { return segments[left].Index < segments[right].Index })
+	hash := sha256.New()
+	var rows uint64
+	for _, segment := range segments {
+		if err := repository.StageMemberSegment(ctx, definition, loadID, descriptor, segment); err != nil {
+			return err
+		}
+		rows += uint64(len(segment.SourceRows))
+		for _, row := range segment.SourceRows {
+			ingestion.WriteFixedMemberChecksumPart(hash, row.SourceRowChecksum)
+		}
+	}
+	var checksum [sha256.Size]byte
+	copy(checksum[:], hash.Sum(nil))
+	return repository.FinalizeMemberCandidate(ctx, definition, loadID, descriptor, len(segments), rows, checksum)
+}
+
+func TestFixedSegmentsStageIncrementallyAndFinalizeExplicitly(t *testing.T) {
+	db := integrationdb.Open(t)
+	resetFixed(t, db.DB)
+	definition := ingestion.FixedDefinitions()[5]
+	from, _ := ingestion.ParseCalendarDate("2026-01-01")
+	to, _ := ingestion.ParseCalendarDate("2026-03-31")
+	plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: from, To: to}, ingestion.FrozenLocations{}, ingestion.FrozenAccountCodes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := NewFixedRepository(db)
+	loadID, err := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := plan.Members[0]
+	first := FixedSegment{Index: 0, AsOfDate: from.AddDays(29), SourceRows: fixedRowsN(t, definition, 2, "first")}
+	empty := FixedSegment{Index: 1, AsOfDate: from.AddDays(59)}
+	last := FixedSegment{Index: 2, AsOfDate: to, SourceRows: fixedRowsN(t, definition, 1, "last")}
+	if err := repository.StageMemberSegment(context.Background(), definition, loadID, member, first); err != nil {
+		t.Fatal(err)
+	}
+	assertMember := func(wantStatus string, wantRows, wantSegments uint64) {
+		t.Helper()
+		var status string
+		var rows, segments uint64
+		if err := db.QueryRowx(`SELECT status,row_count,staged_segment_count FROM fixed_report_load_members WHERE load_id=? AND member_key=?`, loadID, member.MemberKey).Scan(&status, &rows, &segments); err != nil || status != wantStatus || rows != wantRows || segments != wantSegments {
+			t.Fatalf("member status=%s rows=%d segments=%d error=%v", status, rows, segments, err)
+		}
+	}
+	assertMember(fixedMemberPending, 2, 1)
+	if err := repository.promoteWithoutRunFence(context.Background(), definition, loadID); err == nil {
+		t.Fatal("partially staged member promoted")
+	}
+	if err := repository.StageMemberSegment(context.Background(), definition, loadID, member, empty); err != nil {
+		t.Fatal(err)
+	}
+	assertMember(fixedMemberPending, 2, 2)
+	if err := repository.StageMemberSegment(context.Background(), definition, loadID, member, empty); err == nil {
+		t.Fatal("duplicate empty segment staged")
+	}
+	outOfOrder := last
+	outOfOrder.Index = 3
+	if err := repository.StageMemberSegment(context.Background(), definition, loadID, member, outOfOrder); err == nil {
+		t.Fatal("out-of-order segment staged")
+	}
+	assertMember(fixedMemberPending, 2, 2)
+	if err := repository.StageMemberSegment(context.Background(), definition, loadID, member, last); err != nil {
+		t.Fatal(err)
+	}
+	assertMember(fixedMemberPending, 3, 3)
+
+	hash := sha256.New()
+	for _, segment := range []FixedSegment{first, empty, last} {
+		for _, row := range segment.SourceRows {
+			ingestion.WriteFixedMemberChecksumPart(hash, row.SourceRowChecksum)
+		}
+	}
+	var checksum [sha256.Size]byte
+	copy(checksum[:], hash.Sum(nil))
+	if err := repository.FinalizeMemberCandidate(context.Background(), definition, loadID, member, 2, 3, checksum); err == nil {
+		t.Fatal("wrong expected segment count finalized")
+	}
+	if err := repository.FinalizeMemberCandidate(context.Background(), definition, loadID, member, 3, 2, checksum); err == nil {
+		t.Fatal("wrong row count finalized")
+	}
+	if err := repository.FinalizeMemberCandidate(context.Background(), definition, loadID, member, 3, 3, checksum); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.FinalizeMemberCandidate(context.Background(), definition, loadID, member, 3, 3, checksum); err != nil {
+		t.Fatalf("exact finalization replay failed: %v", err)
+	}
+	assertMember(fixedMemberSuccess, 3, 3)
+
+	var original string
+	if err := db.Get(&original, `SELECT source_row_checksum FROM stg_fincloud_fund_distribution_reports WHERE load_id=? ORDER BY row_ordinal LIMIT 1`, loadID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE stg_fincloud_fund_distribution_reports SET source_row_checksum=REPEAT('0',64) WHERE load_id=? ORDER BY row_ordinal LIMIT 1`, loadID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.promoteWithoutRunFence(context.Background(), definition, loadID); err == nil {
+		t.Fatal("tampered staging passed independent Promote validation")
+	}
+	if _, err := db.Exec(`UPDATE stg_fincloud_fund_distribution_reports SET source_row_checksum=? WHERE load_id=? ORDER BY row_ordinal LIMIT 1`, original, loadID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.promoteWithoutRunFence(context.Background(), definition, loadID); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestFixedCompleteSetPromotionAndStaleOrdering(t *testing.T) {
 	db := integrationdb.Open(t)
@@ -40,21 +155,21 @@ func TestFixedCompleteSetPromotionAndStaleOrdering(t *testing.T) {
 	}
 	for _, member := range plan.Members {
 		rows := fixedRows(t, definition, member.SourceLocationID)
-		if err := repository.StageMember(context.Background(), definition, load1, member, []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: rows}}); err != nil {
+		if err := stageMemberFixture(repository, context.Background(), definition, load1, member, []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: rows}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := repository.promoteWithoutRunFence(context.Background(), definition, load1); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.StageMember(context.Background(), definition, load1, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}}); err == nil {
+	if err := stageMemberFixture(repository, context.Background(), definition, load1, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}}); err == nil {
 		t.Fatal("published load accepted member replacement")
 	}
 	load2, err := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.StageMember(context.Background(), definition, load2, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}}); err != nil {
+	if err := stageMemberFixture(repository, context.Background(), definition, load2, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.promoteWithoutRunFence(context.Background(), definition, load2); err == nil {
@@ -69,7 +184,7 @@ func TestFixedCompleteSetPromotionAndStaleOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, member := range plan.Members {
-		if err := repository.StageMember(context.Background(), definition, load3, member, []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, member.SourceLocationID)}}); err != nil {
+		if err := stageMemberFixture(repository, context.Background(), definition, load3, member, []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, member.SourceLocationID)}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -98,7 +213,7 @@ func TestFixedFirstPublicationRaceUsesMonotonicLoadID(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := repository.StageMember(context.Background(), definition, loads[index], plan.Members[0],
+		if err := stageMemberFixture(repository, context.Background(), definition, loads[index], plan.Members[0],
 			[]FixedSegment{{Index: 0, AsOfDate: to, SourceRows: fixedRows(t, definition, "")}}); err != nil {
 			t.Fatal(err)
 		}
@@ -146,7 +261,7 @@ func TestFixedConcurrentStagingJoinsBeforeAtomicPromotion(t *testing.T) {
 		rows := fixedRows(t, definition, member.SourceLocationID)
 		go func(member ingestion.RequestDescriptor) {
 			<-start
-			errorsFound <- repository.StageMember(context.Background(), definition, loadID, member,
+			errorsFound <- stageMemberFixture(repository, context.Background(), definition, loadID, member,
 				[]FixedSegment{{Index: 0, AsOfDate: date, SourceRows: rows}})
 		}(member)
 	}
@@ -180,9 +295,9 @@ func TestFixedConcurrentStagingJoinsBeforeAtomicPromotion(t *testing.T) {
 		if mode == "cancelled" {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			err = repository.StageMember(ctx, definition, candidate, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}})
+			err = stageMemberFixture(repository, ctx, definition, candidate, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}})
 		} else {
-			err = repository.StageMember(context.Background(), definition, candidate, plan.Members[0], []FixedSegment{{Index: -1, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}})
+			err = stageMemberFixture(repository, context.Background(), definition, candidate, plan.Members[0], []FixedSegment{{Index: -1, AsOfDate: date, SourceRows: fixedRows(t, definition, plan.Members[0].SourceLocationID)}})
 		}
 		if err == nil || repository.promoteWithoutRunFence(context.Background(), definition, candidate) == nil {
 			t.Fatalf("%s staging was publishable", mode)
@@ -233,7 +348,7 @@ func TestCoAConcurrentStagingUsesPendingMemberInvariant(t *testing.T) {
 			wantRows += count
 		}
 		for index := range 8 {
-			if err := repository.StageMember(context.Background(), definition, loadID, plan.Members[index], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: rowsByMember[index]}}); err != nil {
+			if err := stageMemberFixture(repository, context.Background(), definition, loadID, plan.Members[index], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: rowsByMember[index]}}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -259,7 +374,7 @@ func TestCoAConcurrentStagingUsesPendingMemberInvariant(t *testing.T) {
 	}
 }
 
-func TestCoAMemberReplacementAndSerialization(t *testing.T) {
+func TestCoAMemberDuplicateCompletionIsRejected(t *testing.T) {
 	db := integrationdb.Open(t)
 	resetFixed(t, db.DB)
 	definition := ingestion.FixedDefinitions()[4]
@@ -276,13 +391,13 @@ func TestCoAMemberReplacementAndSerialization(t *testing.T) {
 		t.Fatal(err)
 	}
 	stage := func(rows []ingestion.FixedCSVRow) error {
-		return repository.StageMember(context.Background(), definition, loadID, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: rows}})
+		return stageMemberFixture(repository, context.Background(), definition, loadID, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: rows}})
 	}
 	if err := stage(fixedRowsN(t, definition, 7, "first")); err != nil {
 		t.Fatal(err)
 	}
-	if err := stage(fixedRowsN(t, definition, 5, "replacement")); err != nil {
-		t.Fatal(err)
+	if err := stage(fixedRowsN(t, definition, 5, "replacement")); err == nil {
+		t.Fatal("completed member accepted replacement")
 	}
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -294,15 +409,15 @@ func TestCoAMemberReplacementAndSerialization(t *testing.T) {
 	}
 	close(start)
 	for range 2 {
-		if err := <-results; err != nil {
-			t.Fatal(err)
+		if err := <-results; err == nil {
+			t.Fatal("completed member accepted concurrent replacement")
 		}
 	}
 	var memberRows, stagedRows int
 	if err := db.Get(&memberRows, `SELECT row_count FROM fixed_report_load_members WHERE load_id=? AND member_key=?`, loadID, plan.Members[0].MemberKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Get(&stagedRows, `SELECT COUNT(*) FROM stg_fincloud_coa_movement_reports WHERE load_id=? AND member_key=?`, loadID, plan.Members[0].MemberKey); err != nil || stagedRows != memberRows || (stagedRows != 5 && stagedRows != 9) {
+	if err := db.Get(&stagedRows, `SELECT COUNT(*) FROM stg_fincloud_coa_movement_reports WHERE load_id=? AND member_key=?`, loadID, plan.Members[0].MemberKey); err != nil || stagedRows != memberRows || stagedRows != 7 {
 		t.Fatalf("staged rows=%d member rows=%d error=%v", stagedRows, memberRows, err)
 	}
 	if err := repository.promoteWithoutRunFence(context.Background(), definition, loadID); err != nil {
@@ -315,7 +430,7 @@ func TestCoAMemberReplacementAndSerialization(t *testing.T) {
 	}
 	duplicateRows := fixedRowsN(t, definition, 2, "duplicate")
 	duplicateRows[1].SourceRowNumber = duplicateRows[0].SourceRowNumber
-	if err := repository.StageMember(context.Background(), definition, failedLoadID, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: duplicateRows}}); err == nil {
+	if err := stageMemberFixture(repository, context.Background(), definition, failedLoadID, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: duplicateRows}}); err == nil {
 		t.Fatal("duplicate source rows staged")
 	}
 	var status string
@@ -328,7 +443,7 @@ func TestCoAMemberReplacementAndSerialization(t *testing.T) {
 	if _, err := db.Exec(`UPDATE fixed_report_load_members SET status='unexpected' WHERE load_id=? AND member_key=?`, failedLoadID, plan.Members[0].MemberKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.StageMember(context.Background(), definition, failedLoadID, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: fixedRowsN(t, definition, 1, "unexpected")}}); err == nil || !strings.Contains(err.Error(), "cannot stage") {
+	if err := stageMemberFixture(repository, context.Background(), definition, failedLoadID, plan.Members[0], []FixedSegment{{Index: 0, AsOfDate: to, SourceRows: fixedRowsN(t, definition, 1, "unexpected")}}); err == nil || !strings.Contains(err.Error(), "cannot stage") {
 		t.Fatalf("unexpected member status error=%v", err)
 	}
 }
@@ -344,7 +459,7 @@ func stageFixedConcurrently(t *testing.T, repository *FixedRepository, definitio
 		go func() {
 			defer workers.Done()
 			for job := range jobs {
-				results <- repository.StageMember(context.Background(), definition, loadID, members[job.index], []FixedSegment{{Index: 0, AsOfDate: asOfDate, SourceRows: rows[job.index]}})
+				results <- stageMemberFixture(repository, context.Background(), definition, loadID, members[job.index], []FixedSegment{{Index: 0, AsOfDate: asOfDate, SourceRows: rows[job.index]}})
 			}
 		}()
 	}

@@ -25,6 +25,7 @@ import (
 
 func TestJournalTransactionPartitionsPublishAtomically(t *testing.T) {
 	db := integrationdb.Open(t)
+	t.Cleanup(func() { _, _ = db.Exec(`DROP TRIGGER IF EXISTS fail_journal_segment`) })
 	catalog, err := ingestion.NewCatalog()
 	if err != nil {
 		t.Fatal(err)
@@ -66,6 +67,14 @@ func TestJournalTransactionPartitionsPublishAtomically(t *testing.T) {
 			currentMode := mode
 			requests = append(requests, strings.Join([]string{parameters[2], parameters[3], parameters[1]}, "/"))
 			mutex.Unlock()
+			if currentMode == "stage failure" && parameters[2] == "2099-01-01" && parameters[1] == "C" {
+				if _, err := db.Exec(`CREATE TRIGGER fail_journal_segment BEFORE INSERT ON stg_fincloud_journal_transaction_reports
+					FOR EACH ROW SIGNAL SQLSTATE '40001' SET MYSQL_ERRNO=1213, MESSAGE_TEXT='forced segment deadlock'`); err != nil {
+					t.Error(err)
+					response.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+			}
 			if currentMode == "late failure" && parameters[2] == "2099-01-31" && parameters[1] == "C" {
 				response.WriteHeader(http.StatusServiceUnavailable)
 				return
@@ -132,19 +141,20 @@ func TestJournalTransactionPartitionsPublishAtomically(t *testing.T) {
 	var load struct {
 		Status, MemberStatus string
 		Expected, Members    int
-		Rows, Staged, Final  uint64
+		Rows, Segments       uint64
+		Staged, Final        uint64
 		ChecksumBytes        int
 	}
 	if err := db.QueryRowx(`SELECT load_row.status,load_row.expected_member_count,COUNT(member.member_key),
-		MAX(member.status),MAX(member.row_count),MAX(OCTET_LENGTH(member.member_checksum)),
+		MAX(member.status),MAX(member.row_count),MAX(member.staged_segment_count),MAX(OCTET_LENGTH(member.member_checksum)),
 		(SELECT COUNT(*) FROM stg_fincloud_journal_transaction_reports WHERE load_id=load_row.id),
 		(SELECT COUNT(*) FROM fincloud_journal_transaction_reports WHERE load_id=load_row.id)
 		FROM fixed_report_loads load_row JOIN fixed_report_load_members member ON member.load_id=load_row.id
 		WHERE load_row.id=? GROUP BY load_row.id`, activeLoadID).Scan(&load.Status, &load.Expected, &load.Members, &load.MemberStatus,
-		&load.Rows, &load.ChecksumBytes, &load.Staged, &load.Final); err != nil {
+		&load.Rows, &load.Segments, &load.ChecksumBytes, &load.Staged, &load.Final); err != nil {
 		t.Fatal(err)
 	}
-	if load.Status != "published" || load.Expected != 1 || load.Members != 1 || load.MemberStatus != "success" || load.Rows != 4 || load.ChecksumBytes != 32 || load.Staged != 4 || load.Final != 4 {
+	if load.Status != "published" || load.Expected != 1 || load.Members != 1 || load.MemberStatus != "success" || load.Rows != 4 || load.Segments != 4 || load.ChecksumBytes != 32 || load.Staged != 4 || load.Final != 4 {
 		t.Fatalf("published load=%+v", load)
 	}
 
@@ -171,16 +181,47 @@ func TestJournalTransactionPartitionsPublishAtomically(t *testing.T) {
 	if err := db.Get(&stillActive, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, from.String(), to.String()); err != nil || stillActive != activeLoadID {
 		t.Fatalf("active load=%d want=%d error=%v", stillActive, activeLoadID, err)
 	}
-	var failedLoadID, failedStaged uint64
+	var failedLoadID, failedSegments, failedStaged uint64
 	var failedLoadStatus, failedMemberStatus string
-	if err := db.QueryRowx(`SELECT load_row.id,load_row.status,member.status,
+	if err := db.QueryRowx(`SELECT load_row.id,load_row.status,member.status,member.staged_segment_count,
 		(SELECT COUNT(*) FROM stg_fincloud_journal_transaction_reports WHERE load_id=load_row.id)
 		FROM fixed_report_loads load_row JOIN fixed_report_load_members member ON member.load_id=load_row.id
-		WHERE load_row.ingestion_run_id=?`, second.ID).Scan(&failedLoadID, &failedLoadStatus, &failedMemberStatus, &failedStaged); err != nil {
+		WHERE load_row.ingestion_run_id=?`, second.ID).Scan(&failedLoadID, &failedLoadStatus, &failedMemberStatus, &failedSegments, &failedStaged); err != nil {
 		t.Fatal(err)
 	}
-	if failedLoadID == activeLoadID || failedLoadStatus != "pending" || failedMemberStatus != "pending" || failedStaged != 0 {
-		t.Fatalf("failed load id=%d status=%s member=%s staged=%d", failedLoadID, failedLoadStatus, failedMemberStatus, failedStaged)
+	if failedLoadID == activeLoadID || failedLoadStatus != "pending" || failedMemberStatus != "pending" || failedSegments != 6 || failedStaged != 6 {
+		t.Fatalf("failed load id=%d status=%s member=%s segments=%d staged=%d", failedLoadID, failedLoadStatus, failedMemberStatus, failedSegments, failedStaged)
+	}
+
+	mutex.Lock()
+	mode, requests = "stage failure", nil
+	mutex.Unlock()
+	third, thirdOwner := submit('c')
+	thirdResult := executor.Execute(context.Background(), third, thirdOwner)
+	if _, err := db.Exec(`DROP TRIGGER IF EXISTS fail_journal_segment`); err != nil {
+		t.Fatal(err)
+	}
+	if thirdResult.Status != ingestionrun.StatusFailed || thirdResult.BusinessComplete || ingestionstore.TechnicalDiagnostic(thirdResult.Cause).TxAttempt != 3 {
+		t.Fatalf("third result=%+v diagnostic=%+v", thirdResult, ingestionstore.TechnicalDiagnostic(thirdResult.Cause))
+	}
+	if err := runs.Finish(context.Background(), third.ID, thirdOwner, thirdResult.Status, thirdResult.Error); err != nil {
+		t.Fatal(err)
+	}
+	mutex.Lock()
+	thirdRequests := append([]string(nil), requests...)
+	mutex.Unlock()
+	wantThirdRequests := []string{
+		"2099-01-01/2099-01-30/A", "2099-01-01/2099-01-30/B", "2099-01-01/2099-01-30/C",
+	}
+	if !reflect.DeepEqual(thirdRequests, wantThirdRequests) {
+		t.Fatalf("stage retry refetched source: requests=%v", thirdRequests)
+	}
+	var retrySegments, retryStaged uint64
+	if err := db.QueryRowx(`SELECT member.staged_segment_count,
+		(SELECT COUNT(*) FROM stg_fincloud_journal_transaction_reports WHERE load_id=load_row.id)
+		FROM fixed_report_loads load_row JOIN fixed_report_load_members member ON member.load_id=load_row.id
+		WHERE load_row.ingestion_run_id=?`, third.ID).Scan(&retrySegments, &retryStaged); err != nil || retrySegments != 2 || retryStaged != 2 {
+		t.Fatalf("retry segments=%d staged=%d error=%v", retrySegments, retryStaged, err)
 	}
 }
 

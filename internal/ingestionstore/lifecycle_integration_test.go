@@ -120,7 +120,7 @@ func TestFixedPublicationRollsBackWhenFinalOwnershipFenceMisses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, member := range plan.Members {
-		if err := repository.StageMember(context.Background(), definition, loadID, member,
+		if err := stageMemberFixture(repository, context.Background(), definition, loadID, member,
 			[]FixedSegment{{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, "")}}); err != nil {
 			t.Fatal(err)
 		}
@@ -139,6 +139,91 @@ func TestFixedPublicationRollsBackWhenFinalOwnershipFenceMisses(t *testing.T) {
 	if err := db.Get(&rows, "SELECT COUNT(*) FROM `"+storage.finalTable+"` WHERE load_id=?", loadID); err != nil || publications != 0 || rows != 0 {
 		t.Fatalf("rolled-back fixed publication: publications=%d rows=%d error=%v", publications, rows, err)
 	}
+}
+
+func TestRecoveredFixedRunUsesFreshLoadWithoutSegmentResume(t *testing.T) {
+	db := integrationdb.Open(t)
+	resetFixed(t, db.DB)
+	catalog, _ := ingestion.NewCatalog()
+	runs, _ := ingestionrun.NewRepository(db, catalog)
+	definition := ingestion.FixedDefinitions()[0]
+	date, _ := ingestion.ParseCalendarDate("2026-08-26")
+	plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: date, To: date}, ingestion.FrozenLocations{}, ingestion.FrozenAccountCodes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wasEnabled bool
+	if err := db.Get(&wasEnabled, `SELECT enabled FROM source_settings WHERE source_id=?`, definition.Key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE source_settings SET enabled=TRUE WHERE source_id=?`, definition.Key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`UPDATE source_settings SET enabled=? WHERE source_id=?`, wasEnabled, definition.Key)
+	})
+
+	oldOwner := strings.Repeat("8", 64)
+	oldRun := insertOwnedStoreRun(t, db, definition.Key, oldOwner)
+	repository := NewFixedRepository(db)
+	oldLoad, err := repository.BeginLoad(context.Background(), oldRun, definition, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segment := FixedSegment{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, "")}
+	if err := repository.StageMemberSegment(context.Background(), definition, oldLoad, plan.Members[0], segment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE ingestion_runs SET heartbeat_at=UTC_TIMESTAMP(6)-INTERVAL 10 MINUTE WHERE id=?`, oldRun); err != nil {
+		t.Fatal(err)
+	}
+	if recovered, err := runs.RecoverOneStale(context.Background(), 2*time.Minute, strings.Repeat("9", 64)); err != nil || recovered == nil || recovered.RunID != oldRun {
+		t.Fatalf("recovery=%+v error=%v", recovered, err)
+	}
+
+	parameters, err := ingestionrun.NewRangeExecution(definition.Key, date, date)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRunID, err := runs.Submit(context.Background(), definition.Key, parameters, ingestionrun.TriggerDirect, "fresh-after-recovery", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newOwner := strings.Repeat("a", 64)
+	newRun, err := runs.Claim(context.Background(), newOwner)
+	if err != nil || newRun == nil || newRun.ID != newRunID {
+		t.Fatalf("claim=%+v error=%v", newRun, err)
+	}
+	newLoad, err := repository.BeginLoad(context.Background(), newRunID, definition, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newLoad == oldLoad {
+		t.Fatal("recovered execution reused partial Fixed load")
+	}
+	var oldSegments, newSegments uint64
+	if err := db.Get(&oldSegments, `SELECT staged_segment_count FROM fixed_report_load_members WHERE load_id=?`, oldLoad); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&newSegments, `SELECT staged_segment_count FROM fixed_report_load_members WHERE load_id=?`, newLoad); err != nil || oldSegments != 1 || newSegments != 0 {
+		t.Fatalf("old segments=%d new segments=%d error=%v", oldSegments, newSegments, err)
+	}
+	result, err := repository.CleanupTerminal(context.Background(), 100)
+	if err != nil || result.Rows != 1 {
+		t.Fatalf("cleanup=%+v error=%v", result, err)
+	}
+	storage, _ := fixedStorageFor(definition)
+	var oldRows, newRows int
+	if err := db.Get(&oldRows, "SELECT COUNT(*) FROM `"+storage.stagingTable+"` WHERE load_id=?", oldLoad); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&newRows, "SELECT COUNT(*) FROM `"+storage.stagingTable+"` WHERE load_id=?", newLoad); err != nil || oldRows != 0 || newRows != 0 {
+		t.Fatalf("old staging=%d new staging=%d error=%v", oldRows, newRows, err)
+	}
+	t.Cleanup(func() {
+		resetFixed(t, db.DB)
+		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, newRunID)
+	})
 }
 
 func TestMaintenanceSnapshotRollsBackWhenFinalOwnershipFenceMisses(t *testing.T) {

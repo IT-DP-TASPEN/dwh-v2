@@ -3,6 +3,7 @@ package ingestion
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -163,6 +164,33 @@ func TestFixedManifestCanonicalGolden(t *testing.T) {
 	const want = "00c5ca8db9364afbcec149515f30f98353d879c33d8e254dad2f0a30cc109e3b"
 	if got := hex.EncodeToString(checksum[:]); got != want {
 		t.Fatalf("manifest checksum = %s", got)
+	}
+}
+
+func TestFixedMemberChecksumFramingGolden(t *testing.T) {
+	digest := func(segments ...[]string) string {
+		hash := sha256.New()
+		for _, segment := range segments {
+			for _, checksum := range segment {
+				WriteFixedMemberChecksumPart(hash, checksum)
+			}
+		}
+		return hex.EncodeToString(hash.Sum(nil))
+	}
+	a, b, c := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	const golden = "fb289c1c59f0f2f8f44c9bfe67ee313657b9ccbd662897cecbf6ba3bd5636a81"
+	if got := digest([]string{a, b}, nil, []string{c}); got != golden {
+		t.Fatalf("member checksum=%s want=%s", got, golden)
+	}
+	const empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if got := digest(nil, nil, nil); got != empty {
+		t.Fatalf("empty member checksum=%s want=%s", got, empty)
+	}
+	if withBoundaries, compact := digest(nil, []string{a, b}, nil, []string{c}, nil), digest([]string{a, b, c}); withBoundaries != compact || compact != golden {
+		t.Fatalf("segment boundaries changed checksum: boundaries=%s compact=%s", withBoundaries, compact)
+	}
+	if reordered := digest([]string{b, a, c}); reordered == golden {
+		t.Fatal("row order did not change member checksum")
 	}
 }
 

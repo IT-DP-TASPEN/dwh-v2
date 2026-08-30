@@ -83,6 +83,14 @@ func writeManifestString(buffer *bytes.Buffer, value string) {
 	buffer.WriteString(value)
 }
 
+// WriteFixedMemberChecksumPart preserves the member-checksum framing contract.
+func WriteFixedMemberChecksumPart(writer io.Writer, sourceRowChecksum string) {
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(sourceRowChecksum)))
+	_, _ = writer.Write(length[:])
+	_, _ = writer.Write([]byte(sourceRowChecksum))
+}
+
 type FixedPlan struct {
 	JobKey            string
 	Range             FixedDateRangeParams

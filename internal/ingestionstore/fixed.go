@@ -5,11 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/binary"
 	"fmt"
 	"hash"
 	"reflect"
-	"sort"
 	"strings"
 	"time"
 
@@ -180,7 +178,7 @@ func (repository *FixedRepository) beginLoadTransaction(ctx context.Context, tx 
 	return uint64(loadID), nil
 }
 
-func (repository *FixedRepository) StageMember(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segments []FixedSegment) error {
+func (repository *FixedRepository) StageMemberSegment(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segment FixedSegment) error {
 	if repository == nil || repository.db == nil {
 		return fmt.Errorf("fixed repository is not configured")
 	}
@@ -188,33 +186,31 @@ func (repository *FixedRepository) StageMember(ctx context.Context, definition i
 	if err != nil {
 		return err
 	}
-	if loadID == 0 || descriptor.MemberKey == "" || len(segments) == 0 {
-		return fmt.Errorf("load, member, and at least one source segment are required")
+	if loadID == 0 || descriptor.MemberKey == "" {
+		return fmt.Errorf("load and member are required")
 	}
-	err = retryReplaySafeTx(ctx, repository.db, "stage_fixed_member", func(tx *sqlx.Tx) error {
-		return wrapDatabaseError(repository.stageMemberTransaction(ctx, tx, specification, definition, loadID, descriptor, segments),
-			"stage_fixed_member", "insert_staging_rows", specification.stagingTable, 0, 0)
+	err = retryReplaySafeTx(ctx, repository.db, "stage_fixed_member_segment", func(tx *sqlx.Tx) error {
+		return wrapDatabaseError(repository.stageMemberSegmentTransaction(ctx, tx, specification, definition, loadID, descriptor, segment),
+			"stage_fixed_member_segment", "insert_staging_rows", specification.stagingTable, 0, 0)
 	})
-	return wrapDatabaseError(err, "stage_fixed_member", "insert_staging_rows", specification.stagingTable, 0, 0)
+	return wrapDatabaseError(err, "stage_fixed_member_segment", "insert_staging_rows", specification.stagingTable, 0, 0)
 }
 
-func (repository *FixedRepository) stageMemberTransaction(ctx context.Context, tx *sqlx.Tx, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segments []FixedSegment) error {
+func (repository *FixedRepository) stageMemberSegmentTransaction(ctx context.Context, tx *sqlx.Tx, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segment FixedSegment) error {
 	memberKey := descriptor.MemberKey
-	var memberStatus string
-	if err := tx.GetContext(ctx, &memberStatus, `SELECT status FROM fixed_report_load_members WHERE load_id = ? AND member_key = ? FOR UPDATE`, loadID, memberKey); err != nil {
+	var member struct {
+		Status       string `db:"status"`
+		RowCount     uint64 `db:"row_count"`
+		SegmentCount uint64 `db:"staged_segment_count"`
+	}
+	if err := tx.GetContext(ctx, &member, `SELECT status,row_count,staged_segment_count FROM fixed_report_load_members WHERE load_id = ? AND member_key = ? FOR UPDATE`, loadID, memberKey); err != nil {
 		return fmt.Errorf("lock fixed member: %w", err)
 	}
-	switch memberStatus {
-	case fixedMemberPending:
-		// BeginLoad creates pending members without staging rows, and staging plus
-		// the success transition commit atomically. Avoid an empty range DELETE:
-		// under REPEATABLE READ it gap-locks concurrent members' insert range.
-	case fixedMemberSuccess:
-		if _, err := tx.ExecContext(ctx, "DELETE FROM `"+specification.stagingTable+"` WHERE load_id = ? AND member_key = ?", loadID, memberKey); err != nil {
-			return fmt.Errorf("clear fixed member staging: %w", err)
-		}
-	default:
-		return fmt.Errorf("fixed member status %q cannot stage", memberStatus)
+	if member.Status != fixedMemberPending {
+		return fmt.Errorf("fixed member status %q cannot stage", member.Status)
+	}
+	if segment.Index < 0 || uint64(segment.Index) != member.SegmentCount || segment.AsOfDate.IsZero() {
+		return fmt.Errorf("invalid or out-of-order fixed source segment %d; want %d", segment.Index, member.SegmentCount)
 	}
 	var loadRange struct {
 		JobKey string `db:"job_key"`
@@ -223,7 +219,7 @@ func (repository *FixedRepository) stageMemberTransaction(ctx context.Context, t
 		Status string `db:"status"`
 	}
 	// Promote is the only parent transition, and the executor joins every
-	// StageMember call before invoking it. This consistent read therefore cannot
+	// member call before invoking it. This consistent read therefore cannot
 	// overlap a parent status change for the same load.
 	if err := tx.GetContext(ctx, &loadRange, `SELECT job_key, DATE_FORMAT(period_from, '%Y-%m-%d') period_from,
 		DATE_FORMAT(period_to, '%Y-%m-%d') period_to, status FROM fixed_report_loads WHERE id = ?`, loadID); err != nil {
@@ -236,42 +232,87 @@ func (repository *FixedRepository) stageMemberTransaction(ctx context.Context, t
 	if specification.sourceLocation {
 		columns = append(columns[:10], append([]string{"source_location_id"}, columns[10:]...)...)
 	}
-	segments = append([]FixedSegment(nil), segments...)
-	sort.Slice(segments, func(left, right int) bool { return segments[left].Index < segments[right].Index })
-	rows := make([][]any, 0)
-	memberHash := sha256.New()
-	var ordinal uint64
-	for _, segment := range segments {
-		if segment.Index < 0 || segment.AsOfDate.IsZero() {
-			return fmt.Errorf("invalid fixed source segment")
+	rows := make([][]any, 0, len(segment.SourceRows))
+	for index, row := range segment.SourceRows {
+		if row.SourceRowNumber < 2 || len(row.SourceRowChecksum) != 64 {
+			return fmt.Errorf("invalid fixed source row")
 		}
-		for _, row := range segment.SourceRows {
-			if row.SourceRowNumber < 2 || len(row.SourceRowChecksum) != 64 {
-				return fmt.Errorf("invalid fixed source row")
+		ordinal := member.RowCount + uint64(index) + 1
+		values := []any{loadID, memberKey, ordinal, segment.Index, row.SourceRowNumber, row.SourceRowChecksum, segment.FileName}
+		values = append(values, loadRange.From, loadRange.To, segment.AsOfDate.String())
+		if specification.sourceLocation {
+			if descriptor.SourceLocationID == "" || row.SourceLocationID != descriptor.SourceLocationID {
+				return fmt.Errorf("source location %q does not match descriptor %q", row.SourceLocationID, descriptor.SourceLocationID)
 			}
-			ordinal++
-			values := []any{loadID, memberKey, ordinal, segment.Index, row.SourceRowNumber, row.SourceRowChecksum, segment.FileName}
-			values = append(values, loadRange.From, loadRange.To, segment.AsOfDate.String())
-			if specification.sourceLocation {
-				if descriptor.SourceLocationID == "" || row.SourceLocationID != descriptor.SourceLocationID {
-					return fmt.Errorf("source location %q does not match descriptor %q", row.SourceLocationID, descriptor.SourceLocationID)
-				}
-				values = append(values, row.SourceLocationID)
-			}
-			for _, header := range definition.RequiredHeaders {
-				values = append(values, row.Values[header])
-			}
-			rows = append(rows, values)
-			writeChecksumPart(memberHash, row.SourceRowChecksum)
+			values = append(values, row.SourceLocationID)
 		}
+		for _, header := range definition.RequiredHeaders {
+			values = append(values, row.Values[header])
+		}
+		rows = append(rows, values)
 	}
 	if err := insertRows(ctx, tx, specification.stagingTable, columns, rows); err != nil {
 		return err
 	}
-	checksum := memberHash.Sum(nil)
 	if _, err := tx.ExecContext(ctx, `UPDATE fixed_report_load_members
-		SET status = ?, row_count = ?, member_checksum = ?
-		WHERE load_id = ? AND member_key = ?`, fixedMemberSuccess, len(rows), checksum, loadID, memberKey); err != nil {
+		SET row_count = ?, staged_segment_count = ?
+		WHERE load_id = ? AND member_key = ?`, member.RowCount+uint64(len(rows)), member.SegmentCount+1, loadID, memberKey); err != nil {
+		return fmt.Errorf("advance fixed member staging: %w", err)
+	}
+	return nil
+}
+
+func (repository *FixedRepository) FinalizeMemberCandidate(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, expectedSegments int, rowCount uint64, checksum [sha256.Size]byte) error {
+	if repository == nil || repository.db == nil {
+		return fmt.Errorf("fixed repository is not configured")
+	}
+	if _, err := fixedStorageFor(definition); err != nil {
+		return err
+	}
+	if loadID == 0 || descriptor.MemberKey == "" || expectedSegments < 1 {
+		return fmt.Errorf("load, member, and positive expected segment count are required")
+	}
+	err := retryReplaySafeTx(ctx, repository.db, "finalize_fixed_member_candidate", func(tx *sqlx.Tx) error {
+		return repository.finalizeMemberCandidateTransaction(ctx, tx, definition, loadID, descriptor, expectedSegments, rowCount, checksum)
+	})
+	return wrapDatabaseError(err, "finalize_fixed_member_candidate", "complete_fixed_member", "fixed_report_load_members", 0, 0)
+}
+
+func (repository *FixedRepository) finalizeMemberCandidateTransaction(ctx context.Context, tx *sqlx.Tx, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, expectedSegments int, rowCount uint64, checksum [sha256.Size]byte) error {
+	var member struct {
+		Status       string `db:"status"`
+		RowCount     uint64 `db:"row_count"`
+		SegmentCount uint64 `db:"staged_segment_count"`
+		Checksum     []byte `db:"member_checksum"`
+	}
+	if err := tx.GetContext(ctx, &member, `SELECT status,row_count,staged_segment_count,member_checksum
+		FROM fixed_report_load_members WHERE load_id=? AND member_key=? FOR UPDATE`, loadID, descriptor.MemberKey); err != nil {
+		return fmt.Errorf("lock fixed member: %w", err)
+	}
+	if member.Status == fixedMemberSuccess {
+		if member.SegmentCount == uint64(expectedSegments) && member.RowCount == rowCount && bytes.Equal(member.Checksum, checksum[:]) {
+			return nil
+		}
+		return fmt.Errorf("completed fixed member metadata does not match")
+	}
+	if member.Status != fixedMemberPending {
+		return fmt.Errorf("fixed member status %q cannot finalize", member.Status)
+	}
+	var load struct {
+		JobKey string `db:"job_key"`
+		Status string `db:"status"`
+	}
+	if err := tx.GetContext(ctx, &load, `SELECT job_key,status FROM fixed_report_loads WHERE id=?`, loadID); err != nil {
+		return fmt.Errorf("read fixed load: %w", err)
+	}
+	if load.JobKey != definition.Key || load.Status != fixedLoadPending {
+		return fmt.Errorf("fixed load is not pending for job %s", definition.Key)
+	}
+	if member.SegmentCount != uint64(expectedSegments) || member.RowCount != rowCount {
+		return fmt.Errorf("fixed member staged count does not match completed candidate")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE fixed_report_load_members SET status=?,member_checksum=?
+		WHERE load_id=? AND member_key=?`, fixedMemberSuccess, checksum[:], loadID, descriptor.MemberKey); err != nil {
 		return fmt.Errorf("complete fixed member: %w", err)
 	}
 	return nil
@@ -460,7 +501,7 @@ func validateStagedMembers(ctx context.Context, tx *sqlx.Tx, stagingTable string
 			return fmt.Errorf("staging contains unknown fixed member %q", key)
 		}
 		aggregate.count++
-		writeChecksumPart(aggregate.hash, checksum)
+		ingestion.WriteFixedMemberChecksumPart(aggregate.hash, checksum)
 	}
 	if err := queryRows.Close(); err != nil {
 		return err
@@ -519,13 +560,6 @@ func fixedStorageFor(definition ingestion.FixedDefinition) (fixedStorage, error)
 		columns[index] = ingestion.FixedColumnName(header)
 	}
 	return fixedStorage{finalTable: table, stagingTable: "stg_" + table, columns: columns, sourceLocation: definition.SourceLocationID}, nil
-}
-
-func writeChecksumPart(hash interface{ Write([]byte) (int, error) }, value string) {
-	var length [4]byte
-	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
-	_, _ = hash.Write(length[:])
-	_, _ = hash.Write([]byte(value))
 }
 
 func mustDate(value string) ingestion.CalendarDate {
