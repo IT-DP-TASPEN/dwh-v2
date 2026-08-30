@@ -79,6 +79,35 @@ func TestReportingMetadataRendersHumanReadableParameters(t *testing.T) {
 	}
 }
 
+func TestPrivilegedExportDownloadMetadataShowsBoundedProvenance(t *testing.T) {
+	metadata := audit.ReportExportDownloadedMetadata{
+		ReportTemplateID: 9, ReportName: "Balances", ExportJobID: 200, SubmittedByUserID: 2,
+		AccessPath: "report_exports.view_all", ArtifactName: "balances.xlsx", ArtifactType: "xlsx",
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := Record{ID: 10, Action: string(audit.ActionReportExportDownloaded), Metadata: encoded, CreatedAt: time.Now().UTC()}
+	view := record.Reporting()
+	if view == nil || view.ExportJobID != 200 || view.ExportRequesterUserID != 2 || view.ExportAccessPath != "report_exports.view_all" {
+		t.Fatalf("view=%+v", view)
+	}
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	if err := renderer.RenderPartial(response, http.StatusOK, "features/auditlogs/show", "content", render.PageData{Data: record}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Job #200", "Requester user ID 2", "Access: report_exports.view_all", "balances.xlsx"} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("audit view missing %q: %s", want, response.Body.String())
+		}
+	}
+}
+
 func (store *fakeStore) Count(_ context.Context, action string) (int64, error) {
 	store.action, store.countCalls = action, store.countCalls+1
 	return 101, nil

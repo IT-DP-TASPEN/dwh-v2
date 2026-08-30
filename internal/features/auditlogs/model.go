@@ -38,31 +38,33 @@ type IdentityView struct {
 }
 
 type ReportingView struct {
-	ReportTemplateID uint64
-	ReportName       string
-	ReportRevision   uint64
-	DatasourceID     uint64
-	DatasourceName   string
-	ExecutionMode    string
-	Draft            bool
-	Parameters       audit.ReportParametersMetadata
-	HasParameters    bool
-	ParametersTitle  string
-	Outcome          string
-	FailureStage     string
-	FailureClass     string
-	ReturnedRowCount *int
-	ResultTruncated  *bool
-	ResultState      string
-	TruncationReason string
-	DurationMS       int64
-	TargetKey        string
-	TargetLabel      string
-	OptionState      string
-	OptionCount      *int
-	ExportJobID      uint64
-	ArtifactName     string
-	ArtifactType     string
+	ReportTemplateID      uint64
+	ReportName            string
+	ReportRevision        uint64
+	DatasourceID          uint64
+	DatasourceName        string
+	ExecutionMode         string
+	Draft                 bool
+	Parameters            audit.ReportParametersMetadata
+	HasParameters         bool
+	ParametersTitle       string
+	Outcome               string
+	FailureStage          string
+	FailureClass          string
+	ReturnedRowCount      *int
+	ResultTruncated       *bool
+	ResultState           string
+	TruncationReason      string
+	DurationMS            int64
+	TargetKey             string
+	TargetLabel           string
+	OptionState           string
+	OptionCount           *int
+	ExportJobID           uint64
+	ExportRequesterUserID uint64
+	ExportAccessPath      string
+	ArtifactName          string
+	ArtifactType          string
 }
 
 func (record Record) Actor() IdentityView {
@@ -155,7 +157,8 @@ func (record Record) Reporting() *ReportingView {
 			return nil
 		}
 		view.ReportTemplateID, view.ReportName, view.DatasourceID = metadata.ReportTemplateID, metadata.ReportName, metadata.DatasourceID
-		view.ExportJobID, view.ArtifactName, view.ArtifactType = metadata.ExportJobID, metadata.ArtifactName, metadata.ArtifactType
+		view.ExportJobID, view.ExportRequesterUserID, view.ExportAccessPath = metadata.ExportJobID, metadata.SubmittedByUserID, metadata.AccessPath
+		view.ArtifactName, view.ArtifactType = metadata.ArtifactName, metadata.ArtifactType
 	default:
 		return nil
 	}

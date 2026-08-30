@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -16,18 +17,31 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/browserauth"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
+	"github.com/ibldzn/go-admin/internal/platform/pagination"
 	"github.com/ibldzn/go-admin/internal/platform/webutil"
 	"github.com/ibldzn/go-admin/internal/reportexport"
 	"github.com/ibldzn/go-admin/internal/reporting"
+	"github.com/ibldzn/go-admin/internal/securityctx"
 )
 
 type Handler struct {
 	admin           *adminshell.Shell
 	reports         *reporting.Repository
 	service         *reporting.Service
-	exports         *reportexport.Repository
+	exports         exportStore
 	storage         *reportexport.Storage
 	downloadTimeout time.Duration
+}
+
+const ExportPageSize = 100
+
+type exportStore interface {
+	Submit(context.Context, securityctx.Requester, reporting.Template, map[string]reporting.NormalizedValue, time.Time) (reportexport.Job, error)
+	CountVisible(context.Context, reportexport.Scope, uint64) (int64, error)
+	ListVisible(context.Context, reportexport.Scope, uint64, int, int) ([]reportexport.VisibleJob, error)
+	FindVisible(context.Context, uint64, reportexport.Scope, uint64) (reportexport.VisibleJob, error)
+	AuthorizeDownload(context.Context, uint64, uint64, bool) (reportexport.Job, reportexport.DownloadAccess, error)
+	RecordDownload(context.Context, securityctx.Requester, reportexport.Job, reportexport.DownloadAccess, time.Time) error
 }
 
 type ParameterView struct {
@@ -69,9 +83,22 @@ type runtimeParameter struct {
 	Current      []string        `json:"current"`
 	Present      bool            `json:"present"`
 }
-type ExportsData struct{ Rows []reportexport.Job }
+type ExportsData struct {
+	Rows                 []reportexport.VisibleJob
+	Scope                reportexport.Scope
+	CanViewAll           bool
+	Pagination           pagination.Page
+	AllURL, MineURL      string
+	PreviousURL, NextURL string
+}
 
-func NewHandler(admin *adminshell.Shell, reports *reporting.Repository, service *reporting.Service, exports *reportexport.Repository, storage *reportexport.Storage, downloadTimeout time.Duration) *Handler {
+type ExportDetailData struct {
+	Job         reportexport.VisibleJob
+	CanDownload bool
+	BackURL     string
+}
+
+func NewHandler(admin *adminshell.Shell, reports *reporting.Repository, service *reporting.Service, exports exportStore, storage *reportexport.Storage, downloadTimeout time.Duration) *Handler {
 	return &Handler{admin: admin, reports: reports, service: service, exports: exports, storage: storage, downloadTimeout: downloadTimeout}
 }
 
@@ -86,8 +113,10 @@ func (handler *Handler) RegisterRoutes(router chi.Router) {
 	router.With(handler.admin.RequirePermission(PermissionView)).Post("/reports/{id}/parameters/{key}/options", handler.Options)
 	router.With(handler.admin.RequirePermission(PermissionExecute)).Post("/reports/{id}/run", handler.Run)
 	router.With(handler.admin.RequirePermission(PermissionExport)).Post("/reports/{id}/export", handler.Export)
-	router.With(handler.admin.RequirePermission(PermissionExport)).Get("/exports", handler.Exports)
-	router.With(handler.admin.RequirePermission(PermissionExport)).Get("/exports/{id}/download", handler.Download)
+	readExports := handler.admin.RequireAnyPermission(PermissionExport, PermissionViewAllExports)
+	router.With(readExports).Get("/exports", handler.Exports)
+	router.With(readExports).Get("/exports/{id}", handler.ExportDetail)
+	router.With(readExports).Get("/exports/{id}/download", handler.Download)
 }
 
 func (handler *Handler) Show(writer http.ResponseWriter, request *http.Request) {
@@ -182,12 +211,65 @@ func writeOptionJSON(writer http.ResponseWriter, status int, result reporting.Op
 
 func (handler *Handler) Exports(writer http.ResponseWriter, request *http.Request) {
 	principal, _ := browserauth.CurrentPrincipal(request.Context())
-	rows, err := handler.exports.ListForUser(request.Context(), principal.UserID, 100)
+	canViewAll := principal.Can(PermissionViewAllExports)
+	scope, status := requestedExportScope(request.URL.Query().Get("scope"), canViewAll)
+	if status != 0 {
+		if status == http.StatusForbidden {
+			handler.admin.RenderPage(writer, request, status, "forbidden", "Forbidden", nil)
+		} else {
+			http.Error(writer, http.StatusText(status), status)
+		}
+		return
+	}
+	total, err := handler.exports.CountVisible(request.Context(), scope, principal.UserID)
+	if err != nil {
+		handler.admin.Internal(writer, request, "count report exports", err)
+		return
+	}
+	page := pagination.New(webutil.Page(request), ExportPageSize, total)
+	rows, err := handler.exports.ListVisible(request.Context(), scope, principal.UserID, page.PerPage, page.Offset())
 	if err != nil {
 		handler.admin.Internal(writer, request, "list report exports", err)
 		return
 	}
-	handler.admin.RenderPage(writer, request, 200, "features/reports/exports", "My report exports", ExportsData{Rows: rows})
+	data := ExportsData{
+		Rows: rows, Scope: scope, CanViewAll: canViewAll, Pagination: page,
+		AllURL: exportPageURL(reportexport.ScopeAll, 1), MineURL: exportPageURL(reportexport.ScopeMine, 1),
+		PreviousURL: exportPageURL(scope, page.Previous), NextURL: exportPageURL(scope, page.Next),
+	}
+	title := "My report exports"
+	if scope == reportexport.ScopeAll {
+		title = "All report exports"
+	}
+	handler.admin.RenderPage(writer, request, http.StatusOK, "features/reports/exports", title, data)
+}
+
+func (handler *Handler) ExportDetail(writer http.ResponseWriter, request *http.Request) {
+	id, ok := idParam(request)
+	if !ok {
+		handler.admin.NotFound(writer, request)
+		return
+	}
+	principal, _ := browserauth.CurrentPrincipal(request.Context())
+	scope := reportexport.ScopeMine
+	if principal.Can(PermissionViewAllExports) {
+		scope = reportexport.ScopeAll
+	}
+	backScope := scope
+	if request.URL.Query().Get("scope") == string(reportexport.ScopeMine) {
+		backScope = reportexport.ScopeMine
+	}
+	job, err := handler.exports.FindVisible(request.Context(), id, scope, principal.UserID)
+	if errors.Is(err, reporting.ErrNotFound) {
+		handler.admin.RenderPage(writer, request, http.StatusForbidden, "forbidden", "Forbidden", nil)
+		return
+	}
+	if err != nil {
+		handler.admin.Internal(writer, request, "find report export", err)
+		return
+	}
+	canDownload := job.Status == reportexport.StatusSucceeded && job.ArtifactDeletedAt == nil && job.ArtifactName != nil
+	handler.admin.RenderPage(writer, request, http.StatusOK, "features/reports/export", fmt.Sprintf("Export #%d", job.ID), ExportDetailData{Job: job, CanDownload: canDownload, BackURL: exportPageURL(backScope, 1)})
 }
 
 func (handler *Handler) Download(writer http.ResponseWriter, request *http.Request) {
@@ -197,12 +279,16 @@ func (handler *Handler) Download(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	principal, _ := browserauth.CurrentPrincipal(request.Context())
-	job, allowed, err := handler.exports.Downloadable(request.Context(), id, principal.UserID)
+	job, accessPath, err := handler.exports.AuthorizeDownload(request.Context(), id, principal.UserID, principal.Can(PermissionViewAllExports))
+	if errors.Is(err, reporting.ErrNotFound) || accessPath == "" {
+		handler.admin.RenderPage(writer, request, http.StatusForbidden, "forbidden", "Forbidden", nil)
+		return
+	}
 	if err != nil {
 		handler.admin.Internal(writer, request, "authorize report download", err)
 		return
 	}
-	if !allowed || job.ArtifactPath == nil || job.ArtifactName == nil {
+	if job.Status != reportexport.StatusSucceeded || job.ArtifactDeletedAt != nil || job.ArtifactPath == nil || job.ArtifactName == nil {
 		handler.admin.RenderPage(writer, request, http.StatusForbidden, "forbidden", "Forbidden", nil)
 		return
 	}
@@ -212,7 +298,7 @@ func (handler *Handler) Download(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	defer file.Close()
-	if err := handler.exports.RecordDownload(request.Context(), principal.SecurityContext(), job, time.Now().UTC()); err != nil {
+	if err := handler.exports.RecordDownload(request.Context(), principal.SecurityContext(), job, accessPath, time.Now().UTC()); err != nil {
 		handler.admin.Internal(writer, request, "audit report download", err)
 		return
 	}
@@ -228,6 +314,36 @@ func (handler *Handler) Download(writer http.ResponseWriter, request *http.Reque
 		writer.Header().Set("Content-Length", strconv.FormatUint(*job.ArtifactSize, 10))
 	}
 	http.ServeContent(writer, request, *job.ArtifactName, job.FinishedAtValue(), file)
+}
+
+func requestedExportScope(value string, canViewAll bool) (reportexport.Scope, int) {
+	switch value {
+	case "":
+		if canViewAll {
+			return reportexport.ScopeAll, 0
+		}
+		return reportexport.ScopeMine, 0
+	case string(reportexport.ScopeMine):
+		return reportexport.ScopeMine, 0
+	case string(reportexport.ScopeAll):
+		if !canViewAll {
+			return "", http.StatusForbidden
+		}
+		return reportexport.ScopeAll, 0
+	default:
+		return "", http.StatusBadRequest
+	}
+}
+
+func exportPageURL(scope reportexport.Scope, page int) string {
+	if page == 0 {
+		return ""
+	}
+	query := url.Values{"scope": {string(scope)}}
+	if page > 1 {
+		query.Set("page", strconv.Itoa(page))
+	}
+	return "/exports?" + query.Encode()
 }
 
 func (handler *Handler) authorized(writer http.ResponseWriter, request *http.Request) (reporting.Template, browserauth.Principal, bool) {

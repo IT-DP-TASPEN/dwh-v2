@@ -31,6 +31,8 @@ func TestPhaseFourNavigation(t *testing.T) {
 	}{
 		{name: "dashboard", path: "/", permissions: []string{ingestionfeature.PermissionView}, groups: 2, active: "dashboard"},
 		{name: "reporting only", path: "/reports", permissions: []string{reports.PermissionView}, groups: 1, active: "reports"},
+		{name: "exporter exports", path: "/exports", permissions: []string{reports.PermissionExport}, groups: 1, active: "report-exports"},
+		{name: "oversight exports", path: "/exports", permissions: []string{reports.PermissionViewAllExports}, groups: 1, active: "report-exports"},
 		{name: "users", path: "/users/7", permissions: []string{users.PermissionView}, groups: 1, active: "users"},
 		{name: "roles", path: "/roles/7", permissions: []string{roles.PermissionView}, groups: 1, active: "roles", open: "access-control"},
 		{name: "audit", path: "/audit-logs/7", permissions: []string{auditlogs.PermissionView}, groups: 1, active: "audit-logs"},
@@ -60,8 +62,8 @@ func TestPhaseFourNavigation(t *testing.T) {
 
 func TestPermissionAggregation(t *testing.T) {
 	definitions := PermissionDefinitions()
-	if len(definitions) != 37 {
-		t.Fatalf("got %d permissions, want 37", len(definitions))
+	if len(definitions) != 38 {
+		t.Fatalf("got %d permissions, want 38", len(definitions))
 	}
 	if err := access.ValidateRegistry(definitions); err != nil {
 		t.Fatal(err)
@@ -81,7 +83,7 @@ func TestPermissionAggregation(t *testing.T) {
 		datasources.PermissionChangeState: true, datasources.PermissionTest: true,
 		reporttemplates.PermissionView: true, reporttemplates.PermissionCreate: true, reporttemplates.PermissionUpdate: true,
 		reporttemplates.PermissionChangeState: true, reporttemplates.PermissionManageAccess: true,
-		reports.PermissionView: true, reports.PermissionExecute: true, reports.PermissionExport: true,
+		reports.PermissionView: true, reports.PermissionExecute: true, reports.PermissionExport: true, reports.PermissionViewAllExports: true,
 	}
 	for _, definition := range definitions {
 		delete(want, definition.Key)

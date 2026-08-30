@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -17,6 +18,13 @@ import (
 )
 
 type Repository struct{ database *sqlx.DB }
+
+const visibleJobColumns = `
+	j.id,j.report_id,j.report_name,j.submitted_by_user_id,
+	u.name AS requester_name,u.username AS requester_username,
+	j.status,j.attempt,j.progress_rows,j.current_part,j.final_parts,j.total_rows,
+	j.artifact_name,j.artifact_type,j.artifact_size,j.artifact_expires_at,j.artifact_deleted_at,
+	j.failure_message,j.created_at,j.started_at,j.finished_at,j.updated_at`
 
 func NewRepository(database *sqlx.DB) (*Repository, error) {
 	if database == nil {
@@ -83,12 +91,64 @@ func (repository *Repository) Find(ctx context.Context, id uint64) (Job, error) 
 	return job, nil
 }
 
-func (repository *Repository) ListForUser(ctx context.Context, userID uint64, limit int) ([]Job, error) {
-	jobs := make([]Job, 0)
-	if err := repository.database.SelectContext(ctx, &jobs, `SELECT * FROM report_export_jobs WHERE submitted_by_user_id=? ORDER BY created_at DESC,id DESC LIMIT ?`, userID, limit); err != nil {
+func (repository *Repository) CountVisible(ctx context.Context, scope Scope, userID uint64) (int64, error) {
+	where, arguments, err := visibleScope(scope, userID)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	if err := repository.database.GetContext(ctx, &total, `SELECT COUNT(*) FROM report_export_jobs j`+where, arguments...); err != nil {
+		return 0, fmt.Errorf("count visible report exports: %w", err)
+	}
+	return total, nil
+}
+
+func (repository *Repository) ListVisible(ctx context.Context, scope Scope, userID uint64, limit, offset int) ([]VisibleJob, error) {
+	where, arguments, err := visibleScope(scope, userID)
+	if err != nil {
 		return nil, err
 	}
+	arguments = append(arguments, limit, offset)
+	jobs := make([]VisibleJob, 0)
+	statement := `SELECT ` + visibleJobColumns + ` FROM report_export_jobs j LEFT JOIN users u ON u.id=j.submitted_by_user_id` + where + ` ORDER BY j.created_at DESC,j.id DESC LIMIT ? OFFSET ?`
+	if err := repository.database.SelectContext(ctx, &jobs, statement, arguments...); err != nil {
+		return nil, fmt.Errorf("list visible report exports: %w", err)
+	}
 	return jobs, nil
+}
+
+func (repository *Repository) FindVisible(ctx context.Context, id uint64, scope Scope, userID uint64) (VisibleJob, error) {
+	where, arguments, err := visibleScope(scope, userID)
+	if err != nil {
+		return VisibleJob{}, err
+	}
+	arguments = append([]any{id}, arguments...)
+	var job VisibleJob
+	statement := `SELECT ` + visibleJobColumns + ` FROM report_export_jobs j LEFT JOIN users u ON u.id=j.submitted_by_user_id WHERE j.id=?`
+	if where != "" {
+		statement += ` AND ` + strings.TrimPrefix(where, ` WHERE `)
+	}
+	if err := repository.database.GetContext(ctx, &job, statement, arguments...); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return VisibleJob{}, reporting.ErrNotFound
+		}
+		return VisibleJob{}, fmt.Errorf("find visible report export: %w", err)
+	}
+	return job, nil
+}
+
+func visibleScope(scope Scope, userID uint64) (string, []any, error) {
+	switch scope {
+	case ScopeAll:
+		return "", nil, nil
+	case ScopeMine:
+		if userID == 0 {
+			return "", nil, fmt.Errorf("effective export viewer is required")
+		}
+		return ` WHERE j.submitted_by_user_id=?`, []any{userID}, nil
+	default:
+		return "", nil, fmt.Errorf("invalid report export scope %q", scope)
+	}
 }
 
 func (repository *Repository) HealthForUser(ctx context.Context, userID uint64) (Health, error) {
@@ -225,16 +285,37 @@ func (repository *Repository) eligible(ctx context.Context, userID, reportID, da
 	return eligible, err
 }
 
-func (repository *Repository) Downloadable(ctx context.Context, id, userID uint64) (Job, bool, error) {
+func (repository *Repository) AuthorizeDownload(ctx context.Context, id, userID uint64, viewAll bool) (Job, DownloadAccess, error) {
 	job, err := repository.Find(ctx, id)
 	if err != nil {
-		return Job{}, false, err
+		return Job{}, "", err
 	}
-	if job.SubmittedByUserID != userID || job.Status != StatusSucceeded || job.ArtifactDeletedAt != nil {
-		return job, false, nil
+	if job.SubmittedByUserID == userID {
+		eligible, eligibleErr := repository.eligible(ctx, userID, job.ReportID, 0, false)
+		if eligibleErr == nil {
+			if access := authorizedDownloadAccess(eligible, viewAll); access != "" {
+				return job, access, nil
+			}
+			return Job{}, "", nil
+		}
+		if eligibleErr != nil && !viewAll {
+			return Job{}, "", eligibleErr
+		}
 	}
-	eligible, err := repository.eligible(ctx, userID, job.ReportID, 0, false)
-	return job, eligible, err
+	if access := authorizedDownloadAccess(false, viewAll); access != "" {
+		return job, access, nil
+	}
+	return Job{}, "", nil
+}
+
+func authorizedDownloadAccess(ownerAllowed, viewAll bool) DownloadAccess {
+	if ownerAllowed {
+		return DownloadAccessOwner
+	}
+	if viewAll {
+		return DownloadAccessViewAll
+	}
+	return ""
 }
 
 func (repository *Repository) ReferencedArtifacts(ctx context.Context) (map[string]struct{}, error) {
@@ -262,12 +343,14 @@ func (repository *Repository) MarkArtifactDeleted(ctx context.Context, id uint64
 	return err
 }
 
-func (repository *Repository) RecordDownload(ctx context.Context, requester securityctx.Requester, job Job, now time.Time) error {
+func (repository *Repository) RecordDownload(ctx context.Context, requester securityctx.Requester, job Job, accessPath DownloadAccess, now time.Time) error {
 	metadata := audit.ReportExportDownloadedMetadata{
-		ReportTemplateID: job.ReportID,
-		ReportName:       job.ReportName,
-		DatasourceID:     job.DatasourceID,
-		ExportJobID:      job.ID,
+		ReportTemplateID:  job.ReportID,
+		ReportName:        job.ReportName,
+		DatasourceID:      job.DatasourceID,
+		ExportJobID:       job.ID,
+		SubmittedByUserID: job.SubmittedByUserID,
+		AccessPath:        string(accessPath),
 	}
 	if job.ArtifactName != nil {
 		metadata.ArtifactName = *job.ArtifactName

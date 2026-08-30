@@ -63,3 +63,27 @@ func TestSystemRoleMatrixIsDisabled(t *testing.T) {
 		t.Fatalf("admin matrix = %+v err=%v", detail.PermissionGroups, err)
 	}
 }
+
+func TestExportOversightPermissionCanBeGrantedAndRevoked(t *testing.T) {
+	definition := access.PermissionDefinition{
+		Key: "report_exports.view_all", Name: "View All Report Exports", Group: "Reports",
+		Description: "Inspect export jobs and download retained export artifacts requested by any user.",
+	}
+	store := &fakeStore{record: Record{ID: 7, Slug: "operations"}}
+	service := NewService(store, []access.PermissionDefinition{definition})
+	detail, err := service.Find(context.Background(), 7)
+	if err != nil || len(detail.PermissionGroups) != 1 || len(detail.PermissionGroups[0].Permissions) != 1 {
+		t.Fatalf("permission matrix=%+v err=%v", detail.PermissionGroups, err)
+	}
+	option := detail.PermissionGroups[0].Permissions[0]
+	if option.Key != definition.Key || option.Name != definition.Name || option.Description != definition.Description {
+		t.Fatalf("permission option=%+v", option)
+	}
+	requester := securityctx.Requester{Effective: securityctx.Identity{UserID: 1}, EffectiveRoleSlug: access.AdminRoleSlug}
+	if err := service.ReplacePermissions(context.Background(), requester, 7, []string{definition.Key}, time.Now()); err != nil || len(store.selected) != 1 || store.selected[0] != definition.Key {
+		t.Fatalf("grant selected=%v err=%v", store.selected, err)
+	}
+	if err := service.ReplacePermissions(context.Background(), requester, 7, nil, time.Now()); err != nil || len(store.selected) != 0 {
+		t.Fatalf("revoke selected=%v err=%v", store.selected, err)
+	}
+}

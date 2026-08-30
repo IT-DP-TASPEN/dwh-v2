@@ -29,7 +29,7 @@ import (
 )
 
 func PermissionDefinitions() []access.PermissionDefinition {
-	definitions := make([]access.PermissionDefinition, 0, 37)
+	definitions := make([]access.PermissionDefinition, 0, 38)
 	definitions = append(definitions, users.PermissionDefinitions()...)
 	definitions = append(definitions, roles.PermissionDefinitions()...)
 	definitions = append(definitions, auditlogs.PermissionDefinitions()...)

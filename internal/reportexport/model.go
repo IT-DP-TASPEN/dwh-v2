@@ -2,6 +2,7 @@ package reportexport
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/ibldzn/go-admin/internal/reporting"
@@ -14,6 +15,20 @@ const (
 	StatusRunning   Status = "running"
 	StatusSucceeded Status = "succeeded"
 	StatusFailed    Status = "failed"
+)
+
+type Scope string
+
+const (
+	ScopeMine Scope = "mine"
+	ScopeAll  Scope = "all"
+)
+
+type DownloadAccess string
+
+const (
+	DownloadAccessOwner   DownloadAccess = "owner"
+	DownloadAccessViewAll DownloadAccess = "report_exports.view_all"
 )
 
 type Job struct {
@@ -46,6 +61,38 @@ type Job struct {
 	StartedAt         *time.Time      `db:"started_at"`
 	FinishedAt        *time.Time      `db:"finished_at"`
 	UpdatedAt         time.Time       `db:"updated_at"`
+}
+
+type VisibleJob struct {
+	ID                uint64     `db:"id"`
+	ReportID          uint64     `db:"report_id"`
+	ReportName        string     `db:"report_name"`
+	SubmittedByUserID uint64     `db:"submitted_by_user_id"`
+	RequesterName     *string    `db:"requester_name"`
+	RequesterUsername *string    `db:"requester_username"`
+	Status            Status     `db:"status"`
+	Attempt           uint32     `db:"attempt"`
+	ProgressRows      uint64     `db:"progress_rows"`
+	CurrentPart       uint32     `db:"current_part"`
+	FinalParts        *uint32    `db:"final_parts"`
+	TotalRows         *uint64    `db:"total_rows"`
+	ArtifactName      *string    `db:"artifact_name"`
+	ArtifactType      *string    `db:"artifact_type"`
+	ArtifactSize      *uint64    `db:"artifact_size"`
+	ArtifactExpiresAt *time.Time `db:"artifact_expires_at"`
+	ArtifactDeletedAt *time.Time `db:"artifact_deleted_at"`
+	FailureMessage    *string    `db:"failure_message"`
+	CreatedAt         time.Time  `db:"created_at"`
+	StartedAt         *time.Time `db:"started_at"`
+	FinishedAt        *time.Time `db:"finished_at"`
+	UpdatedAt         time.Time  `db:"updated_at"`
+}
+
+func (job VisibleJob) RequesterDisplayName() string {
+	if job.RequesterName != nil && *job.RequesterName != "" {
+		return *job.RequesterName
+	}
+	return fmt.Sprintf("User #%d", job.SubmittedByUserID)
 }
 
 type Health struct {

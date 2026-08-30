@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
+	"github.com/ibldzn/go-admin/internal/platform/pagination"
 	"github.com/ibldzn/go-admin/internal/render"
 	"github.com/ibldzn/go-admin/internal/reportexport"
 	"github.com/ibldzn/go-admin/internal/reporting"
@@ -53,7 +54,8 @@ func TestReportResultAndExportsUseAdminTableAndStatusPatterns(t *testing.T) {
 
 	expires := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 	exports := httptest.NewRecorder()
-	data := ExportsData{Rows: []reportexport.Job{{ID: 3, ReportName: "Balances", Status: reportexport.StatusSucceeded, ArtifactExpiresAt: &expires}}}
+	artifactName := "balances.xlsx"
+	data := ExportsData{Rows: []reportexport.VisibleJob{{ID: 3, ReportName: "Balances", Status: reportexport.StatusSucceeded, ArtifactName: &artifactName, ArtifactExpiresAt: &expires}}, Scope: reportexport.ScopeMine, Pagination: pagination.New(1, ExportPageSize, 1)}
 	if err := renderer.RenderPage(exports, 200, "features/reports/exports", adminshell.PageData{Title: "Exports", AppName: "Test", Data: data}); err != nil {
 		t.Fatal(err)
 	}

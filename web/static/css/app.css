@@ -542,6 +542,9 @@
   .max-w-40 {
     max-width: calc(var(--spacing) * 40);
   }
+  .max-w-80 {
+    max-width: calc(var(--spacing) * 80);
+  }
   .max-w-\[calc\(100vw-1rem\)\] {
     max-width: calc(100vw - 1rem);
   }
@@ -550,6 +553,9 @@
   }
   .max-w-md {
     max-width: var(--container-md);
+  }
+  .max-w-prose {
+    max-width: 65ch;
   }
   .max-w-sm {
     max-width: var(--container-sm);

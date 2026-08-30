@@ -19,9 +19,10 @@ var ApplicationVersions = []int64{
 	20260826120000,
 	20260826150000,
 	20260827090000,
+	20260830120000,
 }
 
-const CurrentVersion int64 = 20260827090000
+const CurrentVersion int64 = 20260830120000
 
 type MigrationRecord struct {
 	Version int64 `db:"version_id"`
@@ -162,6 +163,7 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 		{"report_user_folders", "uq_report_user_folders_user_id"},
 		{"report_user_preferences", "idx_report_user_preferences_folder"},
 		{"report_user_preferences", "idx_report_user_preferences_starred"},
+		{"report_export_jobs", "idx_report_export_jobs_created"},
 	} {
 		var count int
 		if err := db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.STATISTICS

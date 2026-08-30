@@ -20,6 +20,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/platform/pagination"
 	"github.com/ibldzn/go-admin/internal/render"
+	"github.com/ibldzn/go-admin/internal/reportexport"
 	"github.com/ibldzn/go-admin/internal/reporting"
 	webfiles "github.com/ibldzn/go-admin/web"
 )
@@ -56,6 +57,8 @@ func main() {
 	mux.HandleFunc("/runs/", fixture.status)
 	mux.HandleFunc("/reports", fixture.reportsPage)
 	mux.HandleFunc("/reports/", fixture.reportMutation)
+	mux.HandleFunc("/exports", fixture.exportsPage)
+	mux.HandleFunc("/exports/", fixture.exportObject)
 	log.Printf("Run Details browser fixture listening on %s", address)
 	log.Fatal(http.ListenAndServe(address, mux))
 }
@@ -119,8 +122,115 @@ func fixtureNavigation(operational bool, path string) []navigation.GroupView {
 			navigation.GroupView{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.ItemView{{Key: "ingestion-overview", Label: "Overview", Icon: "activity", Path: "/ingestion", Depth: 1, Active: path == "/ingestion"}, {Key: "ingestion-runs", Label: "Runs", Icon: "history", Path: "/runs", Depth: 1}}},
 		)
 	}
-	groups = append(groups, navigation.GroupView{Key: "reporting", Label: "Reporting", Items: []navigation.ItemView{{Key: "reports", Label: "Reports", Icon: "file-chart-column", Path: "/reports", Depth: 1, Active: path == "/reports"}}})
+	groups = append(groups, navigation.GroupView{Key: "reporting", Label: "Reporting", Items: []navigation.ItemView{{Key: "reports", Label: "Reports", Icon: "file-chart-column", Path: "/reports", Depth: 1, Active: path == "/reports"}, {Key: "report-exports", Label: "Exports", Icon: "file-down", Path: "/exports", Depth: 1, Active: path == "/exports"}}})
 	return groups
+}
+
+func fixtureExports() []reportexport.VisibleJob {
+	now := time.Date(2026, 8, 30, 8, 0, 0, 0, time.UTC)
+	expires := now.Add(24 * time.Hour)
+	deleted := now.Add(time.Hour)
+	requesterA, usernameA := "User A", "user-a"
+	requesterB, usernameB := "User B", "user-b"
+	artifactA, artifactB, artifactMissing := "owned.xlsx", "cross-user.xlsx", "missing.xlsx"
+	kind := "xlsx"
+	size := uint64(8)
+	failure := "Export stopped because report execution failed."
+	return []reportexport.VisibleJob{
+		{ID: 203, ReportID: 13, ReportName: "Missing Artifact", SubmittedByUserID: 2, RequesterName: &requesterB, RequesterUsername: &usernameB, Status: reportexport.StatusSucceeded, ArtifactName: &artifactMissing, ArtifactType: &kind, ArtifactSize: &size, ArtifactExpiresAt: &expires, CreatedAt: now.Add(3 * time.Minute), StartedAt: timePointer(now.Add(4 * time.Minute)), FinishedAt: timePointer(now.Add(5 * time.Minute)), UpdatedAt: now.Add(5 * time.Minute), Attempt: 1, ProgressRows: 1},
+		{ID: 202, ReportID: 12, ReportName: "Expired Report", SubmittedByUserID: 2, RequesterName: &requesterB, RequesterUsername: &usernameB, Status: reportexport.StatusSucceeded, ArtifactDeletedAt: &deleted, CreatedAt: now.Add(2 * time.Minute), UpdatedAt: now.Add(6 * time.Minute), Attempt: 1},
+		{ID: 201, ReportID: 11, ReportName: "Failed Report", SubmittedByUserID: 2, RequesterName: &requesterB, RequesterUsername: &usernameB, Status: reportexport.StatusFailed, FailureMessage: &failure, CreatedAt: now.Add(time.Minute), FinishedAt: timePointer(now.Add(2 * time.Minute)), UpdatedAt: now.Add(2 * time.Minute), Attempt: 1},
+		{ID: 200, ReportID: 10, ReportName: "Cross-user Report", SubmittedByUserID: 2, RequesterName: &requesterB, RequesterUsername: &usernameB, Status: reportexport.StatusSucceeded, ArtifactName: &artifactB, ArtifactType: &kind, ArtifactSize: &size, ArtifactExpiresAt: &expires, CreatedAt: now, StartedAt: timePointer(now.Add(time.Minute)), FinishedAt: timePointer(now.Add(2 * time.Minute)), UpdatedAt: now.Add(2 * time.Minute), Attempt: 1, ProgressRows: 1},
+		{ID: 100, ReportID: 9, ReportName: "Owned Report", SubmittedByUserID: 1, RequesterName: &requesterA, RequesterUsername: &usernameA, Status: reportexport.StatusSucceeded, ArtifactName: &artifactA, ArtifactType: &kind, ArtifactSize: &size, ArtifactExpiresAt: &expires, CreatedAt: now.Add(-time.Minute), StartedAt: timePointer(now), FinishedAt: timePointer(now.Add(time.Minute)), UpdatedAt: now.Add(time.Minute), Attempt: 1, ProgressRows: 1},
+	}
+}
+
+func timePointer(value time.Time) *time.Time { return &value }
+
+func (fixture *fixture) exportsPage(writer http.ResponseWriter, request *http.Request) {
+	normal := request.URL.Query().Get("persona") == "normal"
+	scope := reportexport.ScopeAll
+	if normal {
+		scope = reportexport.ScopeMine
+	}
+	switch requested := request.URL.Query().Get("scope"); requested {
+	case "":
+	case string(reportexport.ScopeMine):
+		scope = reportexport.ScopeMine
+	case string(reportexport.ScopeAll):
+		if normal {
+			http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+		scope = reportexport.ScopeAll
+	default:
+		http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		return
+	}
+	rows := make([]reportexport.VisibleJob, 0)
+	for _, job := range fixtureExports() {
+		if scope == reportexport.ScopeAll || normal && job.SubmittedByUserID == 1 || !normal && job.SubmittedByUserID == 3 {
+			rows = append(rows, job)
+		}
+	}
+	page := pagination.New(1, reportsfeature.ExportPageSize, int64(len(rows)))
+	data := reportsfeature.ExportsData{
+		Rows: rows, Scope: scope, CanViewAll: !normal, Pagination: page,
+		AllURL: "/exports?scope=all", MineURL: "/exports?scope=mine",
+	}
+	pageData := adminshell.PageData{Title: "Exports", AppName: "Browser fixture", CurrentPath: "/exports", Navigation: fixtureNavigation(false, "/exports"), Data: data}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/reports/exports", "admin", pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (fixture *fixture) exportObject(writer http.ResponseWriter, request *http.Request) {
+	path := strings.TrimPrefix(request.URL.Path, "/exports/")
+	download := strings.HasSuffix(path, "/download")
+	if download {
+		path = strings.TrimSuffix(path, "/download")
+	}
+	id, err := strconv.ParseUint(path, 10, 64)
+	if err != nil || id == 0 {
+		http.NotFound(writer, request)
+		return
+	}
+	var job reportexport.VisibleJob
+	found := false
+	for _, candidate := range fixtureExports() {
+		if candidate.ID == id {
+			job, found = candidate, true
+			break
+		}
+	}
+	normal := request.URL.Query().Get("persona") == "normal"
+	if !found || normal && job.SubmittedByUserID != 1 {
+		http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+	if download {
+		if job.Status != reportexport.StatusSucceeded || job.ArtifactDeletedAt != nil || job.ArtifactName == nil {
+			http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+		if job.ID == 203 {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, *job.ArtifactName))
+		writer.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+		_, _ = writer.Write([]byte("artifact"))
+		return
+	}
+	backScope := reportexport.ScopeAll
+	if normal {
+		backScope = reportexport.ScopeMine
+	}
+	data := reportsfeature.ExportDetailData{Job: job, CanDownload: job.Status == reportexport.StatusSucceeded && job.ArtifactDeletedAt == nil && job.ArtifactName != nil, BackURL: "/exports?scope=" + string(backScope)}
+	pageData := adminshell.PageData{Title: fmt.Sprintf("Export #%d", job.ID), AppName: "Browser fixture", CurrentPath: "/exports", Navigation: fixtureNavigation(false, "/exports"), Data: data}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/reports/export", "admin", pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (fixture *fixture) runsPage(writer http.ResponseWriter, request *http.Request) {

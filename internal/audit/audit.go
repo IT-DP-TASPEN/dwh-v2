@@ -202,12 +202,14 @@ type ReportExportSubmittedMetadata struct {
 func (ReportExportSubmittedMetadata) auditMetadata() {}
 
 type ReportExportDownloadedMetadata struct {
-	ReportTemplateID uint64 `json:"report_template_id"`
-	ReportName       string `json:"report_name"`
-	DatasourceID     uint64 `json:"datasource_id"`
-	ExportJobID      uint64 `json:"export_job_id"`
-	ArtifactName     string `json:"artifact_name"`
-	ArtifactType     string `json:"artifact_type,omitempty"`
+	ReportTemplateID  uint64 `json:"report_template_id"`
+	ReportName        string `json:"report_name"`
+	DatasourceID      uint64 `json:"datasource_id"`
+	ExportJobID       uint64 `json:"export_job_id"`
+	SubmittedByUserID uint64 `json:"submitted_by_user_id,omitempty"`
+	AccessPath        string `json:"access_path,omitempty"`
+	ArtifactName      string `json:"artifact_name"`
+	ArtifactType      string `json:"artifact_type,omitempty"`
 }
 
 func (ReportExportDownloadedMetadata) auditMetadata() {}
