@@ -58,7 +58,7 @@ func (repository *Repository) ListUsers(ctx context.Context, query string, limit
 		statement += ` WHERE u.username LIKE ? ESCAPE '!' OR u.name LIKE ? ESCAPE '!'`
 		arguments = append(arguments, username, name)
 	}
-	statement += ` ORDER BY u.username ASC, u.id ASC LIMIT ? OFFSET ?`
+	statement += ` ORDER BY u.name ASC, u.username ASC, u.id ASC LIMIT ? OFFSET ?`
 	arguments = append(arguments, limit, offset)
 	users := make([]UserRecord, 0)
 	if err := repository.database.SelectContext(ctx, &users, statement, arguments...); err != nil {
