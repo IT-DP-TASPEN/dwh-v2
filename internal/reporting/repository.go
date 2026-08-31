@@ -445,7 +445,7 @@ func (repository *Repository) ListAccessUsers(ctx context.Context, reportID uint
 	}
 	arguments = append(arguments, limit, offset)
 	rows := make([]AccessUser, 0)
-	if err := repository.database.SelectContext(ctx, &rows, `SELECT u.id,u.username,u.name,(a.user_id IS NOT NULL) AS granted FROM users u LEFT JOIN report_template_user_access a ON a.user_id=u.id AND a.report_id=? WHERE u.is_active=TRUE`+where+` ORDER BY u.username,u.id LIMIT ? OFFSET ?`, arguments...); err != nil {
+	if err := repository.database.SelectContext(ctx, &rows, `SELECT u.id,u.username,u.name,(a.user_id IS NOT NULL) AS granted FROM users u LEFT JOIN report_template_user_access a ON a.user_id=u.id AND a.report_id=? WHERE u.is_active=TRUE`+where+` ORDER BY (a.user_id IS NOT NULL) DESC,u.name,u.username,u.id LIMIT ? OFFSET ?`, arguments...); err != nil {
 		return nil, 0, err
 	}
 	return rows, total, nil
