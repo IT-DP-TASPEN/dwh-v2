@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	MinPasswordCharacters = 12
+	MinPasswordCharacters = 8
 	MaxPasswordBytes      = 1024
 
 	argonMemory      = 64 * 1024
