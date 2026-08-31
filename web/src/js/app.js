@@ -192,6 +192,43 @@ Alpine.data("confirmationDialog", () => ({
   },
 }));
 
+Alpine.data("scheduleBulkActions", () => ({
+  visibleIDs: [],
+  selected: [],
+  frozen: [],
+  action: "",
+  init() {
+    this.visibleIDs = [...this.$root.querySelectorAll("[data-schedule-checkbox]")].map((input) => input.value);
+  },
+  get count() {
+    return this.selected.length;
+  },
+  get allSelected() {
+    return this.visibleIDs.length > 0 && this.selected.length === this.visibleIDs.length;
+  },
+  get partiallySelected() {
+    return this.selected.length > 0 && !this.allSelected;
+  },
+  toggleAll(checked) {
+    this.selected = checked ? [...this.visibleIDs] : [];
+  },
+  confirmAction(action) {
+    if (!this.count) return;
+    this.action = action;
+    this.frozen = [...this.selected];
+    const count = this.frozen.length;
+    const schedules = `${count} ${count === 1 ? "schedule" : "schedules"}`;
+    const copy = {
+      enable: [`Enable ${schedules}?`, "These schedules will become eligible for scheduler execution again.", `Enable ${schedules}`],
+      disable: [`Disable ${schedules}?`, "These schedules will stop being eligible for scheduler execution until enabled again.", `Disable ${schedules}`],
+      archive: [`Archive ${schedules}?`, "This action is permanent. Archived schedules cannot be enabled or restored.", `Archive ${schedules}`],
+    }[action];
+    if (!copy) return;
+    [this.$refs.form.dataset.confirmTitle, this.$refs.form.dataset.confirmMessage, this.$refs.form.dataset.confirmLabel] = copy;
+    this.$nextTick(() => this.$refs.form.requestSubmit());
+  },
+}));
+
 Alpine.data("copyDiagnostic", () => ({
   copied: false,
   async copy() {

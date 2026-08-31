@@ -83,6 +83,26 @@ func TestJobPolicyCompatibility(t *testing.T) {
 	}
 }
 
+func TestNormalizeBulkIDs(t *testing.T) {
+	ids, err := normalizeBulkIDs([]uint64{12, 10, 12, 11, 10})
+	if err != nil || len(ids) != 3 || ids[0] != 10 || ids[1] != 11 || ids[2] != 12 {
+		t.Fatalf("ids=%v error=%v", ids, err)
+	}
+	if _, err := normalizeBulkIDs(nil); !errors.Is(err, ErrInvalidSelection) {
+		t.Fatalf("empty error=%v", err)
+	}
+	if _, err := normalizeBulkIDs([]uint64{0}); !errors.Is(err, ErrInvalidSelection) {
+		t.Fatalf("zero error=%v", err)
+	}
+	tooMany := make([]uint64, MaxBulkSelection+1)
+	for index := range tooMany {
+		tooMany[index] = uint64(index + 1)
+	}
+	if _, err := normalizeBulkIDs(tooMany); !errors.Is(err, ErrInvalidSelection) {
+		t.Fatalf("oversized error=%v", err)
+	}
+}
+
 func TestOccurrenceParametersUseHistoricalJakartaBusinessDate(t *testing.T) {
 	catalog, err := ingestion.NewCatalog()
 	if err != nil {

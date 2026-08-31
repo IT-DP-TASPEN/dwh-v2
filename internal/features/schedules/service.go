@@ -60,6 +60,7 @@ func (service *Service) List(ctx context.Context, filter Filter, page int) (List
 	}
 	result := ListData{Rows: service.schedules(rows), Filter: filter, Pagination: info, Jobs: service.catalog.Jobs()}
 	result.PreviousURL, result.NextURL = listURL(filter, info.Previous), listURL(filter, info.Next)
+	result.ReturnQuery = strings.TrimPrefix(listURL(filter, info.Page), "/schedules")
 	return result, nil
 }
 
@@ -162,6 +163,10 @@ func (service *Service) Disable(ctx context.Context, id, revision, actor uint64,
 }
 func (service *Service) Archive(ctx context.Context, id, revision, actor uint64, requesters ...securityctx.Requester) (domain.Schedule, error) {
 	return service.domain.Archive(ctx, id, revision, &actor, requester(requesters))
+}
+
+func (service *Service) BulkState(ctx context.Context, ids []uint64, action domain.BulkAction, actor uint64, requesters ...securityctx.Requester) (domain.BulkStateResult, error) {
+	return service.domain.BulkState(ctx, ids, action, &actor, requester(requesters))
 }
 
 func requester(values []securityctx.Requester) *securityctx.Requester {

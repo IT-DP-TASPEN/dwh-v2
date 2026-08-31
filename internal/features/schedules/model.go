@@ -6,9 +6,10 @@ import (
 
 	core "github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/platform/pagination"
+	domain "github.com/ibldzn/go-admin/internal/scheduler"
 )
 
-const PageSize = 25
+const PageSize = domain.MaxBulkSelection
 
 type Filter struct{ Job, Enabled, Archived string }
 
@@ -93,12 +94,14 @@ type attemptRow struct {
 }
 
 type ListData struct {
-	Rows                 []Schedule
-	Filter               Filter
-	Pagination           pagination.Page
-	PreviousURL, NextURL string
-	Jobs                 []core.JobDefinition
-	CanCreate            bool
+	Rows                                               []Schedule
+	Filter                                             Filter
+	Pagination                                         pagination.Page
+	PreviousURL, NextURL                               string
+	ReturnQuery                                        string
+	Jobs                                               []core.JobDefinition
+	CanCreate, CanEnableDisable, CanArchive, CanSelect bool
+	SelectableCount                                    int
 }
 
 type DetailData struct {

@@ -9,6 +9,7 @@ func (handler *Handler) RegisterRoutes(router chi.Router) {
 	router.With(view, handler.admin.RequirePermission(PermissionCreate)).Get("/schedules/bulk/new", handler.BulkNew)
 	router.With(view, handler.admin.RequirePermission(PermissionCreate)).Post("/schedules", handler.Create)
 	router.With(view, handler.admin.RequirePermission(PermissionCreate)).Post("/schedules/bulk", handler.BulkCreate)
+	router.With(view, handler.admin.RequireAnyPermission(PermissionEnableDisable, PermissionArchive)).Post("/schedules/bulk-action", handler.BulkState)
 	router.With(view).Get("/schedules/{id}", handler.Show)
 	router.With(view, handler.admin.RequirePermission(PermissionUpdate)).Get("/schedules/{id}/edit", handler.Edit)
 	router.With(view, handler.admin.RequirePermission(PermissionUpdate)).Post("/schedules/{id}", handler.Update)

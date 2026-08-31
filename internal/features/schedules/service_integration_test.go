@@ -4,6 +4,7 @@ package schedules
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/ibldzn/go-admin/internal/access"
+	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	domain "github.com/ibldzn/go-admin/internal/scheduler"
 	"github.com/ibldzn/go-admin/internal/securityctx"
@@ -98,5 +100,81 @@ func TestScheduleManagementDerivesLiveDetailPolicy(t *testing.T) {
 	}
 	if len(events) != 7 || events[0].Action != "schedule.created" || events[4].Metadata != `{"from":"disabled","to":"enabled"}` || events[5].Metadata != `{"from":"enabled","to":"disabled"}` || events[6].Metadata != `{"from":"disabled","to":"archived"}` {
 		t.Fatalf("schedule events=%+v", events)
+	}
+}
+
+func TestBulkScheduleStateAuditAndRollback(t *testing.T) {
+	db := integrationdb.Open(t)
+	if err := access.Bootstrap(context.Background(), db, nil, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	role := integrationdb.Role(t, db, access.AdminRoleSlug)
+	actor := integrationdb.User(t, db, fmt.Sprintf("schedulebulkactor%d", time.Now().UnixNano()), role.ID, true)
+	requester := integrationdb.Requester(actor, role)
+	domainService, err := domain.New(db, func(context.Context, *sqlx.Tx, string, ingestionrun.Parameters, ingestionrun.Trigger, string, *uint64) (uint64, error) {
+		return 0, nil
+	}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(db, domainService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := service.Create(context.Background(), FormData{Name: "Bulk disabled", JobKey: "cif_detail", CronExpression: "0 1 * * *", Timezone: domain.DefaultTimezone}, actor.ID, requester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := service.Create(context.Background(), FormData{Name: "Bulk enabled", JobKey: "saving_detail", CronExpression: "0 2 * * *", Timezone: domain.DefaultTimezone, Enabled: true}, actor.ID, requester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollback, err := service.Create(context.Background(), FormData{Name: "Bulk rollback", JobKey: "loan_detail", CronExpression: "0 3 * * *", Timezone: domain.DefaultTimezone}, actor.ID, requester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []uint64{disabled.ID, enabled.ID, rollback.ID}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM audit_logs WHERE actor_user_id=?`, actor.ID)
+		for _, id := range ids {
+			_, _ = db.Exec(`DELETE FROM schedules WHERE id=?`, id)
+		}
+		_, _ = db.Exec(`DELETE FROM users WHERE id=?`, actor.ID)
+	})
+
+	result, err := service.BulkState(context.Background(), []uint64{disabled.ID, enabled.ID, disabled.ID, enabled.ID}, domain.BulkEnable, actor.ID, requester)
+	if err != nil || result != (domain.BulkStateResult{SelectedCount: 2, AffectedCount: 1, NoOpCount: 1}) {
+		t.Fatalf("bulk enable=%+v error=%v", result, err)
+	}
+	var event struct{ Action, Metadata string }
+	if err := db.Get(&event, `SELECT action,CAST(metadata AS CHAR) metadata FROM audit_logs WHERE actor_user_id=? AND action=?`, actor.ID, audit.ActionScheduleBulkEnable); err != nil {
+		t.Fatal(err)
+	}
+	if event.Action != string(audit.ActionScheduleBulkEnable) || event.Metadata != `{"selected_count": 2, "affected_count": 1, "no_op_count": 1}` && event.Metadata != `{"selected_count":2,"affected_count":1,"no_op_count":1}` {
+		t.Fatalf("bulk audit=%+v", event)
+	}
+
+	badRequester := securityctx.Requester{Actor: securityctx.Identity{UserID: actor.ID}, Effective: securityctx.Identity{UserID: actor.ID}}
+	if _, err := service.BulkState(context.Background(), []uint64{rollback.ID}, domain.BulkEnable, actor.ID, badRequester); err == nil {
+		t.Fatal("bulk mutation committed without valid audit identity")
+	}
+	unchanged, err := domainService.Get(context.Background(), rollback.ID)
+	if err != nil || unchanged.Enabled || unchanged.Revision != rollback.Revision {
+		t.Fatalf("audit rollback schedule=%+v error=%v", unchanged, err)
+	}
+
+	if _, err := service.BulkState(context.Background(), []uint64{enabled.ID}, domain.BulkArchive, actor.ID, requester); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.BulkState(context.Background(), []uint64{rollback.ID, enabled.ID}, domain.BulkEnable, actor.ID, requester); !errors.Is(err, domain.ErrArchived) {
+		t.Fatalf("archived mixed selection error=%v", err)
+	}
+	unchanged, err = domainService.Get(context.Background(), rollback.ID)
+	if err != nil || unchanged.Enabled || unchanged.Revision != rollback.Revision {
+		t.Fatalf("mixed rollback schedule=%+v error=%v", unchanged, err)
+	}
+	var bulkEvents int
+	if err := db.Get(&bulkEvents, `SELECT COUNT(*) FROM audit_logs WHERE actor_user_id=? AND action LIKE 'schedule.bulk_%'`, actor.ID); err != nil || bulkEvents != 2 {
+		t.Fatalf("bulk events=%d error=%v", bulkEvents, err)
 	}
 }

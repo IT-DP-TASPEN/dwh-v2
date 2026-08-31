@@ -554,6 +554,177 @@ func TestCreateManySerializesIdenticalConcurrentRequestsAndUsesNormalRuntime(t *
 	assertAttemptCount(t, db, scheduleID, 1)
 }
 
+func TestBulkStateClassifiesNoOpsBeforeTransitionValidationAndRejectsArchivedAtomically(t *testing.T) {
+	db, service := integrationService(t)
+	ctx := context.Background()
+	enabled, err := service.Create(ctx, bulkCreateInput("cif_opening_report", "0 1 * * *", "UTC", true, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := service.Create(ctx, bulkCreateInput("journal_transaction_report", "0 2 * * *", "UTC", false, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO schedule_occurrences
+		(schedule_id,scheduled_for,identity_source,resolution_mode,status,schedule_revision,job_key,cron_expression,timezone,
+		policy_kind,policy_version,policy_json,policy_checksum)
+		SELECT id,next_run_at,'validated_cron','historical','unresolved',revision,job_key,cron_expression,timezone,
+		policy_kind,policy_version,policy_json,policy_checksum FROM schedules WHERE id=?`, enabled.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schedules SET cron_expression='invalid cron' WHERE id=?`, enabled.ID); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.BulkState(ctx, []uint64{enabled.ID, disabled.ID, enabled.ID, disabled.ID}, BulkEnable, nil, nil)
+	if err != nil || result != (BulkStateResult{SelectedCount: 2, AffectedCount: 1, NoOpCount: 1}) {
+		t.Fatalf("bulk enable=%+v error=%v", result, err)
+	}
+	enabledAfter, err := service.Get(ctx, enabled.ID)
+	if err != nil || enabledAfter.Revision != enabled.Revision {
+		t.Fatalf("enabled no-op=%+v error=%v", enabledAfter, err)
+	}
+	disabledAfter, err := service.Get(ctx, disabled.ID)
+	if err != nil || !disabledAfter.Enabled || disabledAfter.Revision != disabled.Revision+1 || disabledAfter.NextRunAt == nil {
+		t.Fatalf("disabled transition=%+v error=%v", disabledAfter, err)
+	}
+	var activeStatus string
+	if err := db.Get(&activeStatus, `SELECT status FROM schedule_occurrences WHERE schedule_id=?`, enabled.ID); err != nil || activeStatus != "unresolved" {
+		t.Fatalf("enabled no-op occurrence=%q error=%v", activeStatus, err)
+	}
+
+	disabledNoOp, err := service.Create(ctx, bulkCreateInput("vault_mutation_report", "0 3 * * *", "UTC", false, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO schedule_occurrences
+		(schedule_id,scheduled_for,identity_source,resolution_mode,status,schedule_revision,job_key,cron_expression,timezone,
+		policy_kind,policy_version,policy_json,policy_checksum)
+		SELECT id,UTC_TIMESTAMP(6)-INTERVAL 1 DAY,'validated_cron','historical','unresolved',revision,job_key,cron_expression,timezone,
+		policy_kind,policy_version,policy_json,policy_checksum FROM schedules WHERE id=?`, disabledNoOp.ID); err != nil {
+		t.Fatal(err)
+	}
+	result, err = service.BulkState(ctx, []uint64{disabledNoOp.ID}, BulkDisable, nil, nil)
+	if err != nil || result != (BulkStateResult{SelectedCount: 1, NoOpCount: 1}) {
+		t.Fatalf("bulk disable no-op=%+v error=%v", result, err)
+	}
+	if err := db.Get(&activeStatus, `SELECT status FROM schedule_occurrences WHERE schedule_id=?`, disabledNoOp.ID); err != nil || activeStatus != "unresolved" {
+		t.Fatalf("disabled no-op occurrence=%q error=%v", activeStatus, err)
+	}
+
+	if _, err := service.BulkState(ctx, []uint64{enabled.ID}, BulkArchive, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	atomicCandidate, err := service.Create(ctx, bulkCreateInput("saving_detail", "0 4 * * *", "UTC", false, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.BulkState(ctx, []uint64{atomicCandidate.ID, enabled.ID}, BulkEnable, nil, nil); !errors.Is(err, ErrArchived) {
+		t.Fatalf("archived selection error=%v", err)
+	}
+	atomicAfter, err := service.Get(ctx, atomicCandidate.ID)
+	if err != nil || atomicAfter.Enabled || atomicAfter.Revision != atomicCandidate.Revision {
+		t.Fatalf("atomic candidate changed=%+v error=%v", atomicAfter, err)
+	}
+}
+
+func TestBulkStopPreservesAttemptsAndUsesCanonicalCursorBehavior(t *testing.T) {
+	db, service := integrationService(t)
+	ctx := context.Background()
+	due := time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC)
+	disabled := createDueSchedule(t, db, service, "bulk disable", "cif_opening_report", due)
+	archived := createDueSchedule(t, db, service, "bulk archive", "journal_transaction_report", due)
+	for _, schedule := range []Schedule{disabled, archived} {
+		if changed, err := service.process(ctx, schedule.ID); err != nil || !changed {
+			t.Fatalf("process schedule=%d changed=%v error=%v", schedule.ID, changed, err)
+		}
+	}
+	if result, err := service.BulkState(ctx, []uint64{disabled.ID}, BulkDisable, nil, nil); err != nil || result.AffectedCount != 1 {
+		t.Fatalf("disable result=%+v error=%v", result, err)
+	}
+	if result, err := service.BulkState(ctx, []uint64{archived.ID}, BulkArchive, nil, nil); err != nil || result.AffectedCount != 1 {
+		t.Fatalf("archive result=%+v error=%v", result, err)
+	}
+	for _, schedule := range []Schedule{disabled, archived} {
+		assertAttemptCount(t, db, schedule.ID, 1)
+		var status string
+		if err := db.Get(&status, `SELECT status FROM schedule_occurrences WHERE schedule_id=?`, schedule.ID); err != nil || status != "discarded" {
+			t.Fatalf("schedule=%d occurrence=%q error=%v", schedule.ID, status, err)
+		}
+	}
+	disabledAfter, err := service.Get(ctx, disabled.ID)
+	if err != nil || disabledAfter.Enabled || disabledAfter.NextRunAt != nil || disabledAfter.ArchivedAt != nil || disabledAfter.Revision != disabled.Revision+1 {
+		t.Fatalf("disabled=%+v error=%v", disabledAfter, err)
+	}
+	archivedAfter, err := service.Get(ctx, archived.ID)
+	if err != nil || archivedAfter.Enabled || archivedAfter.NextRunAt != nil || archivedAfter.ArchivedAt == nil || archivedAfter.Revision != archived.Revision+1 {
+		t.Fatalf("archived=%+v error=%v", archivedAfter, err)
+	}
+	noOp, err := service.BulkState(ctx, []uint64{disabled.ID}, BulkDisable, nil, nil)
+	if err != nil || noOp.NoOpCount != 1 {
+		t.Fatalf("second disable=%+v error=%v", noOp, err)
+	}
+	stillDisabled, _ := service.Get(ctx, disabled.ID)
+	if stillDisabled.Revision != disabledAfter.Revision {
+		t.Fatalf("no-op revision=%d want=%d", stillDisabled.Revision, disabledAfter.Revision)
+	}
+	reenabled, err := service.BulkState(ctx, []uint64{disabled.ID}, BulkEnable, nil, nil)
+	if err != nil || reenabled.AffectedCount != 1 {
+		t.Fatalf("reenable=%+v error=%v", reenabled, err)
+	}
+	reenabledSchedule, _ := service.Get(ctx, disabled.ID)
+	if !reenabledSchedule.Enabled || reenabledSchedule.NextRunAt == nil || reenabledSchedule.Revision != disabledAfter.Revision+1 {
+		t.Fatalf("reenabled schedule=%+v", reenabledSchedule)
+	}
+	assertAttemptCount(t, db, disabled.ID, 1)
+	if _, err := service.BulkState(ctx, []uint64{archived.ID}, BulkEnable, nil, nil); !errors.Is(err, ErrArchived) {
+		t.Fatalf("archived enable error=%v", err)
+	}
+}
+
+func TestBulkEnableUsesCurrentLockedArchiveState(t *testing.T) {
+	db, service := integrationService(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	archived, err := service.Create(ctx, bulkCreateInput("cif_opening_report", "0 1 * * *", "UTC", false, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := service.Create(ctx, bulkCreateInput("journal_transaction_report", "0 2 * * *", "UTC", false, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	var locked uint64
+	if err := blocker.GetContext(ctx, &locked, `SELECT id FROM schedules WHERE id=? FOR UPDATE`, archived.ID); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := service.BulkState(ctx, []uint64{archived.ID, other.ID}, BulkEnable, nil, nil)
+		result <- err
+	}()
+	<-started
+	if _, err := blocker.ExecContext(ctx, `UPDATE schedules SET archived_at=UTC_TIMESTAMP(6),revision=revision+1 WHERE id=?`, archived.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; !errors.Is(err, ErrArchived) {
+		t.Fatalf("bulk error=%v", err)
+	}
+	otherAfter, err := service.Get(ctx, other.ID)
+	if err != nil || otherAfter.Enabled || otherAfter.Revision != other.Revision {
+		t.Fatalf("other schedule changed=%+v error=%v", otherAfter, err)
+	}
+}
+
 func bulkCreateInput(job, cron, timezone string, enabled bool, actor *uint64) CreateInput {
 	policy := PreviousCalendarDayPolicy()
 	if job == "cif_detail" || job == "saving_detail" || job == "time_deposit_detail" || job == "loan_detail" {

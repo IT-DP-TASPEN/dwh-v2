@@ -17,6 +17,7 @@ func TestStableActionsAreUnique(t *testing.T) {
 		ActionAdminBootstrap,
 		ActionIngestionRunSubmitted, ActionIngestionRunAllSubmitted, ActionIngestionCancellationRequested, ActionIngestionAbandonedRecovered,
 		ActionSourceStateChanged, ActionScheduleCreated, ActionScheduleUpdated, ActionScheduleStateChanged,
+		ActionScheduleBulkEnable, ActionScheduleBulkDisable, ActionScheduleBulkArchive,
 		ActionReportDatasourceCreated, ActionReportDatasourceUpdated, ActionReportDatasourceStateChanged, ActionReportDatasourceTested,
 		ActionReportTemplateCreated, ActionReportTemplateUpdated, ActionReportTemplateStateChanged, ActionReportTemplateAccessChanged,
 		ActionReportExecuted, ActionReportTemplateQueryTested, ActionReportTemplateOptionsTested, ActionReportExportSubmitted, ActionReportExportDownloaded,
@@ -37,6 +38,7 @@ func TestMetadataIsTypedAndSecretFree(t *testing.T) {
 	metadata := []Metadata{
 		RoleChangeMetadata{FromRole: "user", ToRole: "manager"},
 		StatusChangeMetadata{From: "active", To: "inactive"},
+		ScheduleBulkMetadata{SelectedCount: 3, AffectedCount: 2, NoOpCount: 1},
 		PermissionsUpdatedMetadata{Added: []string{"users.view"}, Removed: []string{"roles.view"}},
 		ImpersonationStartedMetadata{TargetRole: "manager"},
 		DatasourceUpdatedMetadata{CredentialsChanged: true},

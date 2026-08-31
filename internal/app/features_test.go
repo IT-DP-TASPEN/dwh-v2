@@ -53,7 +53,7 @@ func TestFeatureCompositionOwnsCompleteRouteMatrix(t *testing.T) {
 		"POST /reports/{id}/star", "POST /reports/{id}/folder", "POST /reports/{id}/run", "POST /reports/{id}/export", "POST /reports/{id}/parameters/{key}/options",
 		"POST /runs/run-all", "POST /runs/{id}/cancel", "POST /runs/{id}/recover-abandoned",
 		"POST /sources/{jobKey}/runs", "POST /sources/{jobKey}/enable", "POST /sources/{jobKey}/disable",
-		"POST /schedules", "POST /schedules/bulk", "POST /schedules/{id}", "POST /schedules/{id}/enable", "POST /schedules/{id}/disable", "POST /schedules/{id}/archive",
+		"POST /schedules", "POST /schedules/bulk", "POST /schedules/bulk-action", "POST /schedules/{id}", "POST /schedules/{id}/enable", "POST /schedules/{id}/disable", "POST /schedules/{id}/archive",
 		"POST /users", "POST /users/{id}", "POST /users/{id}/activate", "POST /users/{id}/deactivate", "POST /users/{id}/impersonate", "POST /users/{id}/reset-password", "POST /users/{id}/role",
 	}
 	sort.Strings(want)

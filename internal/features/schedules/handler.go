@@ -44,6 +44,16 @@ func (handler *Handler) Schedules(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	data.CanCreate = principal.Can(PermissionCreate)
+	data.CanEnableDisable = principal.Can(PermissionEnableDisable)
+	data.CanArchive = principal.Can(PermissionArchive)
+	data.CanSelect = data.CanEnableDisable || data.CanArchive
+	if data.CanSelect {
+		for _, schedule := range data.Rows {
+			if !schedule.Archived {
+				data.SelectableCount++
+			}
+		}
+	}
 	handler.admin.RenderPage(writer, request, 200, "features/schedules/index", "Schedules", data)
 }
 
@@ -170,6 +180,58 @@ func (handler *Handler) Disable(writer http.ResponseWriter, request *http.Reques
 }
 func (handler *Handler) Archive(writer http.ResponseWriter, request *http.Request) {
 	handler.state(writer, request, "archive")
+}
+
+func (handler *Handler) BulkState(writer http.ResponseWriter, request *http.Request) {
+	if !webutil.ParseForm(writer, request, maxFormBody) {
+		return
+	}
+	action := domain.BulkAction(strings.TrimSpace(request.PostFormValue("action")))
+	if action != domain.BulkEnable && action != domain.BulkDisable && action != domain.BulkArchive {
+		http.Error(writer, "Invalid bulk action.", http.StatusUnprocessableEntity)
+		return
+	}
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	allowed := action == domain.BulkArchive && principal.Can(PermissionArchive) ||
+		(action == domain.BulkEnable || action == domain.BulkDisable) && principal.Can(PermissionEnableDisable)
+	if !allowed {
+		handler.admin.RenderPage(writer, request, http.StatusForbidden, "forbidden", "Forbidden", nil)
+		return
+	}
+	if request.PostFormValue("confirmed") != "yes" {
+		http.Error(writer, "Confirmation is required.", http.StatusUnprocessableEntity)
+		return
+	}
+	ids := make([]uint64, 0, len(request.PostForm["schedule_ids"]))
+	for _, value := range request.PostForm["schedule_ids"] {
+		id, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+		if err != nil || id == 0 {
+			http.Error(writer, "Invalid schedule selection.", http.StatusUnprocessableEntity)
+			return
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		http.Error(writer, "Select at least one schedule.", http.StatusUnprocessableEntity)
+		return
+	}
+	_, err := handler.service.BulkState(request.Context(), ids, action, principal.Actor.UserID, principal.SecurityContext())
+	if err != nil {
+		if errors.Is(err, domain.ErrInvalidSelection) || errors.Is(err, domain.ErrInvalidBulkAction) {
+			http.Error(writer, "Invalid schedule selection.", http.StatusUnprocessableEntity)
+			return
+		}
+		if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrBacklog) || errors.Is(err, domain.ErrArchived) || errors.Is(err, domain.ErrInvalidDefinition) {
+			handler.renderConflict(writer, request, err, handler.bulkBackURL(request, false))
+			return
+		}
+		handler.admin.Internal(writer, request, "bulk update schedules", err)
+		return
+	}
+	http.Redirect(writer, request, handler.bulkBackURL(request, true), http.StatusSeeOther)
 }
 
 func (handler *Handler) state(writer http.ResponseWriter, request *http.Request, action string) {
@@ -314,8 +376,22 @@ func (handler *Handler) renderConflict(writer http.ResponseWriter, request *http
 		message = "This schedule has unresolved backlog. Use Disable → Edit → Enable only when intentionally discarding it."
 	} else if errors.Is(err, domain.ErrArchived) {
 		message = "Archived schedules are read-only."
+	} else if errors.Is(err, domain.ErrInvalidDefinition) {
+		message = "A selected schedule has an invalid definition and cannot be enabled."
 	}
 	handler.admin.RenderPage(writer, request, http.StatusConflict, "conflict", "Conflict", struct{ Message, BackURL string }{message, backURL})
+}
+
+func (handler *Handler) bulkBackURL(request *http.Request, notice bool) string {
+	filter := Filter{request.URL.Query().Get("job"), request.URL.Query().Get("enabled"), request.URL.Query().Get("archived")}
+	if handler.service.validateFilter(filter) != nil {
+		filter = Filter{}
+	}
+	target := listURL(filter, webutil.Page(request))
+	if notice {
+		target += "&notice=schedule-updated"
+	}
+	return target
 }
 
 func (handler *Handler) id(writer http.ResponseWriter, request *http.Request) (uint64, bool) {

@@ -275,27 +275,15 @@ func (service *Service) Enable(ctx context.Context, id, expectedRevision uint64,
 	if row.Revision != expectedRevision {
 		return Schedule{}, ErrConflict
 	}
-	if row.ArchivedAt.Valid {
-		return Schedule{}, ErrArchived
-	}
-	if _, found, err := lockActiveOccurrence(ctx, tx, id); err != nil {
-		return Schedule{}, err
-	} else if found {
-		return Schedule{}, ErrBacklog
-	}
-	_, parsed, err := validateDefinition(service.catalog, row.definition(), now)
+	_, found, err := lockActiveOccurrence(ctx, tx, id)
 	if err != nil {
 		return Schedule{}, err
 	}
-	next := parsed.Next(now)
-	result, err := tx.ExecContext(ctx, `UPDATE schedules SET enabled=TRUE,next_run_at=?,scheduler_not_before=NULL,
-		delivery_block_reason=NULL,delivery_blocked_at=NULL,validation_error_class=NULL,validation_error_message=NULL,
-		validation_error_at=NULL,updated_by_user_id=?,revision=revision+1 WHERE id=? AND revision=? AND enabled=FALSE AND archived_at IS NULL`,
-		next, actor, id, expectedRevision)
+	transition, err := service.prepareEnable(row, found, now)
 	if err != nil {
 		return Schedule{}, err
 	}
-	if err := requireOne(result); err != nil {
+	if err := applyEnableTransitions(ctx, tx, []enableTransition{transition}, actor); err != nil {
 		return Schedule{}, err
 	}
 	metadata := audit.StatusChangeMetadata{From: scheduleStateName(row), To: "enabled"}
@@ -337,27 +325,11 @@ func (service *Service) stop(ctx context.Context, id, expectedRevision uint64, a
 	if err != nil {
 		return Schedule{}, err
 	}
+	transition := stopTransition{schedule: row}
 	if found {
-		result, err := tx.ExecContext(ctx, `UPDATE schedule_occurrences SET status='discarded',retry_not_before=NULL,
-			closed_at=?,closed_by_user_id=? WHERE id=? AND status='unresolved'`, now, actor, occurrence.ID)
-		if err != nil {
-			return Schedule{}, err
-		}
-		if err := requireOne(result); err != nil {
-			return Schedule{}, err
-		}
+		transition.occurrenceID = occurrence.ID
 	}
-	archivedAt := nullableTime(row.ArchivedAt)
-	if archive {
-		archivedAt = now
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE schedules SET enabled=FALSE,next_run_at=NULL,scheduler_not_before=NULL,
-		delivery_block_reason=NULL,delivery_blocked_at=NULL,archived_at=?,updated_by_user_id=?,revision=revision+1
-		WHERE id=? AND revision=?`, archivedAt, actor, id, expectedRevision)
-	if err != nil {
-		return Schedule{}, err
-	}
-	if err := requireOne(result); err != nil {
+	if err := applyStopTransitions(ctx, tx, []stopTransition{transition}, actor, archive, now); err != nil {
 		return Schedule{}, err
 	}
 	to := "disabled"
@@ -371,6 +343,267 @@ func (service *Service) stop(ctx context.Context, id, expectedRevision uint64, a
 		return Schedule{}, err
 	}
 	return service.Get(ctx, id)
+}
+
+type enableTransition struct {
+	schedule scheduleRow
+	next     time.Time
+}
+
+type stopTransition struct {
+	schedule     scheduleRow
+	occurrenceID uint64
+}
+
+func (service *Service) prepareEnable(row scheduleRow, hasActiveOccurrence bool, now time.Time) (enableTransition, error) {
+	if row.ArchivedAt.Valid {
+		return enableTransition{}, ErrArchived
+	}
+	if hasActiveOccurrence {
+		return enableTransition{}, ErrBacklog
+	}
+	_, parsed, err := validateDefinition(service.catalog, row.definition(), now)
+	if err != nil {
+		return enableTransition{}, err
+	}
+	return enableTransition{schedule: row, next: parsed.Next(now)}, nil
+}
+
+func applyEnableTransitions(ctx context.Context, tx *sqlx.Tx, transitions []enableTransition, actor *uint64) error {
+	if len(transitions) == 0 {
+		return nil
+	}
+	var query strings.Builder
+	query.WriteString(`UPDATE schedules SET enabled=TRUE,next_run_at=CASE id `)
+	args := make([]any, 0, len(transitions)*4+1)
+	for _, transition := range transitions {
+		query.WriteString(`WHEN ? THEN ? `)
+		args = append(args, transition.schedule.ID, transition.next)
+	}
+	query.WriteString(`ELSE next_run_at END,scheduler_not_before=NULL,delivery_block_reason=NULL,delivery_blocked_at=NULL,
+		validation_error_class=NULL,validation_error_message=NULL,validation_error_at=NULL,updated_by_user_id=?,revision=revision+1
+		WHERE (id,revision) IN (`)
+	args = append(args, actor)
+	for index, transition := range transitions {
+		if index != 0 {
+			query.WriteByte(',')
+		}
+		query.WriteString(`(?,?)`)
+		args = append(args, transition.schedule.ID, transition.schedule.Revision)
+	}
+	query.WriteString(`) AND enabled=FALSE AND archived_at IS NULL`)
+	result, err := tx.ExecContext(ctx, query.String(), args...)
+	if err != nil {
+		return err
+	}
+	return requireCount(result, len(transitions))
+}
+
+func applyStopTransitions(ctx context.Context, tx *sqlx.Tx, transitions []stopTransition, actor *uint64, archive bool, now time.Time) error {
+	if len(transitions) == 0 {
+		return nil
+	}
+	occurrenceIDs := make([]uint64, 0, len(transitions))
+	for _, transition := range transitions {
+		if transition.occurrenceID != 0 {
+			occurrenceIDs = append(occurrenceIDs, transition.occurrenceID)
+		}
+	}
+	if len(occurrenceIDs) != 0 {
+		query := `UPDATE schedule_occurrences SET status='discarded',retry_not_before=NULL,closed_at=?,closed_by_user_id=?
+			WHERE id IN (` + placeholders(len(occurrenceIDs)) + `) AND status='unresolved'`
+		args := make([]any, 0, len(occurrenceIDs)+2)
+		args = append(args, now, actor)
+		for _, id := range occurrenceIDs {
+			args = append(args, id)
+		}
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		if err := requireCount(result, len(occurrenceIDs)); err != nil {
+			return err
+		}
+	}
+
+	var query strings.Builder
+	query.WriteString(`UPDATE schedules SET enabled=FALSE,next_run_at=NULL,scheduler_not_before=NULL,
+		delivery_block_reason=NULL,delivery_blocked_at=NULL,archived_at=`)
+	args := make([]any, 0, len(transitions)*2+2)
+	if archive {
+		query.WriteByte('?')
+		args = append(args, now)
+	} else {
+		query.WriteString(`archived_at`)
+	}
+	query.WriteString(`,updated_by_user_id=?,revision=revision+1 WHERE (id,revision) IN (`)
+	args = append(args, actor)
+	for index, transition := range transitions {
+		if index != 0 {
+			query.WriteByte(',')
+		}
+		query.WriteString(`(?,?)`)
+		args = append(args, transition.schedule.ID, transition.schedule.Revision)
+	}
+	query.WriteByte(')')
+	result, err := tx.ExecContext(ctx, query.String(), args...)
+	if err != nil {
+		return err
+	}
+	return requireCount(result, len(transitions))
+}
+
+func (service *Service) BulkState(ctx context.Context, submitted []uint64, action BulkAction, actor *uint64, requester *securityctx.Requester) (BulkStateResult, error) {
+	ids, err := normalizeBulkIDs(submitted)
+	if err != nil {
+		return BulkStateResult{}, err
+	}
+	if action != BulkEnable && action != BulkDisable && action != BulkArchive {
+		return BulkStateResult{}, ErrInvalidBulkAction
+	}
+	tx, err := service.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return BulkStateResult{}, err
+	}
+	defer tx.Rollback()
+	now, err := dbNow(ctx, tx)
+	if err != nil {
+		return BulkStateResult{}, err
+	}
+	rows, err := lockSchedules(ctx, tx, ids)
+	if err != nil {
+		return BulkStateResult{}, err
+	}
+	if len(rows) != len(ids) {
+		return BulkStateResult{}, ErrInvalidSelection
+	}
+
+	candidates := make([]scheduleRow, 0, len(rows))
+	for _, row := range rows {
+		if row.ArchivedAt.Valid {
+			return BulkStateResult{}, ErrArchived
+		}
+		if action == BulkEnable && row.Enabled || action == BulkDisable && !row.Enabled {
+			continue
+		}
+		candidates = append(candidates, row)
+	}
+	candidateIDs := make([]uint64, len(candidates))
+	for index, row := range candidates {
+		candidateIDs[index] = row.ID
+	}
+	occurrences, err := lockActiveOccurrences(ctx, tx, candidateIDs)
+	if err != nil {
+		return BulkStateResult{}, err
+	}
+	activeBySchedule := make(map[uint64]occurrenceRow, len(occurrences))
+	for _, occurrence := range occurrences {
+		activeBySchedule[occurrence.ScheduleID] = occurrence
+	}
+
+	if action == BulkEnable {
+		transitions := make([]enableTransition, 0, len(candidates))
+		for _, row := range candidates {
+			_, found := activeBySchedule[row.ID]
+			transition, err := service.prepareEnable(row, found, now)
+			if err != nil {
+				return BulkStateResult{}, err
+			}
+			transitions = append(transitions, transition)
+		}
+		if err := applyEnableTransitions(ctx, tx, transitions, actor); err != nil {
+			return BulkStateResult{}, err
+		}
+	} else {
+		transitions := make([]stopTransition, 0, len(candidates))
+		for _, row := range candidates {
+			transition := stopTransition{schedule: row}
+			if occurrence, found := activeBySchedule[row.ID]; found {
+				transition.occurrenceID = occurrence.ID
+			}
+			transitions = append(transitions, transition)
+		}
+		if err := applyStopTransitions(ctx, tx, transitions, actor, action == BulkArchive, now); err != nil {
+			return BulkStateResult{}, err
+		}
+	}
+
+	result := BulkStateResult{SelectedCount: len(rows), AffectedCount: len(candidates), NoOpCount: len(rows) - len(candidates)}
+	if err := appendScheduleBulkAudit(ctx, tx, requester, action, result, now); err != nil {
+		return BulkStateResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return BulkStateResult{}, err
+	}
+	return result, nil
+}
+
+func normalizeBulkIDs(submitted []uint64) ([]uint64, error) {
+	if len(submitted) == 0 {
+		return nil, ErrInvalidSelection
+	}
+	seen := make(map[uint64]struct{}, len(submitted))
+	ids := make([]uint64, 0, len(submitted))
+	for _, id := range submitted {
+		if id == 0 {
+			return nil, ErrInvalidSelection
+		}
+		if _, found := seen[id]; found {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	if len(ids) > MaxBulkSelection {
+		return nil, ErrInvalidSelection
+	}
+	return ids, nil
+}
+
+func lockSchedules(ctx context.Context, tx *sqlx.Tx, ids []uint64) ([]scheduleRow, error) {
+	query, args, err := sqlx.In(scheduleSelect+` WHERE id IN (?) ORDER BY id FOR UPDATE`, ids)
+	if err != nil {
+		return nil, err
+	}
+	var rows []scheduleRow
+	err = tx.SelectContext(ctx, &rows, tx.Rebind(query), args...)
+	return rows, err
+}
+
+func lockActiveOccurrences(ctx context.Context, tx *sqlx.Tx, scheduleIDs []uint64) ([]occurrenceRow, error) {
+	if len(scheduleIDs) == 0 {
+		return nil, nil
+	}
+	query, args, err := sqlx.In(occurrenceSelect+` WHERE active_schedule_id IN (?) ORDER BY schedule_id,id FOR UPDATE`, scheduleIDs)
+	if err != nil {
+		return nil, err
+	}
+	var rows []occurrenceRow
+	err = tx.SelectContext(ctx, &rows, tx.Rebind(query), args...)
+	return rows, err
+}
+
+func appendScheduleBulkAudit(ctx context.Context, executor sqlx.ExtContext, requester *securityctx.Requester, action BulkAction, result BulkStateResult, now time.Time) error {
+	if requester == nil {
+		return nil
+	}
+	auditAction := audit.ActionScheduleBulkEnable
+	if action == BulkDisable {
+		auditAction = audit.ActionScheduleBulkDisable
+	} else if action == BulkArchive {
+		auditAction = audit.ActionScheduleBulkArchive
+	}
+	actor := audit.Identity{UserID: requester.Actor.UserID, Username: requester.Actor.Username}
+	effective := audit.Identity{UserID: requester.Effective.UserID, Username: requester.Effective.Username}
+	return audit.Append(ctx, executor, audit.Event{
+		Attribution: audit.Attribution{Actor: &actor, Effective: &effective}, Action: auditAction,
+		Metadata: audit.ScheduleBulkMetadata{SelectedCount: result.SelectedCount, AffectedCount: result.AffectedCount, NoOpCount: result.NoOpCount}, CreatedAt: now.UTC(),
+	})
+}
+
+func placeholders(count int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
 }
 
 func firstRequester(requesters []*securityctx.Requester) *securityctx.Requester {
@@ -838,11 +1071,15 @@ func dbNow(ctx context.Context, query sqlx.QueryerContext) (time.Time, error) {
 }
 
 func requireOne(result sql.Result) error {
+	return requireCount(result, 1)
+}
+
+func requireCount(result sql.Result, expected int) error {
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return err
 	}
-	if affected != 1 {
+	if affected != int64(expected) {
 		return ErrConflict
 	}
 	return nil

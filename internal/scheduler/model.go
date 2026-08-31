@@ -20,6 +20,7 @@ import (
 
 const (
 	DefaultTimezone                  = "Asia/Jakarta"
+	MaxBulkSelection                 = 25
 	PolicyPreviousCalendarDay        = "previous_calendar_day_jakarta"
 	PolicyDetailLiveSnapshot         = "detail_live_snapshot"
 	policyVersionV1           uint16 = 1
@@ -30,8 +31,24 @@ var (
 	ErrBacklog           = errors.New("schedule has unresolved backlog")
 	ErrArchived          = errors.New("schedule is archived")
 	ErrInvalidDefinition = errors.New("invalid schedule definition")
+	ErrInvalidBulkAction = errors.New("invalid bulk schedule action")
+	ErrInvalidSelection  = errors.New("invalid schedule selection")
 	strictParser         = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 )
+
+type BulkAction string
+
+const (
+	BulkEnable  BulkAction = "enable"
+	BulkDisable BulkAction = "disable"
+	BulkArchive BulkAction = "archive"
+)
+
+type BulkStateResult struct {
+	SelectedCount int
+	AffectedCount int
+	NoOpCount     int
+}
 
 type Policy struct {
 	Kind     string

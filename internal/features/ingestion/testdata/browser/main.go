@@ -15,6 +15,7 @@ import (
 	dashboardfeature "github.com/ibldzn/go-admin/internal/features/dashboard"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	reportsfeature "github.com/ibldzn/go-admin/internal/features/reports"
+	schedulesfeature "github.com/ibldzn/go-admin/internal/features/schedules"
 	core "github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
@@ -36,6 +37,7 @@ type fixture struct {
 	starred     map[uint64]bool
 	folders     map[uint64]*uint64
 	folderNames map[uint64]string
+	schedules   map[uint64]schedulesfeature.Schedule
 }
 
 func main() {
@@ -45,6 +47,7 @@ func main() {
 	}
 	fixture := &fixture{renderer: renderer, polls: map[uint64]int{}, childLoads: map[uint64]int{}, waveLoads: map[string]int{}}
 	fixture.resetReports()
+	fixture.resetSchedules()
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.FileServer(http.FS(webfiles.Files)))
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
@@ -55,6 +58,8 @@ func main() {
 	mux.HandleFunc("/runs", fixture.runsPage)
 	mux.HandleFunc("/runs/scheduler-wave", fixture.schedulerWave)
 	mux.HandleFunc("/runs/", fixture.status)
+	mux.HandleFunc("/schedules", fixture.schedulesPage)
+	mux.HandleFunc("/schedules/bulk-action", fixture.scheduleMutation)
 	mux.HandleFunc("/reports", fixture.reportsPage)
 	mux.HandleFunc("/reports/", fixture.reportMutation)
 	mux.HandleFunc("/exports", fixture.exportsPage)
@@ -119,7 +124,7 @@ func fixtureNavigation(operational bool, path string) []navigation.GroupView {
 	if operational {
 		groups = append(groups,
 			navigation.GroupView{Key: "general", Label: "General", Items: []navigation.ItemView{{Key: "dashboard", Label: "Dashboard", Icon: "layout-dashboard", Path: "/", Depth: 1, Active: path == "/"}}},
-			navigation.GroupView{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.ItemView{{Key: "ingestion-overview", Label: "Overview", Icon: "activity", Path: "/ingestion", Depth: 1, Active: path == "/ingestion"}, {Key: "ingestion-runs", Label: "Runs", Icon: "history", Path: "/runs", Depth: 1}}},
+			navigation.GroupView{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.ItemView{{Key: "ingestion-overview", Label: "Overview", Icon: "activity", Path: "/ingestion", Depth: 1, Active: path == "/ingestion"}, {Key: "ingestion-runs", Label: "Runs", Icon: "history", Path: "/runs", Depth: 1}, {Key: "schedules", Label: "Schedules", Icon: "calendar-clock", Path: "/schedules", Depth: 1, Active: path == "/schedules"}}},
 		)
 	}
 	groups = append(groups, navigation.GroupView{Key: "reporting", Label: "Reporting", Items: []navigation.ItemView{{Key: "reports", Label: "Reports", Icon: "file-chart-column", Path: "/reports", Depth: 1, Active: path == "/reports"}, {Key: "report-exports", Label: "Exports", Icon: "file-down", Path: "/exports", Depth: 1, Active: path == "/exports"}}})
@@ -382,6 +387,11 @@ func (fixture *fixture) schedulerWave(writer http.ResponseWriter, request *http.
 }
 
 func (fixture *fixture) page(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path == "/case/schedules" {
+		fixture.resetSchedules()
+		http.Redirect(writer, request, "/schedules", http.StatusSeeOther)
+		return
+	}
 	if request.URL.Path == "/case/reports" {
 		fixture.resetReports()
 		fixture.reportsPage(writer, request)
@@ -402,6 +412,115 @@ func (fixture *fixture) page(writer http.ResponseWriter, request *http.Request) 
 	}
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(writer, `<!doctype html><html lang="en"><head><meta charset="utf-8"><script defer src="/static/js/app.js"></script></head><body><main>%s</main></body></html>`, body)
+}
+
+func (fixture *fixture) resetSchedules() {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	fixture.schedules = map[uint64]schedulesfeature.Schedule{
+		101: {ID: 101, Name: "Disabled schedule", JobName: "CIF Detail", CronExpression: "0 1 * * *", Timezone: "Asia/Jakarta", Revision: 1, StateLabel: "Disabled"},
+		102: {ID: 102, Name: "Enabled schedule", JobName: "Saving Detail", CronExpression: "0 2 * * *", Timezone: "Asia/Jakarta", Enabled: true, Revision: 1, StateLabel: "Enabled", NextRunAt: "31 Aug 2026 18:00:00 UTC"},
+		103: {ID: 103, Name: "Archived schedule", JobName: "Loan Detail", CronExpression: "0 3 * * *", Timezone: "Asia/Jakarta", Archived: true, Revision: 2, StateLabel: "Archived", ArchivedAt: "30 Aug 2026 10:00:00 UTC"},
+	}
+}
+
+func (fixture *fixture) schedulesPage(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		http.Error(writer, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	filter := schedulesfeature.Filter{Enabled: request.URL.Query().Get("enabled"), Archived: request.URL.Query().Get("archived")}
+	fixture.mu.Lock()
+	rows := make([]schedulesfeature.Schedule, 0, len(fixture.schedules))
+	for _, schedule := range fixture.schedules {
+		if filter.Enabled != "" && schedule.Enabled != (filter.Enabled == "true") {
+			continue
+		}
+		if filter.Archived != "" && schedule.Archived != (filter.Archived == "true") {
+			continue
+		}
+		rows = append(rows, schedule)
+	}
+	fixture.mu.Unlock()
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	selectable := 0
+	for _, schedule := range rows {
+		if !schedule.Archived {
+			selectable++
+		}
+	}
+	query := request.URL.Query()
+	query.Del("notice")
+	returnQuery := ""
+	if encoded := query.Encode(); encoded != "" {
+		returnQuery = "?" + encoded
+	}
+	data := schedulesfeature.ListData{Rows: rows, Filter: filter, Pagination: pagination.New(1, schedulesfeature.PageSize, int64(len(rows))),
+		CanEnableDisable: true, CanArchive: true, CanSelect: true, SelectableCount: selectable, ReturnQuery: returnQuery}
+	pageData := adminshell.PageData{Title: "Schedules", AppName: "Browser fixture", CurrentPath: "/schedules", Navigation: fixtureNavigation(true, "/schedules"), Data: data}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/schedules/index", "admin", pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (fixture *fixture) scheduleMutation(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost || request.ParseForm() != nil || request.PostFormValue("confirmed") != "yes" {
+		http.Error(writer, "bad request", http.StatusBadRequest)
+		return
+	}
+	action := request.PostFormValue("action")
+	if action != "enable" && action != "disable" && action != "archive" {
+		http.Error(writer, "bad request", http.StatusBadRequest)
+		return
+	}
+	ids := make([]uint64, 0, len(request.PostForm["schedule_ids"]))
+	for _, value := range request.PostForm["schedule_ids"] {
+		id, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || id == 0 {
+			http.Error(writer, "bad request", http.StatusBadRequest)
+			return
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		http.Error(writer, "bad request", http.StatusBadRequest)
+		return
+	}
+	fixture.mu.Lock()
+	for _, id := range ids {
+		schedule, found := fixture.schedules[id]
+		if !found || schedule.Archived {
+			fixture.mu.Unlock()
+			http.Error(writer, "conflict", http.StatusConflict)
+			return
+		}
+	}
+	for _, id := range ids {
+		schedule := fixture.schedules[id]
+		switch action {
+		case "enable":
+			if !schedule.Enabled {
+				schedule.Enabled, schedule.StateLabel, schedule.NextRunAt = true, "Enabled", "31 Aug 2026 18:00:00 UTC"
+				schedule.Revision++
+			}
+		case "disable":
+			if schedule.Enabled {
+				schedule.Enabled, schedule.StateLabel, schedule.NextRunAt = false, "Disabled", ""
+				schedule.Revision++
+			}
+		case "archive":
+			schedule.Enabled, schedule.Archived, schedule.StateLabel, schedule.NextRunAt = false, true, "Archived", ""
+			schedule.ArchivedAt = "31 Aug 2026 12:00:00 UTC"
+			schedule.Revision++
+		}
+		fixture.schedules[id] = schedule
+	}
+	fixture.mu.Unlock()
+	target := "/schedules"
+	if request.URL.RawQuery != "" {
+		target += "?" + request.URL.RawQuery
+	}
+	http.Redirect(writer, request, target, http.StatusSeeOther)
 }
 
 func (fixture *fixture) resetReports() {

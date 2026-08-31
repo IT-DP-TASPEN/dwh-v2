@@ -39,6 +39,9 @@ const (
 	ActionScheduleCreated                Action = "schedule.created"
 	ActionScheduleUpdated                Action = "schedule.updated"
 	ActionScheduleStateChanged           Action = "schedule.state_changed"
+	ActionScheduleBulkEnable             Action = "schedule.bulk_enable"
+	ActionScheduleBulkDisable            Action = "schedule.bulk_disable"
+	ActionScheduleBulkArchive            Action = "schedule.bulk_archive"
 	ActionReportDatasourceCreated        Action = "report_datasource.created"
 	ActionReportDatasourceUpdated        Action = "report_datasource.updated"
 	ActionReportDatasourceStateChanged   Action = "report_datasource.state_changed"
@@ -93,6 +96,14 @@ type StatusChangeMetadata struct {
 }
 
 func (StatusChangeMetadata) auditMetadata() {}
+
+type ScheduleBulkMetadata struct {
+	SelectedCount int `json:"selected_count"`
+	AffectedCount int `json:"affected_count"`
+	NoOpCount     int `json:"no_op_count"`
+}
+
+func (ScheduleBulkMetadata) auditMetadata() {}
 
 type PermissionsUpdatedMetadata struct {
 	Added   []string `json:"added"`
@@ -348,6 +359,9 @@ func knownAction(action Action) bool {
 		ActionScheduleCreated,
 		ActionScheduleUpdated,
 		ActionScheduleStateChanged,
+		ActionScheduleBulkEnable,
+		ActionScheduleBulkDisable,
+		ActionScheduleBulkArchive,
 		ActionReportDatasourceCreated,
 		ActionReportDatasourceUpdated,
 		ActionReportDatasourceStateChanged,

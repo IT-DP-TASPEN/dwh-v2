@@ -116,6 +116,85 @@ func TestScheduleIndexBulkActionFollowsCreatePermission(t *testing.T) {
 	}
 }
 
+func TestScheduleIndexBulkSelectionPermissionMatrix(t *testing.T) {
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []Schedule{{ID: 11, Name: "Current"}, {ID: 12, Name: "Archived", Archived: true}}
+	for _, test := range []struct {
+		name                           string
+		canEnableDisable, canArchive   bool
+		wantCheckboxes, wantSelectAll  int
+		wantEnableDisable, wantArchive bool
+	}{
+		{name: "view only"},
+		{name: "enable disable", canEnableDisable: true, wantCheckboxes: 1, wantSelectAll: 1, wantEnableDisable: true},
+		{name: "archive", canArchive: true, wantCheckboxes: 1, wantSelectAll: 1, wantArchive: true},
+		{name: "all", canEnableDisable: true, canArchive: true, wantCheckboxes: 1, wantSelectAll: 1, wantEnableDisable: true, wantArchive: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			canSelect := test.canEnableDisable || test.canArchive
+			selectable := 0
+			if canSelect {
+				selectable = 1
+			}
+			data := ListData{Rows: rows, CanEnableDisable: test.canEnableDisable, CanArchive: test.canArchive, CanSelect: canSelect, SelectableCount: selectable}
+			if err := renderer.RenderPage(response, http.StatusOK, "features/schedules/index", adminshell.PageData{Title: "Schedules", AppName: "Test", Data: data}); err != nil {
+				t.Fatal(err)
+			}
+			body := response.Body.String()
+			if got := strings.Count(body, "data-schedule-checkbox"); got != test.wantCheckboxes {
+				t.Fatalf("checkboxes=%d want=%d", got, test.wantCheckboxes)
+			}
+			if got := strings.Count(body, `aria-label="Select all schedules on this page"`); got != test.wantSelectAll {
+				t.Fatalf("select_all=%d want=%d", got, test.wantSelectAll)
+			}
+			if strings.Contains(body, `confirmAction('enable')`) != test.wantEnableDisable || strings.Contains(body, `confirmAction('disable')`) != test.wantEnableDisable {
+				t.Fatalf("enable_disable actions mismatch: %s", body)
+			}
+			if strings.Contains(body, `confirmAction('archive')`) != test.wantArchive {
+				t.Fatalf("archive action mismatch: %s", body)
+			}
+			if strings.Contains(body, "Select schedule: Archived") {
+				t.Fatal("archived schedule was selectable")
+			}
+		})
+	}
+}
+
+func TestBulkScheduleStatePermissionAndRequestValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		permissions []string
+		form        url.Values
+		want        int
+	}{
+		{"view only", []string{PermissionView}, url.Values{"action": {"enable"}, "confirmed": {"yes"}, "schedule_ids": {"1"}}, http.StatusForbidden},
+		{"enable cannot archive", []string{PermissionView, PermissionEnableDisable}, url.Values{"action": {"archive"}, "confirmed": {"yes"}, "schedule_ids": {"1"}}, http.StatusForbidden},
+		{"archive cannot enable", []string{PermissionView, PermissionArchive}, url.Values{"action": {"enable"}, "confirmed": {"yes"}, "schedule_ids": {"1"}}, http.StatusForbidden},
+		{"unknown action", []string{PermissionView, PermissionEnableDisable}, url.Values{"action": {"restore"}, "confirmed": {"yes"}, "schedule_ids": {"1"}}, http.StatusUnprocessableEntity},
+		{"missing confirmation", []string{PermissionView, PermissionEnableDisable}, url.Values{"action": {"enable"}, "schedule_ids": {"1"}}, http.StatusUnprocessableEntity},
+		{"empty selection", []string{PermissionView, PermissionEnableDisable}, url.Values{"action": {"enable"}, "confirmed": {"yes"}}, http.StatusUnprocessableEntity},
+		{"invalid selection", []string{PermissionView, PermissionEnableDisable}, url.Values{"action": {"enable"}, "confirmed": {"yes"}, "schedule_ids": {"0"}}, http.StatusUnprocessableEntity},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			principal := browserauth.Principal{UserID: 7, Actor: browserauth.Identity{UserID: 7}, Permissions: access.NewPermissionSet(test.permissions)}
+			router, token := scheduleHandlerRouter(t, principal)
+			request := httptest.NewRequest(http.MethodPost, "/schedules/bulk-action", strings.NewReader(test.form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.AddCookie(&http.Cookie{Name: "session", Value: token})
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.want {
+				t.Fatalf("status=%d want=%d body=%q", response.Code, test.want, response.Body.String())
+			}
+		})
+	}
+}
+
 func scheduleHandlerRouter(t *testing.T, principal browserauth.Principal) (http.Handler, string) {
 	t.Helper()
 	renderer, err := render.New(webfiles.Files, false)
