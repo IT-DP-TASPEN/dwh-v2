@@ -66,7 +66,7 @@ func TestValidatePassword(t *testing.T) {
 }
 
 func TestVerifyPasswordDoesNotApplyCreationMinimum(t *testing.T) {
-	password := "old-short"
+	password := "01234"
 	salt := []byte("0123456789abcdef")
 	digest := argon2.IDKey([]byte(password), salt, argonIterations, argonMemory, argonParallelism, argonKeyLength)
 	encoded := fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",

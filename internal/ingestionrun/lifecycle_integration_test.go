@@ -145,6 +145,43 @@ func TestHeartbeatRenewsOwnershipAndTransientFailureDoesNotReleaseJob(t *testing
 	}
 }
 
+func TestMasterSameJobExclusionAndDetailIndependence(t *testing.T) {
+	db := integrationdb.Open(t)
+	catalog, _ := ingestion.NewCatalog()
+	repository, _ := NewRepository(db, catalog)
+	var states []struct {
+		Key     string `db:"source_id"`
+		Enabled bool   `db:"enabled"`
+	}
+	if err := db.Select(&states, `SELECT source_id,enabled FROM source_settings WHERE source_id IN ('saving_detail','saving_reference_master')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE source_settings SET enabled=TRUE WHERE source_id IN ('saving_detail','saving_reference_master')`); err != nil {
+		t.Fatal(err)
+	}
+	var ids []uint64
+	t.Cleanup(func() {
+		for _, id := range ids {
+			_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, id)
+		}
+		for _, state := range states {
+			_, _ = db.Exec(`UPDATE source_settings SET enabled=? WHERE source_id=?`, state.Enabled, state.Key)
+		}
+	})
+	for _, key := range []string{"saving_detail", "saving_reference_master"} {
+		parameters, _ := NewLiveSnapshotExecution(key)
+		id, err := repository.Submit(context.Background(), key, parameters, TriggerDirect, "detail-master-independence", nil)
+		if err != nil {
+			t.Fatalf("submit %s: %v", key, err)
+		}
+		ids = append(ids, id)
+	}
+	parameters, _ := NewLiveSnapshotExecution("saving_reference_master")
+	if _, err := repository.Submit(context.Background(), "saving_reference_master", parameters, TriggerDirect, "same-master-busy", nil); !errors.Is(err, ErrJobBusy) {
+		t.Fatalf("same Master job was not excluded: %v", err)
+	}
+}
+
 func TestRunAllParentTakeoverAdoptsChildrenAndFencesOldOwner(t *testing.T) {
 	db := integrationdb.Open(t)
 	catalog, _ := ingestion.NewCatalog()
@@ -161,7 +198,7 @@ func TestRunAllParentTakeoverAdoptsChildrenAndFencesOldOwner(t *testing.T) {
 	parent, _ := repository.Get(context.Background(), parentID)
 	oldOwner := parent.OwnerID
 	childOwner := strings.Repeat("e", 64)
-	if _, err := db.Exec(`DELETE FROM ingestion_runs WHERE parent_run_id=? AND child_position=36`, parentID); err != nil {
+	if _, err := db.Exec(`DELETE FROM ingestion_runs WHERE parent_run_id=? AND child_position=?`, parentID, ingestion.CanonicalJobCount); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`UPDATE ingestion_runs SET status='succeeded',finished_at=UTC_TIMESTAMP(6) WHERE parent_run_id=? AND child_position=1`, parentID); err != nil {
@@ -180,7 +217,7 @@ func TestRunAllParentTakeoverAdoptsChildrenAndFencesOldOwner(t *testing.T) {
 		t.Fatalf("parent recovery=%+v error=%v", recovery, err)
 	}
 	var childCount, succeeded int
-	if err := db.QueryRowx(`SELECT COUNT(*),SUM(status='succeeded') FROM ingestion_runs WHERE parent_run_id=?`, parentID).Scan(&childCount, &succeeded); err != nil || childCount != 36 || succeeded != 1 {
+	if err := db.QueryRowx(`SELECT COUNT(*),SUM(status='succeeded') FROM ingestion_runs WHERE parent_run_id=?`, parentID).Scan(&childCount, &succeeded); err != nil || childCount != ingestion.CanonicalJobCount || succeeded != 1 {
 		t.Fatalf("children=%d succeeded=%d error=%v", childCount, succeeded, err)
 	}
 	if _, err := repository.ReconcileParent(context.Background(), parentID, oldOwner); !errors.Is(err, ErrOwnershipLost) {

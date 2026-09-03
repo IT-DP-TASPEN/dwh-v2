@@ -320,6 +320,7 @@ type DashboardSummary struct {
 type RunAllForm struct {
 	From, To string
 	Errors   map[string]string
+	JobCount int
 }
 
 func (row runRow) parameters() ingestionrun.Parameters {

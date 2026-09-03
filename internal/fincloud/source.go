@@ -395,9 +395,15 @@ func (c *Client) getJSON(ctx context.Context, operation, requestPath string, tar
 		diagnostic.FailureKind = "body_read"
 		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "could not read Fincloud response", Cause: readErr, diagnostic: diagnostic}
 	}
-	if err := json.NewDecoder(bytes.NewReader(data)).Decode(target); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(target); err != nil {
 		diagnostic.FailureKind, diagnostic.DecodeStage = decodeFailureKind(err), "response_dto"
 		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud response was malformed", Cause: err, diagnostic: diagnostic}
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		diagnostic.FailureKind, diagnostic.DecodeStage = "dto_decode", "response_dto"
+		return nil, &Error{Kind: ErrorMalformed, Operation: operation, Message: "Fincloud response had trailing JSON data", Cause: err, diagnostic: diagnostic}
 	}
 	return diagnostic, nil
 }

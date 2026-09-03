@@ -90,7 +90,7 @@ func TestJournalTransactionPartitionsPublishAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.CloseIdleConnections()
-	executor, err := New(client, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMaintenanceRepository(db),
+	executor, err := New(client, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMasterRepository(db), ingestionstore.NewMaintenanceRepository(db),
 		runs, catalog, 4, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)

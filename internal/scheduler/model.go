@@ -22,7 +22,8 @@ const (
 	DefaultTimezone                  = "Asia/Jakarta"
 	MaxBulkSelection                 = 25
 	PolicyPreviousCalendarDay        = "previous_calendar_day_jakarta"
-	PolicyDetailLiveSnapshot         = "detail_live_snapshot"
+	PolicyLiveSnapshot               = "live_snapshot"
+	PolicyDetailLiveSnapshot         = "detail_live_snapshot" // legacy read compatibility
 	policyVersionV1           uint16 = 1
 )
 
@@ -102,8 +103,8 @@ func PreviousCalendarDayPolicy() Policy {
 	return policy
 }
 
-func DetailLiveSnapshotPolicy() Policy {
-	policy, err := canonicalPolicy(PolicyDetailLiveSnapshot, policyVersionV1, []byte("{}"))
+func LiveSnapshotPolicy() Policy {
+	policy, err := canonicalPolicy(PolicyLiveSnapshot, policyVersionV1, []byte("{}"))
 	if err != nil {
 		panic(err)
 	}
@@ -111,7 +112,7 @@ func DetailLiveSnapshotPolicy() Policy {
 }
 
 func canonicalPolicy(kind string, version uint16, payload []byte) (Policy, error) {
-	if (kind != PolicyPreviousCalendarDay && kind != PolicyDetailLiveSnapshot) || version != policyVersionV1 {
+	if (kind != PolicyPreviousCalendarDay && kind != PolicyLiveSnapshot && kind != PolicyDetailLiveSnapshot) || version != policyVersionV1 {
 		return Policy{}, fmt.Errorf("%w: unsupported policy %q version %d", ErrInvalidDefinition, kind, version)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -197,9 +198,13 @@ func validateDefinition(catalog ingestion.Catalog, definition Definition, refere
 	}
 	wantPolicy := PolicyPreviousCalendarDay
 	if job.DateStrategy == ingestion.NoDate {
-		wantPolicy = PolicyDetailLiveSnapshot
+		wantPolicy = PolicyLiveSnapshot
 	}
-	if policy.Kind != wantPolicy {
+	semanticKind := policy.Kind
+	if semanticKind == PolicyDetailLiveSnapshot {
+		semanticKind = PolicyLiveSnapshot
+	}
+	if semanticKind != wantPolicy {
 		return Definition{}, cronDefinition{}, fmt.Errorf("%w: job %q requires policy %q", ErrInvalidDefinition, job.Key, wantPolicy)
 	}
 	parsed, err := parseCron(definition.CronExpression, definition.Timezone, reference)
@@ -221,8 +226,8 @@ func parametersForOccurrence(job ingestion.JobDefinition, scheduledFor time.Time
 		}
 		return ingestionrun.NewMaintenanceSeriesExecution(job.Key, date, date)
 	case ingestion.NoDate:
-		// Fincloud exposes current detail only; missed historical detail states
-		// cannot be reconstructed and are therefore one live obligation.
+		// Current-state sources are one live obligation; missed historical states
+		// cannot be reconstructed.
 		return ingestionrun.NewLiveSnapshotExecution(job.Key)
 	default:
 		return ingestionrun.Parameters{}, fmt.Errorf("job %s has no scheduler date contract", job.Key)

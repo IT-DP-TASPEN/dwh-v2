@@ -51,7 +51,7 @@ func TestLoanDetailExplicitNullEnumerationSucceedsWithoutTerminalDiagnostic(t *t
 		t.Fatal(err)
 	}
 	defer client.CloseIdleConnections()
-	executor, err := New(client, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db),
+	executor, err := New(client, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMasterRepository(db),
 		ingestionstore.NewMaintenanceRepository(db), runs, catalog, 1, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)

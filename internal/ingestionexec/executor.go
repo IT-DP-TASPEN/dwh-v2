@@ -25,6 +25,7 @@ type Executor struct {
 	client            *fincloud.Client
 	fixed             *ingestionstore.FixedRepository
 	detail            *ingestionstore.DetailRepository
+	master            *ingestionstore.MasterRepository
 	maintenance       *ingestionstore.MaintenanceRepository
 	runs              *ingestionrun.Repository
 	updateProgress    func(context.Context, uint64, string, ingestionrun.Progress, *ingestionrun.MapperDiagnostics) error
@@ -93,11 +94,11 @@ type maintenanceSourceSelection struct {
 func (failure *maintenanceDateError) Error() string { return failure.cause.Error() }
 func (failure *maintenanceDateError) Unwrap() error { return failure.cause }
 
-func New(client *fincloud.Client, fixed *ingestionstore.FixedRepository, detail *ingestionstore.DetailRepository, maintenance *ingestionstore.MaintenanceRepository, runs *ingestionrun.Repository, catalog ingestion.Catalog, fixedConcurrency, detailConcurrency int, logger *slog.Logger) (*Executor, error) {
-	if client == nil || fixed == nil || detail == nil || maintenance == nil || runs == nil || fixedConcurrency < 1 || detailConcurrency < 1 || logger == nil {
+func New(client *fincloud.Client, fixed *ingestionstore.FixedRepository, detail *ingestionstore.DetailRepository, master *ingestionstore.MasterRepository, maintenance *ingestionstore.MaintenanceRepository, runs *ingestionrun.Repository, catalog ingestion.Catalog, fixedConcurrency, detailConcurrency int, logger *slog.Logger) (*Executor, error) {
+	if client == nil || fixed == nil || detail == nil || master == nil || maintenance == nil || runs == nil || fixedConcurrency < 1 || detailConcurrency < 1 || logger == nil {
 		return nil, fmt.Errorf("complete ingestion executor dependencies are required")
 	}
-	return &Executor{client: client, fixed: fixed, detail: detail, maintenance: maintenance, runs: runs, updateProgress: runs.UpdateProgress, catalog: catalog,
+	return &Executor{client: client, fixed: fixed, detail: detail, master: master, maintenance: maintenance, runs: runs, updateProgress: runs.UpdateProgress, catalog: catalog,
 		fixedConcurrency: fixedConcurrency, detailConcurrency: detailConcurrency, now: time.Now, logger: logger}, nil
 }
 
@@ -121,6 +122,8 @@ func (executor *Executor) Execute(ctx context.Context, run ingestionrun.Run, own
 		result = executor.executeFixed(ctx, run, job)
 	case ingestion.CategoryDetail:
 		result = executor.executeDetail(ctx, run, job)
+	case ingestion.CategoryMaster:
+		result = executor.executeMaster(ctx, run, job)
 	case ingestion.CategoryEOD, ingestion.CategoryCBR:
 		result = executor.executeMaintenance(ctx, run, job)
 	default:
@@ -128,6 +131,105 @@ func (executor *Executor) Execute(ctx context.Context, run ingestionrun.Run, own
 	}
 	recordTerminalFallback(ctx, recorder, result)
 	return result
+}
+
+func (executor *Executor) executeMaster(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
+	if job.Master == nil {
+		return failed("contract", "Master definition is missing", "fetch_master", fmt.Errorf("missing Master definition"))
+	}
+	progressWrites := true
+	if err := executor.master.PrepareRun(ctx, run.ID); err != nil {
+		return failed("persistence", "could not prepare Master staging", "prepare_master_staging", err)
+	}
+	fetchedAt := executor.now().UTC()
+	var progress ingestionrun.Progress
+	switch job.Master.Kind {
+	case ingestion.MasterReference:
+		raw, err := executor.client.FetchReferenceMaster(ctx, job.Master.Path)
+		if err != nil {
+			return sourceFailure(ctx, err, "fetch_master")
+		}
+		candidate, err := ingestion.NormalizeReference(job.Master.Domain, raw)
+		if err != nil {
+			return failed("source_contract", "reference Master normalization failed", "normalize_master", err)
+		}
+		progress = ingestionrun.Progress{Total: uint64(len(candidate.Categories)), Step: "stage_master"}
+		if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
+			return ownershipFailure(err, "persist_run_progress")
+		}
+		if err := executor.master.StageReference(ctx, run.ID, candidate, fetchedAt); err != nil {
+			return failed("persistence", "reference Master staging failed", "stage_master", err)
+		}
+		progress.Started, progress.Succeeded, progress.Rows = progress.Total, progress.Total, candidate.ItemCount
+		executor.logReferenceCandidate(ctx, run, candidate)
+		progress.Step = "publish_master"
+		if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
+			return ownershipFailure(err, "persist_run_progress")
+		}
+		if err := executor.master.PublishReference(ctx, run.ID, run.OwnerID, job.Key, candidate); err != nil {
+			if result, cancelled := cancellationFailure(ctx, "publish_master", err); cancelled {
+				return result
+			}
+			return failed("persistence", "reference Master publication failed", "publish_master", err)
+		}
+	case ingestion.MasterMarketing:
+		raw, err := executor.client.FetchMarketingMaster(ctx)
+		if err != nil {
+			return sourceFailure(ctx, err, "fetch_master")
+		}
+		candidate, err := ingestion.NormalizeMarketing(raw)
+		if err != nil {
+			return failed("source_contract", "Marketing Master normalization failed", "normalize_master", err)
+		}
+		count := uint64(len(candidate.Entities))
+		progress = ingestionrun.Progress{Total: count, Step: "stage_master"}
+		if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
+			return ownershipFailure(err, "persist_run_progress")
+		}
+		if err := executor.master.StageMarketing(ctx, run.ID, candidate, fetchedAt); err != nil {
+			return failed("persistence", "Marketing Master staging failed", "stage_master", err)
+		}
+		progress.Started, progress.Succeeded, progress.Rows = count, count, count
+		executor.logger.InfoContext(ctx, "Marketing Master candidate staged", "run_id", run.ID, "entity_count", count, "dataset_checksum", ingestion.ChecksumHex(candidate.Checksum))
+		progress.Step = "publish_master"
+		if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
+			return ownershipFailure(err, "persist_run_progress")
+		}
+		if err := executor.master.PublishMarketing(ctx, run.ID, run.OwnerID, job.Key, candidate); err != nil {
+			if result, cancelled := cancellationFailure(ctx, "publish_master", err); cancelled {
+				return result
+			}
+			return failed("persistence", "Marketing Master publication failed", "publish_master", err)
+		}
+	default:
+		return failed("contract", "unsupported Master kind", "fetch_master", fmt.Errorf("unsupported Master kind %q", job.Master.Kind))
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	if err := executor.master.CleanupRun(cleanupCtx, run.ID); err != nil {
+		executor.logger.Warn("clean Master staging", "run_id", run.ID, "job_key", run.JobKey, "error", err)
+	}
+	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
+}
+
+func (executor *Executor) logReferenceCandidate(ctx context.Context, run ingestionrun.Run, candidate ingestion.ReferenceCandidate) {
+	var duplicates, conflicts uint64
+	for _, category := range candidate.Categories {
+		labels := map[string]string{}
+		for _, item := range category.Items {
+			if label, found := labels[item.Code]; found {
+				duplicates++
+				if label != item.Description {
+					conflicts++
+				}
+			} else {
+				labels[item.Code] = item.Description
+			}
+		}
+	}
+	executor.logger.InfoContext(ctx, "reference Master candidate staged", "run_id", run.ID, "domain", candidate.Domain,
+		"category_count", len(candidate.Categories), "item_count", candidate.ItemCount, "discarded_blank_count", candidate.DiscardedBlankCount,
+		"duplicate_code_rows", duplicates, "conflicting_code_rows", conflicts, "dataset_checksum", ingestion.ChecksumHex(candidate.Checksum))
 }
 
 func (executor *Executor) persistProgress(ctx context.Context, run ingestionrun.Run, progress ingestionrun.Progress, diagnostics *ingestionrun.MapperDiagnostics, enabled *bool) error {

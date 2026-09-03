@@ -27,9 +27,12 @@ func TestPolicyCronAndRetryContracts(t *testing.T) {
 	if _, err := validatePolicy(policy); !errors.Is(err, ErrInvalidDefinition) {
 		t.Fatalf("checksum mismatch error=%v", err)
 	}
-	live := DetailLiveSnapshotPolicy()
-	if live.Kind != PolicyDetailLiveSnapshot || string(live.Payload) != "{}" || live.Checksum == PreviousCalendarDayPolicy().Checksum {
+	live := LiveSnapshotPolicy()
+	if live.Kind != PolicyLiveSnapshot || string(live.Payload) != "{}" || live.Checksum == PreviousCalendarDayPolicy().Checksum {
 		t.Fatalf("invalid live snapshot policy: %+v", live)
+	}
+	if got := hex.EncodeToString(live.Checksum[:]); got != "6aabf8e855d1dd0a653754257a4e4bce0380ccf0bb1734b4dc50de2b1f5ec60a" {
+		t.Fatalf("live snapshot policy checksum=%s", got)
 	}
 
 	reference := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
@@ -69,15 +72,20 @@ func TestJobPolicyCompatibility(t *testing.T) {
 	catalog, _ := ingestion.NewCatalog()
 	reference := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
 	definition := Definition{Name: "test", CronExpression: "0 1 * * *", Timezone: "UTC"}
-	definition.JobKey, definition.Policy = "cif_detail", DetailLiveSnapshotPolicy()
+	definition.JobKey, definition.Policy = "cif_detail", LiveSnapshotPolicy()
 	if _, _, err := validateDefinition(catalog, definition, reference); err != nil {
 		t.Fatal(err)
+	}
+	legacy, _ := canonicalPolicy(PolicyDetailLiveSnapshot, policyVersionV1, []byte("{}"))
+	definition.Policy = legacy
+	if _, _, err := validateDefinition(catalog, definition, reference); err != nil {
+		t.Fatalf("legacy live-snapshot policy rejected: %v", err)
 	}
 	definition.Policy = PreviousCalendarDayPolicy()
 	if _, _, err := validateDefinition(catalog, definition, reference); !errors.Is(err, ErrInvalidDefinition) {
 		t.Fatalf("detail accepted historical policy: %v", err)
 	}
-	definition.JobKey, definition.Policy = "cif_opening_report", DetailLiveSnapshotPolicy()
+	definition.JobKey, definition.Policy = "cif_opening_report", LiveSnapshotPolicy()
 	if _, _, err := validateDefinition(catalog, definition, reference); !errors.Is(err, ErrInvalidDefinition) {
 		t.Fatalf("replayable job accepted live policy: %v", err)
 	}
@@ -116,7 +124,8 @@ func TestOccurrenceParametersUseHistoricalJakartaBusinessDate(t *testing.T) {
 		{"cif_opening_report", ingestionrun.FixedRangeV1},
 		{"balance_sheet_report", ingestionrun.FixedDateSeriesV1},
 		{"eod_cif_opening_report_full", ingestionrun.MaintenanceDateSeriesV2},
-		{"cif_detail", ingestionrun.DetailLiveSnapshotV1},
+		{"cif_detail", ingestionrun.LiveSnapshotV1},
+		{"cif_reference_master", ingestionrun.LiveSnapshotV1},
 	}
 	for _, test := range tests {
 		job, _ := catalog.Find(test.key)
@@ -140,7 +149,7 @@ func TestOccurrenceParametersUseHistoricalJakartaBusinessDate(t *testing.T) {
 			if len(value.Dates) != 1 || value.Dates[0].String() != "2026-08-14" {
 				t.Fatalf("maintenance=%+v", value)
 			}
-		case ingestionrun.DetailLiveSnapshotV1:
+		case ingestionrun.LiveSnapshotV1:
 			if string(parameters.JSON) != "{}" {
 				t.Fatalf("detail=%s", parameters.JSON)
 			}
@@ -157,7 +166,7 @@ func TestOccurrenceParametersUseHistoricalJakartaBusinessDate(t *testing.T) {
 			t.Fatalf("%s scheduled parameters: %v", job.Key, err)
 		}
 	}
-	if counts[ingestion.RangeCapable] != 7 || counts[ingestion.SingleDate] != 25 || counts[ingestion.NoDate] != 4 {
+	if counts[ingestion.RangeCapable] != 7 || counts[ingestion.SingleDate] != 25 || counts[ingestion.NoDate] != 9 {
 		t.Fatalf("scheduled date strategies=%v", counts)
 	}
 }

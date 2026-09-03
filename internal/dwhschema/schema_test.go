@@ -6,23 +6,25 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 )
 
 func TestSourceSettingsMigrationSeedsCanonicalCatalog(t *testing.T) {
-	matches, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*_create_dwh_source_settings.sql"))
-	if err != nil || len(matches) != 1 {
+	matches, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.sql"))
+	if err != nil {
 		t.Fatalf("source settings migration matches=%v error=%v", matches, err)
 	}
-	data, err := os.ReadFile(matches[0])
-	if err != nil {
-		t.Fatal(err)
-	}
 	pattern := regexp.MustCompile(`\('([a-z][a-z0-9_]*)', TRUE, NULL\)`)
-	matched := pattern.FindAllStringSubmatch(string(data), -1)
-	got := make([]string, len(matched))
-	for index := range matched {
-		got[index] = matched[index][1]
+	var got []string
+	for _, match := range matches {
+		data, err := os.ReadFile(match)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range pattern.FindAllStringSubmatch(string(data), -1) {
+			got = append(got, row[1])
+		}
 	}
 	want, err := CanonicalSourceKeys()
 	if err != nil {
@@ -36,6 +38,40 @@ func TestSourceSettingsMigrationSeedsCanonicalCatalog(t *testing.T) {
 	for index := range want {
 		if got[index] != want[index] {
 			t.Fatalf("seed[%d]=%q want %q", index, got[index], want[index])
+		}
+	}
+}
+
+func TestMasterMigrationsKeepStagingUncoupledAndRenameOnlyExecutableState(t *testing.T) {
+	root := filepath.Join("..", "..", "migrations")
+	storage, err := os.ReadFile(filepath.Join(root, "20260903091000_create_master_reference_ingestion.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(storage)
+	for _, table := range []string{"stg_fincloud_reference_categories", "stg_fincloud_reference_items", "stg_fincloud_marketing_master"} {
+		start := strings.Index(text, "CREATE TABLE "+table)
+		if start < 0 {
+			t.Fatalf("missing %s", table)
+		}
+		end := strings.Index(text[start:], ") ENGINE=InnoDB")
+		if end < 0 {
+			t.Fatalf("unterminated %s", table)
+		}
+		if strings.Contains(text[start:start+end], "FOREIGN KEY") {
+			t.Fatalf("%s has a staging foreign key", table)
+		}
+	}
+	if !strings.Contains(text, "fk_fincloud_reference_items_category") || !strings.Contains(text, "ON DELETE CASCADE") {
+		t.Fatal("current reference category integrity is missing")
+	}
+	rename, err := os.ReadFile(filepath.Join(root, "20260903090000_rename_live_snapshot.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"archived_at IS NULL", "status='unresolved'", "status IN ('planned','queued','running')", "detail_live_snapshot_v1", "live_snapshot_v1", "6aabf8e855d1dd0a653754257a4e4bce0380ccf0bb1734b4dc50de2b1f5ec60a"} {
+		if !strings.Contains(string(rename), required) {
+			t.Fatalf("live-snapshot migration missing %q", required)
 		}
 	}
 }

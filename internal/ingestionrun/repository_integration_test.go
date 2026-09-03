@@ -72,7 +72,7 @@ func TestMySQLCanonicalParametersAndAllRunAllChildren(t *testing.T) {
 		if err := run.Parameters.Validate(job); err != nil {
 			t.Fatalf("%s failed after MySQL JSON round-trip: %v; json=%s", test.job, err, run.Parameters.JSON)
 		}
-		if test.parameters.Kind != DetailLiveSnapshotV1 && bytes.Equal(run.Parameters.JSON, test.parameters.JSON) {
+		if test.parameters.Kind != LiveSnapshotV1 && bytes.Equal(run.Parameters.JSON, test.parameters.JSON) {
 			t.Fatalf("%s test did not reproduce MySQL JSON transformation", test.job)
 		}
 		if _, err := db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, runID); err != nil {
@@ -397,7 +397,7 @@ func TestDurableQueueRunAllAndTerminalCAS(t *testing.T) {
 		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id IN (?,?)`, parentID, directID)
 	})
 	var children int
-	if err := db.Get(&children, `SELECT COUNT(*) FROM ingestion_runs WHERE parent_run_id=?`, parentID); err != nil || children != 36 {
+	if err := db.Get(&children, `SELECT COUNT(*) FROM ingestion_runs WHERE parent_run_id=?`, parentID); err != nil || children != ingestion.CanonicalJobCount {
 		t.Fatalf("Run All children=%d error=%v", children, err)
 	}
 	var detailJSON string

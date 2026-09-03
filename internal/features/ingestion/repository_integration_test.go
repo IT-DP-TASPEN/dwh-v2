@@ -78,7 +78,7 @@ func TestRunReadModelsPaginationAndPlans(t *testing.T) {
 		t.Fatalf("attention=%+v error=%v", attention, err)
 	}
 	sources, err := service.OverviewSources(context.Background())
-	if err != nil || sources.Enabled+sources.Disabled != 36 {
+	if err != nil || sources.Enabled+sources.Disabled != core.CanonicalJobCount {
 		t.Fatalf("canonical source overview=%+v error=%v", sources, err)
 	}
 	parentID, err := runs.CreateRunAll(context.Background(), from, from, ingestionrun.TriggerDirect, "phase6-read-run-all", nil)
@@ -90,7 +90,7 @@ func TestRunReadModelsPaginationAndPlans(t *testing.T) {
 		_, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, parentID)
 	})
 	detail, err := service.FindRun(context.Background(), parentID)
-	if err != nil || len(detail.Children) != 36 {
+	if err != nil || len(detail.Children) != core.CanonicalJobCount {
 		t.Fatalf("Run All detail children=%d error=%v", len(detail.Children), err)
 	}
 
@@ -133,7 +133,7 @@ func TestRunsListChildVisibilityAndParentSummaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	var childIDs []uint64
-	if err := db.Select(&childIDs, `SELECT id FROM ingestion_runs WHERE parent_run_id=? ORDER BY child_position`, parentID); err != nil || len(childIDs) != 36 {
+	if err := db.Select(&childIDs, `SELECT id FROM ingestion_runs WHERE parent_run_id=? ORDER BY child_position`, parentID); err != nil || len(childIDs) != core.CanonicalJobCount {
 		t.Fatalf("children=%d error=%v", len(childIDs), err)
 	}
 	if _, err := db.Exec(`UPDATE ingestion_runs SET status=CASE
@@ -188,7 +188,7 @@ func TestRunsListChildVisibilityAndParentSummaries(t *testing.T) {
 		t.Fatalf("pagination total=%d top-level=%d physical=%d children=%d", defaultPage.Pagination.Total, topLevelTotal, physicalTotal, len(childIDs))
 	}
 	parent := findRunView(defaultPage.Rows, parentID)
-	if parent == nil || parent.RunAllSummary == nil || *parent.RunAllSummary != (RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}) {
+	if parent == nil || parent.RunAllSummary == nil || *parent.RunAllSummary != (RunAllSummary{Total: core.CanonicalJobCount, Complete: 32, Failed: 2, Running: 1}) {
 		t.Fatalf("parent summary=%+v", parent)
 	}
 	emptyParent := findRunView(defaultPage.Rows, uint64(emptyParentID))
@@ -223,8 +223,8 @@ func TestRunsListChildVisibilityAndParentSummaries(t *testing.T) {
 	}
 
 	children, err := service.RunAllChildren(ctx, parentID)
-	if err != nil || len(children.Rows) != 36 || children.Parent.ID != parentID || children.Parent.Terminal || children.Parent.RunAllSummary == nil ||
-		*children.Parent.RunAllSummary != (RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}) {
+	if err != nil || len(children.Rows) != core.CanonicalJobCount || children.Parent.ID != parentID || children.Parent.Terminal || children.Parent.RunAllSummary == nil ||
+		*children.Parent.RunAllSummary != (RunAllSummary{Total: core.CanonicalJobCount, Complete: 32, Failed: 2, Running: 1}) {
 		t.Fatalf("fragment children=%d error=%v", len(children.Rows), err)
 	}
 	for index, child := range children.Rows {
@@ -243,14 +243,14 @@ func TestRunsListChildVisibilityAndParentSummaries(t *testing.T) {
 	}
 
 	summaries, err := repository.runAllSummaries(ctx, []uint64{parentID, uint64(emptyParentID)})
-	if err != nil || summaries[parentID] != (RunAllSummary{Total: 36, Complete: 32, Failed: 2, Running: 1}) || summaries[uint64(emptyParentID)] != (RunAllSummary{}) {
+	if err != nil || summaries[parentID] != (RunAllSummary{Total: core.CanonicalJobCount, Complete: 32, Failed: 2, Running: 1}) || summaries[uint64(emptyParentID)] != (RunAllSummary{}) {
 		t.Fatalf("batched summaries=%+v error=%v", summaries, err)
 	}
 	if _, err := db.Exec(`UPDATE ingestion_runs SET status='succeeded' WHERE parent_run_id=?`, parentID); err != nil {
 		t.Fatal(err)
 	}
 	allComplete, err := repository.runAllSummaries(ctx, []uint64{parentID})
-	if err != nil || allComplete[parentID] != (RunAllSummary{Total: 36, Complete: 36}) {
+	if err != nil || allComplete[parentID] != (RunAllSummary{Total: core.CanonicalJobCount, Complete: core.CanonicalJobCount}) {
 		t.Fatalf("all-complete summary=%+v error=%v", allComplete[parentID], err)
 	}
 }

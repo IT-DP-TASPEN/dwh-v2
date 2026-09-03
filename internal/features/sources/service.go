@@ -149,6 +149,8 @@ func categoryLabel(category core.JobCategory) string {
 		return "EOD"
 	case core.CategoryCBR:
 		return "CBR"
+	case core.CategoryMaster:
+		return "Master"
 	default:
 		return "Detail"
 	}

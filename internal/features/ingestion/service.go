@@ -502,7 +502,7 @@ func parameterFields(parameters ingestionrun.Parameters) []ParameterField {
 		if err == nil && len(value.Dates) > 0 {
 			return []ParameterField{{"From", value.Dates[0].String()}, {"To", value.Dates[len(value.Dates)-1].String()}, {"Dates", strconv.Itoa(len(value.Dates))}}
 		}
-	case ingestionrun.DetailLiveSnapshotV1:
+	case ingestionrun.LiveSnapshotV1, ingestionrun.DetailLiveSnapshotV1:
 		return []ParameterField{{"Mode", "Current-state synchronization"}}
 	}
 	return []ParameterField{{"Parameters", "Unavailable"}}
@@ -511,6 +511,9 @@ func parameterFields(parameters ingestionrun.Parameters) []ParameterField {
 func progressUnit(job core.JobDefinition) string {
 	if job.Category == core.CategoryDetail {
 		return "identifiers"
+	}
+	if job.Category == core.CategoryMaster {
+		return "reference categories/entities"
 	}
 	if job.Category == core.CategoryEOD || job.Category == core.CategoryCBR {
 		return "requested dates"

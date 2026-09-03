@@ -180,7 +180,7 @@ func (service *Service) definition(form FormData) domain.Definition {
 	job, _ := service.catalog.Find(form.JobKey)
 	policy := domain.PreviousCalendarDayPolicy()
 	if job.DateStrategy == core.NoDate {
-		policy = domain.DetailLiveSnapshotPolicy()
+		policy = domain.LiveSnapshotPolicy()
 	}
 	return domain.Definition{Name: form.Name, JobKey: form.JobKey, CronExpression: form.CronExpression, Timezone: form.Timezone, Policy: policy}
 }

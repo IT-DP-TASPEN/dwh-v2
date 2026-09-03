@@ -7,17 +7,36 @@ import (
 
 type JobCategory string
 type DateStrategy string
+type MasterKind string
+type ReferenceDomain string
 
 const (
 	CategoryFixed  JobCategory = "fixed"
 	CategoryEOD    JobCategory = "maintenance_eod"
 	CategoryCBR    JobCategory = "maintenance_cbr"
 	CategoryDetail JobCategory = "detail"
+	CategoryMaster JobCategory = "master"
 
 	RangeCapable DateStrategy = "range_capable"
 	SingleDate   DateStrategy = "single_date"
 	NoDate       DateStrategy = "no_date"
+
+	MasterReference MasterKind = "reference"
+	MasterMarketing MasterKind = "marketing"
+
+	ReferenceCIF         ReferenceDomain = "cif"
+	ReferenceSaving      ReferenceDomain = "saving"
+	ReferenceTimeDeposit ReferenceDomain = "time_deposit"
+	ReferenceLoan        ReferenceDomain = "loan"
+
+	CanonicalJobCount = 41
 )
+
+type MasterDefinition struct {
+	Kind   MasterKind
+	Domain ReferenceDomain
+	Path   string
+}
 
 type JobDefinition struct {
 	Key          string
@@ -27,6 +46,7 @@ type JobDefinition struct {
 	Active       bool
 	Fixed        *FixedDefinition
 	Maintenance  *MaintenanceDefinition
+	Master       *MasterDefinition
 }
 
 type Catalog struct {
@@ -35,7 +55,7 @@ type Catalog struct {
 }
 
 func NewCatalog() (Catalog, error) {
-	jobs := make([]JobDefinition, 0, 36)
+	jobs := make([]JobDefinition, 0, CanonicalJobCount)
 	fixedDefinitions := FixedDefinitions()
 	if err := validateFixedDefinitions(fixedDefinitions); err != nil {
 		return Catalog{}, err
@@ -68,8 +88,21 @@ func NewCatalog() (Catalog, error) {
 	} {
 		jobs = append(jobs, JobDefinition{Key: detail.key, Name: detail.name, Category: CategoryDetail, DateStrategy: NoDate, Active: true})
 	}
-	if len(jobs) != 36 {
-		return Catalog{}, fmt.Errorf("canonical catalog has %d jobs, want 36", len(jobs))
+	for _, master := range []struct {
+		key, name  string
+		definition MasterDefinition
+	}{
+		{"cif_reference_master", "CIF Reference Master", MasterDefinition{MasterReference, ReferenceCIF, "/cif/inquiry/cif//listvalues"}},
+		{"saving_reference_master", "Savings Reference Master", MasterDefinition{MasterReference, ReferenceSaving, "/tabungan/inquiry/rekening//listvalues"}},
+		{"time_deposit_reference_master", "Time Deposit Reference Master", MasterDefinition{MasterReference, ReferenceTimeDeposit, "/deposito/inquiry/rekening//listvalues"}},
+		{"loan_reference_master", "Loan Reference Master", MasterDefinition{MasterReference, ReferenceLoan, "/pinjaman/inquiry/rekening//listvalues"}},
+		{"marketing_master", "Marketing Master", MasterDefinition{MasterMarketing, "", "/system/marketing/pembuatan/cari?nama="}},
+	} {
+		definition := master.definition
+		jobs = append(jobs, JobDefinition{Key: master.key, Name: master.name, Category: CategoryMaster, DateStrategy: NoDate, Active: true, Master: &definition})
+	}
+	if len(jobs) != CanonicalJobCount {
+		return Catalog{}, fmt.Errorf("canonical catalog has %d jobs, want %d", len(jobs), CanonicalJobCount)
 	}
 	byKey := make(map[string]JobDefinition, len(jobs))
 	strategies := map[DateStrategy]int{}
@@ -80,10 +113,19 @@ func NewCatalog() (Catalog, error) {
 		if _, exists := byKey[job.Key]; exists {
 			return Catalog{}, fmt.Errorf("duplicate job key %q", job.Key)
 		}
+		if job.Category == CategoryMaster {
+			if job.Master == nil || job.Master.Path == "" ||
+				(job.Master.Kind != MasterReference && job.Master.Kind != MasterMarketing) ||
+				(job.Master.Kind == MasterReference && job.Master.Domain == "") || (job.Master.Kind == MasterMarketing && job.Master.Domain != "") {
+				return Catalog{}, fmt.Errorf("master definition %q is incomplete", job.Key)
+			}
+		} else if job.Master != nil {
+			return Catalog{}, fmt.Errorf("non-master job %q has a master definition", job.Key)
+		}
 		strategies[job.DateStrategy]++
 		byKey[job.Key] = job
 	}
-	if strategies[RangeCapable] != 7 || strategies[SingleDate] != 25 || strategies[NoDate] != 4 {
+	if strategies[RangeCapable] != 7 || strategies[SingleDate] != 25 || strategies[NoDate] != 9 {
 		return Catalog{}, fmt.Errorf("canonical date strategies are range=%d single=%d none=%d", strategies[RangeCapable], strategies[SingleDate], strategies[NoDate])
 	}
 	return Catalog{jobs: jobs, byKey: byKey}, nil

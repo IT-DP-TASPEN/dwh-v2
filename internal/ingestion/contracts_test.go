@@ -61,8 +61,14 @@ func TestCanonicalCatalog(t *testing.T) {
 			}
 		}
 	}
-	if len(catalog.Jobs()) != 36 || counts[CategoryFixed] != 8 || counts[CategoryEOD] != 17 || counts[CategoryCBR] != 7 || counts[CategoryDetail] != 4 || fixtureGaps != 5 {
+	if len(catalog.Jobs()) != CanonicalJobCount || counts[CategoryFixed] != 8 || counts[CategoryEOD] != 17 || counts[CategoryCBR] != 7 || counts[CategoryDetail] != 4 || counts[CategoryMaster] != 5 || fixtureGaps != 5 {
 		t.Fatalf("catalog counts jobs=%d categories=%v fixture gaps=%d", len(catalog.Jobs()), counts, fixtureGaps)
+	}
+	wantMasterKeys := []string{"cif_reference_master", "saving_reference_master", "time_deposit_reference_master", "loan_reference_master", "marketing_master"}
+	for index, key := range wantMasterKeys {
+		if got := catalog.Jobs()[36+index]; got.Key != key || got.Category != CategoryMaster || got.DateStrategy != NoDate || got.Master == nil {
+			t.Fatalf("Master position %d=%+v", 37+index, got)
+		}
 	}
 	wantStrategies := map[string][2]string{
 		"cif_opening_report":         {string(SingleRequestAllLocationsEmpty), string(NoAccountCodeStrategy)},

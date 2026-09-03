@@ -96,30 +96,32 @@ func TestRetryUntilSuccessAndChronologicalCursor(t *testing.T) {
 
 func TestNoDateCoalescesAndAdvancesFromSuccessfulFinish(t *testing.T) {
 	db, service := integrationService(t)
-	due := time.Date(2026, 8, 1, 1, 0, 0, 0, time.UTC)
-	schedule := createDueSchedule(t, db, service, "detail", "cif_detail", due)
-	_, _ = service.process(context.Background(), schedule.ID)
-	first := latestAttempt(t, db, schedule.ID)
-	finishRun(t, db, first.RunID, ingestionrun.StatusCancelled, due.Add(time.Hour))
-	clearThrottle(t, db, schedule.ID)
-	_, _ = service.process(context.Background(), schedule.ID)
-	expireThrottle(t, db, schedule.ID)
-	_, _ = service.process(context.Background(), schedule.ID)
-	second := latestAttempt(t, db, schedule.ID)
-	finished := time.Date(2026, 8, 14, 3, 4, 5, 123456000, time.UTC)
-	finishRun(t, db, second.RunID, ingestionrun.StatusSucceeded, finished)
-	clearThrottle(t, db, schedule.ID)
-	if _, err := service.process(context.Background(), schedule.ID); err != nil {
-		t.Fatal(err)
-	}
-	assertCursor(t, db, schedule.ID, time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC))
-	var occurrences int
-	if err := db.Get(&occurrences, `SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id=?`, schedule.ID); err != nil || occurrences != 1 {
-		t.Fatalf("coalesced occurrences=%d error=%v", occurrences, err)
-	}
-	var mode string
-	if err := db.Get(&mode, `SELECT resolution_mode FROM schedule_occurrences WHERE schedule_id=?`, schedule.ID); err != nil || mode != "live_coalesced" {
-		t.Fatalf("resolution mode=%q error=%v", mode, err)
+	for index, test := range []struct{ name, job string }{{"detail", "cif_detail"}, {"master", "cif_reference_master"}} {
+		due := time.Date(2026, 8, 1+index, 1, 0, 0, 0, time.UTC)
+		schedule := createDueSchedule(t, db, service, test.name, test.job, due)
+		_, _ = service.process(context.Background(), schedule.ID)
+		first := latestAttempt(t, db, schedule.ID)
+		finishRun(t, db, first.RunID, ingestionrun.StatusCancelled, due.Add(time.Hour))
+		clearThrottle(t, db, schedule.ID)
+		_, _ = service.process(context.Background(), schedule.ID)
+		expireThrottle(t, db, schedule.ID)
+		_, _ = service.process(context.Background(), schedule.ID)
+		second := latestAttempt(t, db, schedule.ID)
+		finished := time.Date(2026, 8, 14, 3, 4, 5, 123456000, time.UTC)
+		finishRun(t, db, second.RunID, ingestionrun.StatusSucceeded, finished)
+		clearThrottle(t, db, schedule.ID)
+		if _, err := service.process(context.Background(), schedule.ID); err != nil {
+			t.Fatal(err)
+		}
+		assertCursor(t, db, schedule.ID, time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC))
+		var occurrences int
+		if err := db.Get(&occurrences, `SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id=?`, schedule.ID); err != nil || occurrences != 1 {
+			t.Fatalf("%s coalesced occurrences=%d error=%v", test.name, occurrences, err)
+		}
+		var mode string
+		if err := db.Get(&mode, `SELECT resolution_mode FROM schedule_occurrences WHERE schedule_id=?`, schedule.ID); err != nil || mode != "live_coalesced" {
+			t.Fatalf("%s resolution mode=%q error=%v", test.name, mode, err)
+		}
 	}
 }
 
@@ -728,7 +730,7 @@ func TestBulkEnableUsesCurrentLockedArchiveState(t *testing.T) {
 func bulkCreateInput(job, cron, timezone string, enabled bool, actor *uint64) CreateInput {
 	policy := PreviousCalendarDayPolicy()
 	if job == "cif_detail" || job == "saving_detail" || job == "time_deposit_detail" || job == "loan_detail" {
-		policy = DetailLiveSnapshotPolicy()
+		policy = LiveSnapshotPolicy()
 	}
 	return CreateInput{Definition: Definition{Name: job, JobKey: job, CronExpression: cron, Timezone: timezone, Policy: policy}, Enabled: enabled, ActorID: actor}
 }
@@ -779,7 +781,7 @@ func createDueSchedule(t *testing.T, db *sqlx.DB, service *Service, name, job st
 	t.Helper()
 	policy := PreviousCalendarDayPolicy()
 	if definition, found := service.catalog.Find(job); found && definition.DateStrategy == ingestion.NoDate {
-		policy = DetailLiveSnapshotPolicy()
+		policy = LiveSnapshotPolicy()
 	}
 	created, err := service.Create(context.Background(), CreateInput{Definition: Definition{
 		Name: name, JobKey: job, CronExpression: "0 1 * * *", Timezone: "UTC", Policy: policy,

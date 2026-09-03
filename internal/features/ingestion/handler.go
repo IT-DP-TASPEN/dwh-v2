@@ -235,14 +235,14 @@ func actionCapabilityChanged(rendered string, current bool) bool {
 }
 
 func (handler *Handler) RunAllPage(writer http.ResponseWriter, request *http.Request) {
-	handler.admin.RenderPage(writer, request, http.StatusOK, "features/ingestion/run_all", "Run All", RunAllForm{Errors: map[string]string{}})
+	handler.admin.RenderPage(writer, request, http.StatusOK, "features/ingestion/run_all", "Run All", RunAllForm{Errors: map[string]string{}, JobCount: core.CanonicalJobCount})
 }
 
 func (handler *Handler) SubmitRunAll(writer http.ResponseWriter, request *http.Request) {
 	if !webutil.ParseForm(writer, request, maxRunFormBody) {
 		return
 	}
-	form := RunAllForm{From: strings.TrimSpace(request.PostFormValue("from")), To: strings.TrimSpace(request.PostFormValue("to")), Errors: map[string]string{}}
+	form := RunAllForm{From: strings.TrimSpace(request.PostFormValue("from")), To: strings.TrimSpace(request.PostFormValue("to")), Errors: map[string]string{}, JobCount: core.CanonicalJobCount}
 	from, err := core.ParseCalendarDate(form.From)
 	if err != nil {
 		form.Errors["from"] = "Enter a valid From date."

@@ -6,6 +6,7 @@ import (
 	"context"
 	"io/fs"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jmoiron/sqlx"
@@ -69,6 +70,11 @@ func TestControlledBootstrapMatchesDWH2Topology(t *testing.T) {
 	if err := db.Get(&unknownCount, `SELECT COUNT(*) FROM source_settings WHERE source_id='legacy_unknown_job'`); err != nil || unknownCount != 1 {
 		t.Fatalf("unknown source was not preserved: count=%d error=%v", unknownCount, err)
 	}
+	var masterSources int
+	if err := db.Get(&masterSources, `SELECT COUNT(*) FROM source_settings WHERE enabled=TRUE AND source_id IN
+		('cif_reference_master','saving_reference_master','time_deposit_reference_master','loan_reference_master','marketing_master')`); err != nil || masterSources != 5 {
+		t.Fatalf("Master source settings=%d error=%v", masterSources, err)
+	}
 	schedulerVersion, err := migrationVersion(migrationDir, "create_ingestion_scheduler.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +107,96 @@ func TestControlledBootstrapMatchesDWH2Topology(t *testing.T) {
 	}
 }
 
+func TestLiveSnapshotNamingMigrationMovesExecutableStateAndPreservesHistory(t *testing.T) {
+	db := integrationdb.Open(t)
+	ctx := context.Background()
+	t.Cleanup(func() { resetToCanonicalTopology(t, db) })
+	migrationDir := filepath.Join(integrationdb.Root(t), "migrations")
+	resetToVersion(t, db, migrationDir, 20260830130000)
+
+	const legacyChecksum = "39344a5541ef427ed51b38da8f8c6ba67a719cd4517ed44cdc95af0c5c8334e4"
+	const canonicalChecksum = "6aabf8e855d1dd0a653754257a4e4bce0380ccf0bb1734b4dc50de2b1f5ec60a"
+	result, err := db.ExecContext(ctx, `INSERT INTO schedules
+		(name,job_key,cron_expression,timezone,policy_kind,policy_version,policy_json,policy_checksum,enabled,next_run_at,revision)
+		VALUES ('active legacy','cif_detail','0 1 * * *','Asia/Jakarta','detail_live_snapshot',1,JSON_OBJECT(),UNHEX(?),TRUE,UTC_TIMESTAMP(6),7)`, legacyChecksum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeSchedule, _ := result.LastInsertId()
+	result, err = db.ExecContext(ctx, `INSERT INTO schedules
+		(name,job_key,cron_expression,timezone,policy_kind,policy_version,policy_json,policy_checksum,enabled,next_run_at,revision,archived_at)
+		VALUES ('archived legacy','saving_detail','0 2 * * *','Asia/Jakarta','detail_live_snapshot',1,JSON_OBJECT(),UNHEX(?),FALSE,NULL,9,UTC_TIMESTAMP(6))`, legacyChecksum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedSchedule, _ := result.LastInsertId()
+	if _, err := db.ExecContext(ctx, `INSERT INTO schedule_occurrences
+		(schedule_id,scheduled_for,identity_source,resolution_mode,status,schedule_revision,job_key,cron_expression,timezone,policy_kind,policy_version,policy_json,policy_checksum)
+		VALUES (?,UTC_TIMESTAMP(6),'validated_cron','live_coalesced','unresolved',7,'cif_detail','0 1 * * *','Asia/Jakarta','detail_live_snapshot',1,JSON_OBJECT(),UNHEX(?))`, activeSchedule, legacyChecksum); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO schedule_occurrences
+		(schedule_id,scheduled_for,identity_source,resolution_mode,status,schedule_revision,job_key,cron_expression,timezone,policy_kind,policy_version,policy_json,policy_checksum,closed_at)
+		VALUES (?,UTC_TIMESTAMP(6),'validated_cron','live_coalesced','resolved',9,'saving_detail','0 2 * * *','Asia/Jakarta','detail_live_snapshot',1,JSON_OBJECT(),UNHEX(?),UTC_TIMESTAMP(6))`, archivedSchedule, legacyChecksum); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO ingestion_runs
+		(kind,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type)
+		VALUES ('job','loan_detail','queued','detail_live_snapshot_v1',1,JSON_OBJECT(),UNHEX(SHA2('{}',256)),'direct'),
+		       ('job','time_deposit_detail','succeeded','detail_live_snapshot_v1',1,JSON_OBJECT(),UNHEX(SHA2('{}',256)),'direct')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpToContext(ctx, db.DB, migrationDir, 20260903090000); err != nil {
+		t.Fatal(err)
+	}
+
+	var activeKind, activeHash, archivedKind string
+	var activeRevision uint64
+	if err := db.QueryRowxContext(ctx, `SELECT policy_kind,HEX(policy_checksum),revision FROM schedules WHERE id=?`, activeSchedule).Scan(&activeKind, &activeHash, &activeRevision); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.GetContext(ctx, &archivedKind, `SELECT policy_kind FROM schedules WHERE id=?`, archivedSchedule); err != nil {
+		t.Fatal(err)
+	}
+	if activeKind != "live_snapshot" || activeHash != strings.ToUpper(canonicalChecksum) || activeRevision != 7 || archivedKind != "detail_live_snapshot" {
+		t.Fatalf("schedule migration active=%s/%s/r%d archived=%s", activeKind, activeHash, activeRevision, archivedKind)
+	}
+	var unresolvedKind, resolvedKind string
+	if err := db.GetContext(ctx, &unresolvedKind, `SELECT policy_kind FROM schedule_occurrences WHERE schedule_id=?`, activeSchedule); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.GetContext(ctx, &resolvedKind, `SELECT policy_kind FROM schedule_occurrences WHERE schedule_id=?`, archivedSchedule); err != nil {
+		t.Fatal(err)
+	}
+	if unresolvedKind != "live_snapshot" || resolvedKind != "detail_live_snapshot" {
+		t.Fatalf("occurrence migration unresolved=%s resolved=%s", unresolvedKind, resolvedKind)
+	}
+	var activeParameter, terminalParameter string
+	if err := db.GetContext(ctx, &activeParameter, `SELECT parameter_kind FROM ingestion_runs WHERE status='queued'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.GetContext(ctx, &terminalParameter, `SELECT parameter_kind FROM ingestion_runs WHERE status='succeeded'`); err != nil {
+		t.Fatal(err)
+	}
+	if activeParameter != "live_snapshot_v1" || terminalParameter != "detail_live_snapshot_v1" {
+		t.Fatalf("run migration active=%s terminal=%s", activeParameter, terminalParameter)
+	}
+}
+
 func resetToCanonicalTopology(t *testing.T, db *sqlx.DB) {
+	t.Helper()
+	ctx := context.Background()
+	dropAllTables(t, db)
+	if err := goose.SetDialect("mysql"); err != nil {
+		t.Error(err)
+		return
+	}
+	if err := goose.UpContext(ctx, db.DB, filepath.Join(integrationdb.Root(t), "migrations")); err != nil {
+		t.Errorf("restore canonical integration topology: %v", err)
+	}
+}
+
+func dropAllTables(t *testing.T, db *sqlx.DB) {
 	t.Helper()
 	ctx := context.Background()
 	connection, err := db.Connx(ctx)
@@ -114,6 +209,11 @@ func resetToCanonicalTopology(t *testing.T, db *sqlx.DB) {
 		t.Error(err)
 		return
 	}
+	defer func() {
+		if _, err := connection.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS=1`); err != nil {
+			t.Error(err)
+		}
+	}()
 	var tables []string
 	if err := connection.SelectContext(ctx, &tables, `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()`); err != nil {
 		t.Error(err)
@@ -125,37 +225,24 @@ func resetToCanonicalTopology(t *testing.T, db *sqlx.DB) {
 			return
 		}
 	}
-	if _, err := connection.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS=1`); err != nil {
-		t.Error(err)
-		return
-	}
+}
+
+func resetToVersion(t *testing.T, db *sqlx.DB, migrationDir string, version int64) {
+	t.Helper()
+	ctx := context.Background()
+	dropAllTables(t, db)
 	if err := goose.SetDialect("mysql"); err != nil {
-		t.Error(err)
-		return
+		t.Fatal(err)
 	}
-	if err := goose.UpContext(ctx, db.DB, filepath.Join(integrationdb.Root(t), "migrations")); err != nil {
-		t.Errorf("restore canonical integration topology: %v", err)
+	if err := goose.UpToContext(ctx, db.DB, migrationDir, version); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func resetToLegacyTopology(t *testing.T, db *sqlx.DB) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS=0`); err != nil {
-		t.Fatal(err)
-	}
-	var tables []string
-	if err := db.SelectContext(ctx, &tables, `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()`); err != nil {
-		t.Fatal(err)
-	}
-	for _, table := range tables {
-		if _, err := db.ExecContext(ctx, "DROP TABLE `"+table+"`"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := db.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS=1`); err != nil {
-		t.Fatal(err)
-	}
+	dropAllTables(t, db)
 	statements := []string{
 		`CREATE TABLE goose_db_version (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -202,7 +289,7 @@ func resetToLegacyTopology(t *testing.T, db *sqlx.DB) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (REPEAT('0',64),1,'2020-01-01')`); err != nil {
 		t.Fatal(err)
 	}
-	keys, err := dwhschema.CanonicalSourceKeys()
+	keys, err := dwhschema.PreMasterSourceKeys()
 	if err != nil {
 		t.Fatal(err)
 	}

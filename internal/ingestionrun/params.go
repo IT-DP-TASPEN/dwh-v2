@@ -16,7 +16,8 @@ const (
 	FixedRangeV1            ParameterKind = "fixed_range_v1"
 	FixedDateSeriesV1       ParameterKind = "fixed_date_series_v1"
 	MaintenanceDateSeriesV2 ParameterKind = "maintenance_date_series_v2"
-	DetailLiveSnapshotV1    ParameterKind = "detail_live_snapshot_v1"
+	LiveSnapshotV1          ParameterKind = "live_snapshot_v1"
+	DetailLiveSnapshotV1    ParameterKind = "detail_live_snapshot_v1" // legacy read compatibility
 	RunAllRangeV1           ParameterKind = "run_all_range_v1"
 )
 
@@ -76,10 +77,10 @@ func NewMaintenanceSeriesExecution(jobKey string, from, to ingestion.CalendarDat
 }
 
 func NewLiveSnapshotExecution(jobKey string) (Parameters, error) {
-	if _, err := requireJob(jobKey, ingestion.NoDate, ingestion.CategoryDetail); err != nil {
+	if _, err := requireJob(jobKey, ingestion.NoDate, ""); err != nil {
 		return Parameters{}, err
 	}
-	return encode(DetailLiveSnapshotV1, struct{}{})
+	return encode(LiveSnapshotV1, struct{}{})
 }
 
 func NewRunAllRange(from, to ingestion.CalendarDate) (Parameters, error) {
@@ -113,8 +114,8 @@ func (parameters Parameters) Validate(job ingestion.JobDefinition) error {
 		}
 		var value DateSeries
 		return validateCanonical(parameters, &value, func() error { return validateDateSeries(value.Dates) })
-	case DetailLiveSnapshotV1:
-		if job.Category != ingestion.CategoryDetail || job.DateStrategy != ingestion.NoDate {
+	case LiveSnapshotV1, DetailLiveSnapshotV1:
+		if job.DateStrategy != ingestion.NoDate {
 			return fmt.Errorf("job %s does not accept live-snapshot parameters", job.Key)
 		}
 		var value struct{}

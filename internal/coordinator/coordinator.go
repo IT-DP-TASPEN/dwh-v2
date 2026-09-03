@@ -23,6 +23,7 @@ type Coordinator struct {
 	executor *ingestionexec.Executor
 	fixed    *ingestionstore.FixedRepository
 	details  *ingestionstore.DetailRepository
+	masters  *ingestionstore.MasterRepository
 	ownerID  string
 	workers  int
 	logger   *slog.Logger
@@ -61,12 +62,13 @@ func New(ctx context.Context, db *sqlx.DB, client *fincloud.Client, logger *slog
 	}
 	fixed := ingestionstore.NewFixedRepository(db)
 	details := ingestionstore.NewDetailRepository(db)
-	executor, err := ingestionexec.New(client, fixed, details,
+	masters := ingestionstore.NewMasterRepository(db)
+	executor, err := ingestionexec.New(client, fixed, details, masters,
 		ingestionstore.NewMaintenanceRepository(db), runs, catalog, settings.FixedMemberConcurrency, settings.DetailConcurrency, logger)
 	if err != nil {
 		return nil, err
 	}
-	return &Coordinator{runs: runs, executor: executor, fixed: fixed, details: details, ownerID: ownerID, workers: settings.MaxRunningJobs, logger: logger,
+	return &Coordinator{runs: runs, executor: executor, fixed: fixed, details: details, masters: masters, ownerID: ownerID, workers: settings.MaxRunningJobs, logger: logger,
 		local: map[uint64]context.CancelCauseFunc{}, parents: map[uint64]string{}}, nil
 }
 
@@ -131,14 +133,45 @@ func (coordinator *Coordinator) Run(ctx context.Context) {
 		wait.Add(1)
 		go func() { defer wait.Done(); coordinator.worker(ctx, executionCtx) }()
 	}
-	wait.Add(4)
+	wait.Add(5)
 	go func() { defer wait.Done(); coordinator.recoverStale(ctx) }()
 	go func() { defer wait.Done(); coordinator.reconcile(ctx) }()
 	go func() { defer wait.Done(); coordinator.cleanupDetailStaging(ctx) }()
 	go func() { defer wait.Done(); coordinator.cleanupFixedStaging(ctx) }()
+	go func() { defer wait.Done(); coordinator.cleanupMasterStaging(ctx) }()
 	<-ctx.Done()
 	stopExecution(ingestionrun.ErrCoordinatorShutdown)
 	wait.Wait()
+}
+
+func (coordinator *Coordinator) cleanupMasterStaging(ctx context.Context) {
+	cleanup := func() {
+		cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		for cleanupCtx.Err() == nil {
+			deleted, err := coordinator.masters.CleanupTerminal(cleanupCtx, 100)
+			if err != nil {
+				if ctx.Err() == nil {
+					coordinator.logger.Warn("clean terminal Master staging", "error", err)
+				}
+				return
+			}
+			if deleted == 0 {
+				return
+			}
+		}
+	}
+	cleanup()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cleanup()
+		}
+	}
 }
 
 func (coordinator *Coordinator) cleanupFixedStaging(ctx context.Context) {

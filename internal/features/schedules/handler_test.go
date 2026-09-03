@@ -47,7 +47,7 @@ func TestBulkScheduleFormAndPermission(t *testing.T) {
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	body := response.Body.String()
-	if response.Code != http.StatusOK || strings.Count(body, `name="job_keys"`) != 36 ||
+	if response.Code != http.StatusOK || strings.Count(body, `name="job_keys"`) != core.CanonicalJobCount ||
 		!strings.Contains(body, "Select all") || !strings.Contains(body, "Asia/Jakarta") || !strings.Contains(body, `action="/schedules/bulk"`) {
 		t.Fatalf("status=%d job_inputs=%d body=%q", response.Code, strings.Count(body, `name="job_keys"`), body)
 	}

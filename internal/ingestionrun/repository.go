@@ -27,7 +27,7 @@ type RuntimeSettings struct {
 }
 
 func NewRepository(db *sqlx.DB, catalog ingestion.Catalog) (*Repository, error) {
-	if db == nil || len(catalog.Jobs()) != 36 {
+	if db == nil || len(catalog.Jobs()) != ingestion.CanonicalJobCount {
 		return nil, fmt.Errorf("database and canonical catalog are required")
 	}
 	return &Repository{db: db, catalog: catalog}, nil

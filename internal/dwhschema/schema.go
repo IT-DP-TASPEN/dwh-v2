@@ -106,3 +106,17 @@ func CanonicalSourceKeys() ([]string, error) {
 	}
 	return keys, nil
 }
+
+func PreMasterSourceKeys() ([]string, error) {
+	catalog, err := ingestion.NewCatalog()
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, ingestion.CanonicalJobCount-5)
+	for _, job := range catalog.Jobs() {
+		if job.Category != ingestion.CategoryMaster {
+			keys = append(keys, job.Key)
+		}
+	}
+	return keys, nil
+}

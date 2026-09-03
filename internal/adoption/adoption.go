@@ -18,6 +18,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/ibldzn/go-admin/internal/dwhschema"
+	"github.com/ibldzn/go-admin/internal/ingestion"
 )
 
 const legacyMaximumVersion int64 = 20260808090000
@@ -73,7 +74,11 @@ func (engine *Engine) Preflight(ctx context.Context) (Result, error) {
 	if err := validateGooseRows(gooseRows); err != nil {
 		return Result{}, err
 	}
-	sources, unexpected, err := engine.sourceSettings(ctx)
+	canonical, err := dwhschema.PreMasterSourceKeys()
+	if err != nil {
+		return Result{}, err
+	}
+	sources, unexpected, err := engine.sourceSettings(ctx, canonical)
 	if err != nil {
 		return Result{}, err
 	}
@@ -192,17 +197,13 @@ func validateGooseRows(rows []gooseRow) error {
 	return nil
 }
 
-func (engine *Engine) sourceSettings(ctx context.Context) ([]SourceSetting, []string, error) {
+func (engine *Engine) sourceSettings(ctx context.Context, canonical []string) ([]SourceSetting, []string, error) {
 	if err := engine.validateSourceSettingsSchema(ctx); err != nil {
 		return nil, nil, err
 	}
 	settings := []SourceSetting{}
 	if err := engine.db.SelectContext(ctx, &settings, `SELECT source_id, enabled, updated_by_user_id FROM source_settings ORDER BY BINARY source_id`); err != nil {
 		return nil, nil, fmt.Errorf("read source_settings: %w", err)
-	}
-	canonical, err := dwhschema.CanonicalSourceKeys()
-	if err != nil {
-		return nil, nil, err
 	}
 	want := make(map[string]bool, len(canonical))
 	for _, key := range canonical {
@@ -568,11 +569,15 @@ func migrationVersion(directory, suffix string) (int64, error) {
 }
 
 func (engine *Engine) verifyFinal(ctx context.Context) error {
-	settings, _, err := engine.sourceSettings(ctx)
+	canonical, err := dwhschema.CanonicalSourceKeys()
 	if err != nil {
 		return err
 	}
-	if len(settings) < 36 {
+	settings, _, err := engine.sourceSettings(ctx, canonical)
+	if err != nil {
+		return err
+	}
+	if len(settings) < ingestion.CanonicalJobCount {
 		return fmt.Errorf("source settings postcondition failed")
 	}
 	for _, table := range []string{
@@ -583,6 +588,8 @@ func (engine *Engine) verifyFinal(ctx context.Context) error {
 		"fincloud_cif_ktp", "stg_fincloud_cif_ktp", "fincloud_cif_addresses", "stg_fincloud_cif_addresses",
 		"fincloud_cif_employment", "stg_fincloud_cif_employment", "fincloud_cif_company", "stg_fincloud_cif_company",
 		"fincloud_cif_kyc", "stg_fincloud_cif_kyc", "fincloud_cif_regulatory", "stg_fincloud_cif_regulatory",
+		"fincloud_reference_categories", "fincloud_reference_items", "stg_fincloud_reference_categories", "stg_fincloud_reference_items",
+		"fincloud_marketing_master", "stg_fincloud_marketing_master",
 	} {
 		var count int
 		if err := engine.db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, table); err != nil || count != 1 {

@@ -31,7 +31,7 @@ func TestCanonicalParametersCoverAllJobDateContracts(t *testing.T) {
 			t.Fatalf("%s validate: %v", job.Key, err)
 		}
 		if job.DateStrategy == ingestion.NoDate && string(first.JSON) != "{}" {
-			t.Fatalf("%s live detail parameters=%s", job.Key, first.JSON)
+			t.Fatalf("%s live-snapshot parameters=%s", job.Key, first.JSON)
 		}
 		if job.DateStrategy == ingestion.SingleDate {
 			var dates []ingestion.CalendarDate
@@ -52,8 +52,23 @@ func TestCanonicalParametersCoverAllJobDateContracts(t *testing.T) {
 			}
 		}
 	}
-	if counts[ingestion.RangeCapable] != 7 || counts[ingestion.SingleDate] != 25 || counts[ingestion.NoDate] != 4 {
+	if counts[ingestion.RangeCapable] != 7 || counts[ingestion.SingleDate] != 25 || counts[ingestion.NoDate] != 9 {
 		t.Fatalf("date strategy counts=%v", counts)
+	}
+}
+
+func TestLiveSnapshotWriterIsCanonicalAndLegacyReaderRemainsCompatible(t *testing.T) {
+	catalog, _ := ingestion.NewCatalog()
+	for _, key := range []string{"cif_detail", "cif_reference_master", "marketing_master"} {
+		job, _ := catalog.Find(key)
+		parameters, err := NewLiveSnapshotExecution(key)
+		if err != nil || parameters.Kind != LiveSnapshotV1 || parameters.Validate(job) != nil {
+			t.Fatalf("%s canonical parameters=%+v error=%v", key, parameters, err)
+		}
+		legacy, _ := encode(DetailLiveSnapshotV1, struct{}{})
+		if err := legacy.Validate(job); err != nil {
+			t.Fatalf("%s legacy compatibility: %v", key, err)
+		}
 	}
 }
 

@@ -20,7 +20,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 )
 
-func TestScheduleManagementDerivesLiveDetailPolicy(t *testing.T) {
+func TestScheduleManagementDerivesLiveSnapshotPolicy(t *testing.T) {
 	db := integrationdb.Open(t)
 	if err := access.Bootstrap(context.Background(), db, nil, time.Now().UTC()); err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestScheduleManagementDerivesLiveDetailPolicy(t *testing.T) {
 		_, _ = db.Exec(`DELETE FROM schedules WHERE id=?`, created.ID)
 		_, _ = db.Exec(`DELETE FROM users WHERE id=?`, actor.ID)
 	})
-	if created.Definition.Policy.Kind != domain.PolicyDetailLiveSnapshot {
+	if created.Definition.Policy.Kind != domain.PolicyLiveSnapshot {
 		t.Fatalf("policy=%s", created.Definition.Policy.Kind)
 	}
 	page, err := service.List(context.Background(), Filter{Job: "cif_detail"}, 1)
@@ -51,7 +51,7 @@ func TestScheduleManagementDerivesLiveDetailPolicy(t *testing.T) {
 		t.Fatalf("schedule list rows=%d error=%v", len(page.Rows), err)
 	}
 
-	bulk, err := service.CreateMany(context.Background(), BulkFormData{JobKeys: []string{"cif_detail", "saving_detail"},
+	bulk, err := service.CreateMany(context.Background(), BulkFormData{JobKeys: []string{"cif_detail", "cif_reference_master"},
 		CronExpression: "0 2 * * *", Timezone: domain.DefaultTimezone}, actor.ID, requester)
 	if err != nil || bulk.Selected != 2 || bulk.Created != 2 || bulk.Skipped != 0 {
 		t.Fatalf("bulk result=%+v error=%v", bulk, err)
@@ -70,8 +70,12 @@ func TestScheduleManagementDerivesLiveDetailPolicy(t *testing.T) {
 	if err := db.Select(&names, `SELECT name FROM schedules WHERE id IN (?,?,?) ORDER BY id`, bulkIDs[0], bulkIDs[1], bulkIDs[2]); err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 3 || names[0] != "CIF Detail" || names[1] != "Saving Detail" || names[2] != "CIF Detail" {
+	if len(names) != 3 || names[0] != "CIF Detail" || names[1] != "CIF Reference Master" || names[2] != "CIF Detail" {
 		t.Fatalf("generated names=%v", names)
+	}
+	var canonicalPolicies int
+	if err := db.Get(&canonicalPolicies, `SELECT COUNT(*) FROM schedules WHERE id IN (?,?,?) AND policy_kind='live_snapshot'`, bulkIDs[0], bulkIDs[1], bulkIDs[2]); err != nil || canonicalPolicies != 3 {
+		t.Fatalf("canonical live-snapshot schedules=%d error=%v", canonicalPolicies, err)
 	}
 	badRequester := securityctx.Requester{Actor: securityctx.Identity{UserID: actor.ID}, Effective: securityctx.Identity{UserID: actor.ID}}
 	if _, err := service.Enable(context.Background(), created.ID, created.Revision, actor.ID, badRequester); err == nil {

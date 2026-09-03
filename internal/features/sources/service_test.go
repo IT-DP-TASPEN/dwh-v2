@@ -25,7 +25,7 @@ func TestManualParameterContractsCoverCatalog(t *testing.T) {
 				t.Fatalf("%s kind=%s", job.Key, parameters.Kind)
 			}
 		case core.NoDate:
-			if parameters.Kind != ingestionrun.DetailLiveSnapshotV1 || string(parameters.JSON) != "{}" {
+			if parameters.Kind != ingestionrun.LiveSnapshotV1 || string(parameters.JSON) != "{}" {
 				t.Fatalf("%s live parameters=%s %s", job.Key, parameters.Kind, parameters.JSON)
 			}
 		case core.SingleDate:
@@ -38,7 +38,7 @@ func TestManualParameterContractsCoverCatalog(t *testing.T) {
 			}
 		}
 	}
-	if counts[core.RangeCapable] != 7 || counts[core.SingleDate] != 25 || counts[core.NoDate] != 4 {
+	if counts[core.RangeCapable] != 7 || counts[core.SingleDate] != 25 || counts[core.NoDate] != 9 {
 		t.Fatalf("date strategy counts=%v", counts)
 	}
 }

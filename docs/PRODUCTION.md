@@ -99,7 +99,18 @@ After restore, run `migrate status`, start the application against the restored 
 3. Start `new-dwh.service` behind HTTPS.
 4. Verify login, RBAC, sources, empty schedules, and run-history pages.
 5. At a separately approved live-source gate, select `${SMOKE_DATE}` and jobs using current evidence about request/member volume, duration, Fincloud load, output rows, database growth, and failure risk.
-6. Validate all 36 contracts using [Production validation](PRODUCTION_VALIDATION.md).
+6. Validate all 41 contracts using [Production validation](PRODUCTION_VALIDATION.md).
 7. Create schedules disabled, review cron/timezone/policy, then enable only approved schedules.
+
+For the 36→41 deployment, quiescence is mandatory: block new Run All submissions, wait for current Run All work, stop the old scheduler/coordinator, and require this query to return zero both before and after stopping writers:
+
+```sql
+SELECT COUNT(*)
+FROM ingestion_runs
+WHERE kind='run_all_parent'
+  AND status='running';
+```
+
+Do not deploy the 41-job binary while this count is nonzero. Apply `20260903090000_rename_live_snapshot.sql` before `20260903091000_create_master_reference_ingestion.sql`, verify no executable legacy live-snapshot rows remain and exactly 41 source settings exist, then start only the new binary.
 
 The candidate smoke order—Vault, Balance Sheet, representative EOD, representative CBR, detail, then CoA—is not proven or mandatory. Live evidence decides the final selection and order.
