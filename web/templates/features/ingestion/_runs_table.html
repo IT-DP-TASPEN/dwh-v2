@@ -143,6 +143,6 @@
       {{end}}
     </table>
   </div>
-  <div class="mt-4 flex items-center justify-between gap-4 text-sm"><p>{{.Data.Pagination.Total}} activities · Page {{.Data.Pagination.Page}} of {{.Data.Pagination.TotalPages}}</p><nav aria-label="Run pagination" class="flex gap-2">{{if .Data.PreviousURL}}<a href="{{.Data.PreviousURL}}" hx-get="{{.Data.PreviousURL}}" hx-target="#runs-table" hx-swap="outerHTML" hx-push-url="true" class="rounded-lg border px-3 py-2 dark:border-slate-700">Previous</a>{{end}}{{if .Data.NextURL}}<a href="{{.Data.NextURL}}" hx-get="{{.Data.NextURL}}" hx-target="#runs-table" hx-swap="outerHTML" hx-push-url="true" class="rounded-lg border px-3 py-2 dark:border-slate-700">Next</a>{{end}}</nav></div>
+  <div class="mt-4 flex items-center justify-between gap-4 text-sm"><p>{{.Data.Pagination.Total}} activities · Page {{.Data.Pagination.Page}} of {{.Data.Pagination.TotalPages}}</p><nav aria-label="Run pagination" class="flex gap-2">{{if .Data.PreviousURL}}<a href="{{.Data.PreviousURL}}" hx-get="{{.Data.PreviousURL}}" hx-target="#runs-table" hx-swap="outerHTML" hx-push-url="true" class="rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700">Previous</a>{{end}}{{if .Data.NextURL}}<a href="{{.Data.NextURL}}" hx-get="{{.Data.NextURL}}" hx-target="#runs-table" hx-swap="outerHTML" hx-push-url="true" class="rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700">Next</a>{{end}}</nav></div>
 </div>
 {{end}}

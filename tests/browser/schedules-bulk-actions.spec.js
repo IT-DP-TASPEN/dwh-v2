@@ -9,6 +9,8 @@ async function confirmBulk(page, action, count) {
   await page.getByRole("button", { name: action, exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("heading", { name: `${action} ${count} schedules?` })).toBeVisible();
+  await expect(dialog).toHaveClass(/(^|\s)border-slate-200(\s|$)/);
+  await expect(dialog).toHaveClass(/(^|\s)dark:border-slate-700(\s|$)/);
   if (action === "Archive") {
     await expect(dialog).toContainText("This action is permanent. Archived schedules cannot be enabled or restored.");
   }
