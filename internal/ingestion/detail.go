@@ -22,6 +22,8 @@ const (
 	DetailSaving      DetailDomain = "saving"
 	DetailTimeDeposit DetailDomain = "time_deposit"
 	DetailLoan        DetailDomain = "loan"
+
+	SavingAccountStatementChildKey = "mutasi"
 )
 
 type MapperMetadata struct {
@@ -39,7 +41,7 @@ func IsSafeMapperDiagnostic(class, field, category, reason, message string) bool
 	if class != "detail_mapping" || !mapperFieldAllowed(field) {
 		return false
 	}
-	if _, found := map[string]struct{}{"string": {}, "decimal": {}, "integer": {}, "date": {}, "datetime": {}, "identifier": {}, "structure": {}}[category]; !found {
+	if _, found := map[string]struct{}{"string": {}, "decimal": {}, "integer": {}, "date": {}, "time": {}, "datetime": {}, "identifier": {}, "structure": {}}[category]; !found {
 		return false
 	}
 	if _, found := map[string]struct{}{"missing": {}, "required": {}, "invalid_json": {}, "expected_array": {}, "expected_object": {}, "invalid_value": {}}[reason]; !found {
@@ -151,6 +153,40 @@ func MapSavingDetail(ctx context.Context, detail *fincloud.SavingDetail, fetched
 	return MapDetailPayload(ctx, DetailSaving, detail.RawPayload, fetchedAt)
 }
 
+func MapSavingAccountStatement(ctx context.Context, accountNo string, statement *fincloud.SavingAccountStatement) ([]DetailChildRecord, error) {
+	if strings.TrimSpace(accountNo) == "" || statement == nil {
+		return nil, mapperError(SavingAccountStatementChildKey, "structure", "missing", "detail payload is missing", nil)
+	}
+	shape, _ := detailShapeFor(DetailSaving)
+	childShape := shape.children[0]
+	mapped := make([]DetailChildRecord, len(statement.Mutations))
+	for index, item := range statement.Mutations {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		raw := bytes.TrimSpace(item.RawPayload)
+		if len(raw) == 0 {
+			return nil, mapperError(SavingAccountStatementChildKey, "structure", "missing", "detail child item is invalid", nil)
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var object map[string]any
+		if err := decoder.Decode(&object); err != nil || object == nil {
+			return nil, mapperError(SavingAccountStatementChildKey, "structure", "invalid_json", "detail child item is invalid", err)
+		}
+		data, err := json.Marshal(object)
+		if err != nil {
+			return nil, mapperError(SavingAccountStatementChildKey, "structure", "invalid_json", "detail child item is invalid", err)
+		}
+		fields, err := mapFields(object, childShape.fields, SavingAccountStatementChildKey+".")
+		if err != nil {
+			return nil, fmt.Errorf("%s[%d]: %w", SavingAccountStatementChildKey, index, err)
+		}
+		mapped[index] = DetailChildRecord{Identifier: accountNo, ItemIndex: index, Fields: fields, RawItemPayload: data, RawItemChecksum: sha256Hex(data)}
+	}
+	return mapped, nil
+}
+
 func MapTimeDepositDetail(ctx context.Context, detail *fincloud.TimeDepositDetail, fetchedAt time.Time) (DetailRecord, error) {
 	if detail == nil {
 		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
@@ -251,9 +287,14 @@ type detailValueType int
 
 const (
 	detailString detailValueType = iota
+	detailSourceText
 	detailDecimal
+	detailDecimalString
+	detailDecimalNumber
 	detailInteger
 	detailDate
+	detailExactDate
+	detailTime
 	detailDateTime
 )
 
@@ -287,6 +328,14 @@ func requiredField(target, source string, valueType detailValueType) detailField
 
 func preservedString(target, source string) detailField {
 	return detailField{target: target, source: source, valueType: detailString, preserveEmpty: true}
+}
+
+func exactField(target, source string, valueType detailValueType) detailField {
+	return detailField{target: target, source: source, valueType: valueType, preserveEmpty: true}
+}
+
+func sourceText(target, source string) detailField {
+	return exactField(target, source, detailSourceText)
 }
 
 func fallbackString(target, primary, fallback string) detailField {
@@ -414,7 +463,15 @@ func detailShapeFor(domain DetailDomain) (detailShape, error) {
 			field("fixed_debit_interest_payment_day", "pembayaranbunga_debit_tgltetap", detailInteger),
 			field("fixed_credit_interest_payment_day", "pembayaranbunga_kredit_tgltetap", detailInteger),
 			preservedString("marketing_code", "kode_marketing"), preservedString("marketing_notes", "notes_marketing"),
-		}}, nil
+		}, children: []detailChildShape{{sourceKey: SavingAccountStatementChildKey, fields: []detailField{
+			exactField("transaction_date", "tgltransaksi", detailExactDate), exactField("transaction_time", "jam", detailTime),
+			exactField("opening_balance", "saldoawal", detailDecimalString), exactField("debit", "debit", detailDecimalString),
+			exactField("credit", "kredit", detailDecimalString), exactField("closing_balance", "saldoakhir", detailDecimalString),
+			exactField("closing_balance_equivalent", "saldoakhir_equivalent", detailDecimalString),
+			sourceText("transaction_type", "jenistransaksi"), sourceText("description", "keterangan"), sourceText("reference", "referensi"),
+			sourceText("location", "lokasi"), sourceText("journal_no", "nojurnal"), sourceText("created_by", "rec_dibuat_oleh"),
+			exactField("trx_rate", "trx_rate", detailDecimalNumber), exactField("mid_rate_dc", "mid_rate_dc", detailDecimalString),
+		}}}}, nil
 	case DetailTimeDeposit:
 		return detailShape{identifierKey: "id", fields: []detailField{
 			requiredField("account_no", "id", detailString), requiredField("cif_no", "nocif", detailString),
@@ -571,14 +628,16 @@ func lookupDetailValue(source map[string]any, path string) (any, bool, error) {
 
 func (valueType detailValueType) category() string {
 	switch valueType {
-	case detailString:
+	case detailString, detailSourceText:
 		return "string"
-	case detailDecimal:
+	case detailDecimal, detailDecimalString, detailDecimalNumber:
 		return "decimal"
 	case detailInteger:
 		return "integer"
-	case detailDate:
+	case detailDate, detailExactDate:
 		return "date"
+	case detailTime:
+		return "time"
 	case detailDateTime:
 		return "datetime"
 	default:
@@ -596,10 +655,13 @@ func identifierField(shape detailShape) string {
 }
 
 func convertDetailValue(value any, valueType detailValueType) (any, error) {
-	scalar := func() (string, error) {
+	scalar := func(trim bool) (string, error) {
 		switch typed := value.(type) {
 		case string:
-			return strings.TrimSpace(typed), nil
+			if trim {
+				return strings.TrimSpace(typed), nil
+			}
+			return typed, nil
 		case json.Number:
 			return typed.String(), nil
 		case bool:
@@ -610,15 +672,33 @@ func convertDetailValue(value any, valueType detailValueType) (any, error) {
 	}
 	switch valueType {
 	case detailString:
-		return scalar()
+		return scalar(true)
+	case detailSourceText:
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("must be string")
+		}
+		return text, nil
 	case detailDecimal:
-		text, err := scalar()
+		text, err := scalar(true)
 		if err != nil {
 			return nil, err
 		}
 		return fincloud.Scalar(text).Decimal()
+	case detailDecimalString:
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("must be string")
+		}
+		return fincloud.Scalar(text).Decimal()
+	case detailDecimalNumber:
+		number, ok := value.(json.Number)
+		if !ok {
+			return nil, fmt.Errorf("must be JSON number")
+		}
+		return fincloud.Scalar(number.String()).Decimal()
 	case detailInteger:
-		text, err := scalar()
+		text, err := scalar(true)
 		if err != nil {
 			return nil, err
 		}
@@ -631,11 +711,31 @@ func convertDetailValue(value any, valueType detailValueType) (any, error) {
 			}
 			return ParseFincloudDate(wrapped)
 		}
-		text, err := scalar()
+		text, err := scalar(true)
 		if err != nil {
 			return nil, err
 		}
 		return ParseFincloudDate(text)
+	case detailExactDate:
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("must be string")
+		}
+		parsed, err := time.Parse("2006-01-02", text)
+		if err != nil || parsed.Format("2006-01-02") != text {
+			return nil, fmt.Errorf("invalid Fincloud date")
+		}
+		return CalendarDateFromTime(parsed), nil
+	case detailTime:
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("must be string")
+		}
+		parsed, err := time.Parse("15:04:05", text)
+		if err != nil || parsed.Format("15:04:05") != text {
+			return nil, fmt.Errorf("invalid Fincloud time")
+		}
+		return text, nil
 	case detailDateTime:
 		if wrapper, ok := value.(map[string]any); ok {
 			wrapped, ok := wrapper["date"].(string)
@@ -647,7 +747,7 @@ func convertDetailValue(value any, valueType detailValueType) (any, error) {
 			}
 			return ParseFincloudDateTime(wrapped)
 		}
-		text, err := scalar()
+		text, err := scalar(true)
 		if err != nil {
 			return nil, err
 		}

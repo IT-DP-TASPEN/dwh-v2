@@ -556,6 +556,48 @@ func TestMaintenanceParseIdentityAndCancellation(t *testing.T) {
 	}
 }
 
+func TestSavingAccountStatementMapperPreservesOrdinalDuplicatesAndSourceText(t *testing.T) {
+	raw := json.RawMessage(`{"tgltransaksi":"2026-08-31","jam":"01:34:35","saldoawal":"9,057,279.49","debit":"3,000.00","kredit":null,"saldoakhir":"9,054,279.49","saldoakhir_equivalent":"9,054,279.49","jenistransaksi":" same ","keterangan":"  unbounded exact text  ","referensi":"shared","lokasi":" HQ ","nojurnal":"shared","rec_dibuat_oleh":" system ","trx_rate":1,"mid_rate_dc":"1.00","unknown":{"kept":true}}`)
+	statement := &fincloud.SavingAccountStatement{Mutations: []fincloud.SavingAccountStatementItem{{RawPayload: raw}, {RawPayload: raw}}}
+	children, err := MapSavingAccountStatement(context.Background(), "S-1", statement)
+	if err != nil || len(children) != 2 {
+		t.Fatalf("children=%+v error=%v", children, err)
+	}
+	for index, child := range children {
+		if child.Identifier != "S-1" || child.ItemIndex != index || child.Fields["description"] != "  unbounded exact text  " || child.Fields["location"] != " HQ " || child.Fields["credit"] != nil {
+			t.Fatalf("child[%d]=%+v", index, child)
+		}
+		if got := child.Fields["opening_balance"].(decimal.Decimal).String(); got != "9057279.49" {
+			t.Fatalf("opening balance=%s", got)
+		}
+		if !bytes.Contains(child.RawItemPayload, []byte(`"unknown":{"kept":true}`)) || child.RawItemChecksum == "" {
+			t.Fatalf("raw/checksum=%s %q", child.RawItemPayload, child.RawItemChecksum)
+		}
+		if child.RawItemChecksum != "fd8e736b99c901ff23244f79c07a3a4d79c6aca4fdb097105dc519ec425fc3e8" {
+			t.Fatalf("statement checksum=%s", child.RawItemChecksum)
+		}
+	}
+	if string(children[0].RawItemPayload) != string(children[1].RawItemPayload) || children[0].RawItemChecksum != children[1].RawItemChecksum {
+		t.Fatal("exact duplicate statement rows were not preserved")
+	}
+}
+
+func TestSavingAccountStatementMapperRejectsInvalidTypedValues(t *testing.T) {
+	for _, raw := range []string{
+		`{"tgltransaksi":"31-08-2026"}`,
+		`{"jam":"1:34:35"}`,
+		`{"saldoawal":"1,23.00"}`,
+		`{"saldoawal":1}`,
+		`{"trx_rate":"1"}`,
+		`{"keterangan":1}`,
+	} {
+		_, err := MapSavingAccountStatement(context.Background(), "S-1", &fincloud.SavingAccountStatement{Mutations: []fincloud.SavingAccountStatementItem{{RawPayload: json.RawMessage(raw)}}})
+		if err == nil {
+			t.Fatalf("invalid statement item accepted: %s", raw)
+		}
+	}
+}
+
 func TestMaintenanceBundleResolution(t *testing.T) {
 	requested, _ := ParseCalendarDate("2026-08-12")
 	bundle, err := ResolveMaintenanceBundle(MaintenanceCBR, requested, map[string]string{

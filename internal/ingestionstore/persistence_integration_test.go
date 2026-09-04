@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -20,6 +21,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	databasepkg "github.com/ibldzn/go-admin/internal/database"
+	"github.com/ibldzn/go-admin/internal/fincloud"
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 	"github.com/shopspring/decimal"
@@ -686,6 +688,7 @@ func TestExpandedSavingLoanAndChildFieldsPersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	saving.Children[ingestion.SavingAccountStatementChildKey] = []ingestion.DetailChildRecord{}
 	if err := repository.Stage(context.Background(), savingID, saving); err != nil {
 		t.Fatal(err)
 	}
@@ -726,6 +729,92 @@ func TestExpandedSavingLoanAndChildFieldsPersist(t *testing.T) {
 	}
 	if err := db.Get(&authorizer, `SELECT authorizer FROM fincloud_loan_payment_history WHERE account_no='L-1' AND item_index=0`); err != nil || authorizer != "checker" {
 		t.Fatalf("authorizer=%q error=%v", authorizer, err)
+	}
+}
+
+func TestSavingAccountStatementExactSetTextAndTimestamps(t *testing.T) {
+	db := integrationdb.Open(t)
+	resetDetail(t, db.DB)
+	repository := NewDetailRepository(db)
+	firstFetched := time.Date(2026, 8, 31, 1, 2, 3, 0, time.UTC)
+	description := strings.Repeat("long-description-", 40)
+	duplicate := fmt.Sprintf(`{"tgltransaksi":"2026-08-31","jam":"01:34:35","saldoawal":"9,057,279.49","debit":"3,000.00","kredit":null,"saldoakhir":"9,054,279.49","saldoakhir_equivalent":"9,054,279.49","jenistransaksi":"same","keterangan":%q,"referensi":"shared","lokasi":"HQ","nojurnal":"shared","rec_dibuat_oleh":"system","trx_rate":1,"mid_rate_dc":"1.00"}`, description)
+
+	missingRun, _ := detailRun(t, db.DB, "saving_detail", 1)
+	missing, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailSaving, []byte(`{"norekening":"S-1","nocif":"C-1","saldoawal":"1","saldoakhir":"2"}`), firstFetched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Stage(context.Background(), missingRun, missing); err == nil {
+		t.Fatal("saving detail without mandatory statement staged")
+	}
+	var staged int
+	if err := db.Get(&staged, `SELECT COUNT(*) FROM stg_fincloud_saving_details WHERE ingestion_run_id=?`, missingRun); err != nil || staged != 0 {
+		t.Fatalf("failed mandatory child stage left parent=%d error=%v", staged, err)
+	}
+
+	firstID, firstOwner := detailRun(t, db.DB, "saving_detail", 1)
+	first := savingStatementRecord(t, "S-1", firstFetched, duplicate, duplicate)
+	if err := repository.Stage(context.Background(), firstID, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Publish(context.Background(), firstID, firstOwner, ingestion.DetailSaving, 1); err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	if err := db.Get(&rows, `SELECT COUNT(*) FROM fincloud_saving_account_statements WHERE account_no='S-1'`); err != nil || rows != 2 {
+		t.Fatalf("duplicate statement rows=%d error=%v", rows, err)
+	}
+	var storedDescription, debit, credit string
+	if err := db.QueryRow(`SELECT description,CAST(debit AS CHAR),COALESCE(CAST(credit AS CHAR),'NULL') FROM fincloud_saving_account_statements WHERE account_no='S-1' AND item_index=0`).Scan(&storedDescription, &debit, &credit); err != nil || storedDescription != description || !decimal.RequireFromString(debit).Equal(decimal.RequireFromString("3000")) || credit != "NULL" {
+		t.Fatalf("statement description=%q debit=%q credit=%q error=%v", storedDescription, debit, credit, err)
+	}
+
+	fixed := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	if _, err := db.Exec(`UPDATE fincloud_saving_account_statements SET created_at=?,updated_at=? WHERE account_no='S-1'`, fixed, fixed); err != nil {
+		t.Fatal(err)
+	}
+	secondFetched := firstFetched.Add(time.Hour)
+	secondID, secondOwner := detailRun(t, db.DB, "saving_detail", 1)
+	second := savingStatementRecord(t, "S-1", secondFetched, duplicate, duplicate, `{"tgltransaksi":"2026-08-30","jam":"23:59:59","referensi":"shared","nojurnal":"shared","trx_rate":1,"mid_rate_dc":"1.00"}`)
+	if err := repository.Stage(context.Background(), secondID, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Publish(context.Background(), secondID, secondOwner, ingestion.DetailSaving, 1); err != nil {
+		t.Fatal(err)
+	}
+	var timestamps struct {
+		Created, Updated, Fetched time.Time
+	}
+	if err := db.QueryRow(`SELECT created_at,updated_at,last_fetched_at FROM fincloud_saving_account_statements WHERE account_no='S-1' AND item_index=0`).Scan(&timestamps.Created, &timestamps.Updated, &timestamps.Fetched); err != nil || !timestamps.Created.Equal(fixed) || !timestamps.Updated.Equal(fixed) || !timestamps.Fetched.Equal(secondFetched) {
+		t.Fatalf("unchanged statement timestamps=%+v error=%v", timestamps, err)
+	}
+	if err := db.Get(&rows, `SELECT COUNT(*) FROM fincloud_saving_account_statements WHERE account_no='S-1'`); err != nil || rows != 3 {
+		t.Fatalf("added statement rows=%d error=%v", rows, err)
+	}
+
+	thirdID, thirdOwner := detailRun(t, db.DB, "saving_detail", 1)
+	third := savingStatementRecord(t, "S-1", secondFetched.Add(time.Hour), duplicate)
+	if err := repository.Stage(context.Background(), thirdID, third); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Publish(context.Background(), thirdID, thirdOwner, ingestion.DetailSaving, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&rows, `SELECT COUNT(*) FROM fincloud_saving_account_statements WHERE account_no='S-1'`); err != nil || rows != 1 {
+		t.Fatalf("removed statement rows=%d error=%v", rows, err)
+	}
+
+	emptyID, emptyOwner := detailRun(t, db.DB, "saving_detail", 1)
+	empty := savingStatementRecord(t, "S-1", secondFetched.Add(2*time.Hour))
+	if err := repository.Stage(context.Background(), emptyID, empty); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Publish(context.Background(), emptyID, emptyOwner, ingestion.DetailSaving, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&rows, `SELECT COUNT(*) FROM fincloud_saving_account_statements WHERE account_no='S-1'`); err != nil || rows != 0 {
+		t.Fatalf("authoritative empty statement rows=%d error=%v", rows, err)
 	}
 }
 
@@ -799,6 +888,9 @@ func TestGroupedDetailDecimalsPersistExactly(t *testing.T) {
 		record, err := ingestion.MapDetailPayload(context.Background(), sample.domain, []byte(sample.payload), fetched)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if sample.domain == ingestion.DetailSaving {
+			record.Children[ingestion.SavingAccountStatementChildKey] = []ingestion.DetailChildRecord{}
 		}
 		if err := repository.Stage(context.Background(), runID, record); err != nil {
 			t.Fatal(err)
@@ -1201,6 +1293,30 @@ func mapDetailRecord(t *testing.T, domain ingestion.DetailDomain, identifier str
 		t.Fatalf("unsupported Detail domain %s", domain)
 	}
 	record, err := ingestion.MapDetailPayload(context.Background(), domain, []byte(payload), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if domain == ingestion.DetailSaving {
+		record.Children[ingestion.SavingAccountStatementChildKey] = []ingestion.DetailChildRecord{
+			{Identifier: identifier, ItemIndex: 0, Fields: map[string]any{}, RawItemPayload: json.RawMessage(fmt.Sprintf(`{"version":%d,"row":0}`, version)), RawItemChecksum: fmt.Sprintf("%064d", version*10)},
+			{Identifier: identifier, ItemIndex: 1, Fields: map[string]any{}, RawItemPayload: json.RawMessage(fmt.Sprintf(`{"version":%d,"row":1}`, version)), RawItemChecksum: fmt.Sprintf("%064d", version*10+1)},
+		}
+	}
+	return record
+}
+
+func savingStatementRecord(t *testing.T, accountNo string, fetchedAt time.Time, rawItems ...string) ingestion.DetailRecord {
+	t.Helper()
+	record, err := ingestion.MapDetailPayload(context.Background(), ingestion.DetailSaving,
+		[]byte(fmt.Sprintf(`{"norekening":%q,"nocif":"C-1","saldoawal":"1","saldoakhir":"2"}`, accountNo)), fetchedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := &fincloud.SavingAccountStatement{Mutations: make([]fincloud.SavingAccountStatementItem, len(rawItems))}
+	for index, raw := range rawItems {
+		statement.Mutations[index].RawPayload = json.RawMessage(raw)
+	}
+	record.Children[ingestion.SavingAccountStatementChildKey], err = ingestion.MapSavingAccountStatement(context.Background(), accountNo, statement)
 	if err != nil {
 		t.Fatal(err)
 	}

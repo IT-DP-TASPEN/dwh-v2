@@ -15,8 +15,10 @@ func TestDetailCurrentStateSchemaIdentityAndCascades(t *testing.T) {
 	db := integrationdb.Open(t)
 	for _, table := range []string{
 		"fincloud_cifs", "fincloud_saving_details", "fincloud_time_deposit_details", "fincloud_time_deposit_mutations",
+		"fincloud_saving_account_statements",
 		"fincloud_loan_details", "fincloud_loan_disbursement_fees", "fincloud_loan_repayment_schedule", "fincloud_loan_payment_history",
 		"stg_fincloud_cif_details", "stg_fincloud_saving_details", "stg_fincloud_time_deposit_details", "stg_fincloud_time_deposit_mutations",
+		"stg_fincloud_saving_account_statements",
 		"stg_fincloud_loan_details", "stg_fincloud_loan_disbursement_fees", "stg_fincloud_loan_repayment_schedule", "stg_fincloud_loan_payment_history",
 	} {
 		var dated int
@@ -90,12 +92,46 @@ func TestDetailCurrentStateSchemaIdentityAndCascades(t *testing.T) {
 	}
 	for _, constraint := range []string{
 		"fk_stg_fincloud_time_deposit_mutations_parent", "fk_stg_fincloud_loan_fees_parent",
-		"fk_stg_fincloud_loan_schedule_parent", "fk_stg_fincloud_loan_history_parent",
+		"fk_stg_fincloud_loan_schedule_parent", "fk_stg_fincloud_loan_history_parent", "fk_stg_fincloud_saving_account_statements_parent",
 	} {
 		var rule string
 		if err := db.Get(&rule, `SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
 			WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME=?`, constraint); err != nil || rule != "CASCADE" {
 			t.Fatalf("retained staging child constraint %s rule=%q error=%v", constraint, rule, err)
+		}
+	}
+	for _, constraint := range []string{"fk_fincloud_saving_account_statements_parent", "fk_stg_fincloud_saving_account_statements_parent"} {
+		var rule string
+		if err := db.Get(&rule, `SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
+			WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME=?`, constraint); err != nil || rule != "CASCADE" {
+			t.Fatalf("statement constraint %s rule=%q error=%v", constraint, rule, err)
+		}
+	}
+	for _, column := range []struct{ name, want string }{
+		{"transaction_date", "date"}, {"transaction_time", "time"}, {"opening_balance", "decimal(24,6)"},
+		{"debit", "decimal(24,6)"}, {"credit", "decimal(24,6)"}, {"trx_rate", "decimal(24,6)"}, {"mid_rate_dc", "decimal(24,6)"},
+		{"transaction_type", "text"}, {"description", "text"}, {"reference", "text"}, {"location", "text"}, {"journal_no", "text"}, {"created_by", "text"},
+	} {
+		var got string
+		if err := db.Get(&got, `SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='fincloud_saving_account_statements' AND COLUMN_NAME=?`, column.name); err != nil || !strings.EqualFold(got, column.want) {
+			t.Fatalf("statement.%s type=%q want=%q error=%v", column.name, got, column.want, err)
+		}
+	}
+	for _, table := range []string{"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements"} {
+		var fetched, timestamps int
+		if err := db.Get(&fetched, `SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME='last_fetched_at'`, table); err != nil || fetched != 1 {
+			t.Fatalf("%s last_fetched_at=%d error=%v", table, fetched, err)
+		}
+		if err := db.Get(&timestamps, `SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME IN ('created_at','updated_at')`, table); err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if table == "fincloud_saving_account_statements" {
+			want = 2
+		}
+		if timestamps != want {
+			t.Fatalf("%s audit timestamps=%d want=%d", table, timestamps, want)
 		}
 	}
 }

@@ -33,6 +33,7 @@ var EmptyBeforeAdoption = []string{
 	"fincloud_cif_kyc", "stg_fincloud_cif_kyc",
 	"fincloud_cif_regulatory", "stg_fincloud_cif_regulatory",
 	"fincloud_saving_details", "stg_fincloud_saving_details",
+	"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements",
 	"fincloud_time_deposit_details", "stg_fincloud_time_deposit_details", "fincloud_time_deposit_mutations",
 	"stg_fincloud_time_deposit_mutations",
 	"fincloud_loan_details", "stg_fincloud_loan_details", "fincloud_loan_disbursement_fees",
@@ -51,6 +52,7 @@ type MigrationGroup struct {
 }
 
 var AdoptionMigrationGroups = []MigrationGroup{
+	{"create_saving_account_statements.sql", []string{"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements"}},
 	{"expand_detail_typed_schema.sql", []string{
 		"stg_fincloud_cif_personal_profiles", "stg_fincloud_cif_ktp", "stg_fincloud_cif_addresses",
 		"stg_fincloud_cif_employment", "stg_fincloud_cif_company", "stg_fincloud_cif_kyc", "stg_fincloud_cif_regulatory",

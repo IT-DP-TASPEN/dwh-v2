@@ -583,6 +583,7 @@ func (engine *Engine) verifyFinal(ctx context.Context) error {
 	for _, table := range []string{
 		"roles", "permissions", "role_permissions", "users", "sessions", "audit_logs", "ingestion_runtime_settings",
 		"ingestion_runs", "ingestion_run_errors", "fixed_report_loads", "fincloud_cifs", "dynamic_csv_sources",
+		"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements",
 		"schedules", "schedule_occurrences", "schedule_attempts",
 		"fincloud_cif_personal_profiles", "stg_fincloud_cif_personal_profiles",
 		"fincloud_cif_ktp", "stg_fincloud_cif_ktp", "fincloud_cif_addresses", "stg_fincloud_cif_addresses",

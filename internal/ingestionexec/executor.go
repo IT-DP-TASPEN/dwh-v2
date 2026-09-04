@@ -35,6 +35,7 @@ type Executor struct {
 	catalog           ingestion.Catalog
 	fixedConcurrency  int
 	detailConcurrency int
+	acquireSession    func(context.Context, fincloud.AuthContext) (fincloud.Lease, error)
 	now               func() time.Time
 	logger            *slog.Logger
 }
@@ -102,7 +103,7 @@ func New(sessions *fincloud.SessionCoordinator, authProfiles *fincloudauth.Repos
 		return nil, fmt.Errorf("complete ingestion executor dependencies are required")
 	}
 	return &Executor{sessions: sessions, authProfiles: authProfiles, fixed: fixed, detail: detail, master: master, maintenance: maintenance, runs: runs, updateProgress: runs.UpdateProgress, catalog: catalog,
-		fixedConcurrency: fixedConcurrency, detailConcurrency: detailConcurrency, now: time.Now, logger: logger}, nil
+		fixedConcurrency: fixedConcurrency, detailConcurrency: detailConcurrency, acquireSession: sessions.Acquire, now: time.Now, logger: logger}, nil
 }
 
 func (executor *Executor) Execute(ctx context.Context, run ingestionrun.Run, ownerID string) Result {
@@ -143,7 +144,11 @@ func (executor *Executor) Execute(ctx context.Context, run ingestionrun.Run, own
 		recordTerminalFallback(ctx, recorder, result)
 		return result
 	}
-	lease, err := executor.sessions.Acquire(ctx, auth)
+	acquire := executor.acquireSession
+	if acquire == nil {
+		acquire = executor.sessions.Acquire
+	}
+	lease, err := acquire(ctx, auth)
 	if err != nil {
 		if result, cancelled := cancellationFailure(ctx, "waiting_fincloud_session", err); cancelled {
 			recordTerminalFallback(ctx, recorder, result)
@@ -153,7 +158,8 @@ func (executor *Executor) Execute(ctx context.Context, run ingestionrun.Run, own
 		recordTerminalFallback(ctx, recorder, result)
 		return result
 	}
-	defer lease.Release()
+	release := sync.OnceFunc(lease.Release)
+	defer release()
 	scoped := *executor
 	scoped.client = lease.Client()
 	var result Result
@@ -161,7 +167,7 @@ func (executor *Executor) Execute(ctx context.Context, run ingestionrun.Run, own
 	case ingestion.CategoryFixed:
 		result = scoped.executeFixed(ctx, run, job)
 	case ingestion.CategoryDetail:
-		result = scoped.executeDetail(ctx, run, job)
+		result = scoped.executeDetail(ctx, run, job, release)
 	case ingestion.CategoryMaster:
 		result = scoped.executeMaster(ctx, run, job)
 	case ingestion.CategoryEOD, ingestion.CategoryCBR:
@@ -593,7 +599,7 @@ func fixedFailure(ctx context.Context, result fixedMemberResult) Result {
 	}
 }
 
-func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
+func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition, release func()) Result {
 	progressWrites := true
 	if err := executor.detail.PrepareRun(ctx, run.ID); err != nil {
 		return failed("persistence", "could not prepare Detail staging", "prepare_detail_staging", err)
@@ -618,6 +624,9 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 			return executor.persistProgress(ctx, run, progress, diagnostics, &progressWrites)
 		},
 	)
+	if job.Key == "saving_detail" {
+		release()
+	}
 	if outcome.progress.Started < outcome.progress.Total && ctx.Err() != nil {
 		if result, cancelled := cancellationFailure(ctx, "fetch_detail", ctx.Err()); cancelled {
 			return result
@@ -822,7 +831,17 @@ func (executor *Executor) fetchAndStageDetail(ctx context.Context, runID uint64,
 		if fetchErr != nil {
 			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
 		}
+		if value.AccountNo != identifier {
+			return detailItemResult{layer: detailLayerMap, identifier: identifier, err: fmt.Errorf("saving detail identifier does not match requested account")}
+		}
+		statement, fetchErr := executor.client.FetchSavingAccountStatement(ctx, identifier)
+		if fetchErr != nil {
+			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
+		}
 		record, err = ingestion.MapSavingDetail(ctx, value, fetchedAt)
+		if err == nil {
+			record.Children[ingestion.SavingAccountStatementChildKey], err = ingestion.MapSavingAccountStatement(ctx, identifier, statement)
+		}
 	case "time_deposit_detail":
 		value, fetchErr := executor.client.FetchTimeDepositDetail(ctx, identifier)
 		if fetchErr != nil {

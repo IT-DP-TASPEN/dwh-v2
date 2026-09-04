@@ -20,12 +20,12 @@ func TestDetailPublicationAtObservedScale(t *testing.T) {
 	db := integrationdb.Open(t)
 	repository := NewDetailRepository(db)
 	tests := []struct {
-		name                                         string
-		domain                                       ingestion.DetailDomain
-		parents, mutations, fees, schedules, history int
+		name                                                     string
+		domain                                                   ingestion.DetailDomain
+		parents, statements, mutations, fees, schedules, history int
 	}{
 		{name: "cif", domain: ingestion.DetailCIF, parents: 36_851},
-		{name: "saving", domain: ingestion.DetailSaving, parents: 38_260},
+		{name: "saving", domain: ingestion.DetailSaving, parents: 38_260, statements: 38_260},
 		{name: "time_deposit", domain: ingestion.DetailTimeDeposit, parents: 4_202, mutations: 81_177},
 		{name: "loan", domain: ingestion.DetailLoan, parents: 13_455, fees: 13_913, schedules: 1_378_595, history: 236_253},
 	}
@@ -50,7 +50,7 @@ func TestDetailPublicationAtObservedScale(t *testing.T) {
 				t.Fatalf("parents=%d want=%d error=%v", parents, test.parents, err)
 			}
 			for _, child := range specification.children {
-				want := map[string]int{"mutasideposito": test.mutations, "biayapencairan": test.fees, "jadwalangsuran": test.schedules, "historybayar": test.history}[child.key]
+				want := map[string]int{ingestion.SavingAccountStatementChildKey: test.statements, "mutasideposito": test.mutations, "biayapencairan": test.fees, "jadwalangsuran": test.schedules, "historybayar": test.history}[child.key]
 				var count int
 				if err := db.Get(&count, "SELECT COUNT(*) FROM `"+child.table+"`"); err != nil || count != want {
 					t.Fatalf("%s rows=%d want=%d error=%v", child.table, count, want, err)
@@ -72,9 +72,9 @@ func TestDetailPublicationAtObservedScale(t *testing.T) {
 }
 
 func stageScaleDetails(t *testing.T, repository *DetailRepository, runID uint64, test struct {
-	name                                         string
-	domain                                       ingestion.DetailDomain
-	parents, mutations, fees, schedules, history int
+	name                                                     string
+	domain                                                   ingestion.DetailDomain
+	parents, statements, mutations, fees, schedules, history int
 }) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -88,6 +88,7 @@ func stageScaleDetails(t *testing.T, repository *DetailRepository, runID uint64,
 			defer workers.Done()
 			for index := range jobs {
 				if err := repository.Stage(ctx, runID, scaleDetailRecord(test.domain, index,
+					distributedCount(test.statements, test.parents, index),
 					distributedCount(test.mutations, test.parents, index), distributedCount(test.fees, test.parents, index),
 					distributedCount(test.schedules, test.parents, index), distributedCount(test.history, test.parents, index))); err != nil {
 					select {
@@ -129,7 +130,7 @@ func distributedCount(total, parents, index int) int {
 	return count
 }
 
-func scaleDetailRecord(domain ingestion.DetailDomain, index, mutations, fees, schedules, history int) ingestion.DetailRecord {
+func scaleDetailRecord(domain ingestion.DetailDomain, index, statements, mutations, fees, schedules, history int) ingestion.DetailRecord {
 	identifier := fmt.Sprintf("%s-%06d", domain, index)
 	fields := map[string]any{}
 	switch domain {
@@ -158,6 +159,9 @@ func scaleDetailRecord(domain ingestion.DetailDomain, index, mutations, fees, sc
 	record.Children["biayapencairan"] = scaleChildren(identifier, fees)
 	record.Children["jadwalangsuran"] = scaleChildren(identifier, schedules)
 	record.Children["historybayar"] = scaleChildren(identifier, history)
+	if domain == ingestion.DetailSaving {
+		record.Children[ingestion.SavingAccountStatementChildKey] = scaleChildren(identifier, statements)
+	}
 	return record
 }
 

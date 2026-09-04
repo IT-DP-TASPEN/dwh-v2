@@ -40,6 +40,7 @@ type detailExtensionSpec struct {
 type detailChildSpec struct {
 	key, table, stage string
 	fields            []detailColumn
+	required, fetched bool
 }
 
 func detailID(name string) detailColumn  { return detailColumn{name: name, identifier: true} }
@@ -116,7 +117,12 @@ var detailSpecifications = []detailSpec{
 		detailDecimal("accrued_balance", 6), detailDecimal("accrued_debit_balance", 6), detailDecimal("accrued_credit_interest_balance", 6),
 		detailCol("active_standing_order_count"), detailCol("fixed_debit_interest_payment_day"), detailCol("fixed_credit_interest_payment_day"),
 		detailCol("marketing_code"), detailCol("marketing_notes"),
-	}},
+	}, children: []detailChildSpec{{key: ingestion.SavingAccountStatementChildKey, table: "fincloud_saving_account_statements", stage: "stg_fincloud_saving_account_statements", required: true, fetched: true, fields: []detailColumn{
+		detailCol("transaction_date"), detailCol("transaction_time"), detailDecimal("opening_balance", 6), detailDecimal("debit", 6),
+		detailDecimal("credit", 6), detailDecimal("closing_balance", 6), detailDecimal("closing_balance_equivalent", 6),
+		detailCol("transaction_type"), detailCol("description"), detailCol("reference"), detailCol("location"), detailCol("journal_no"),
+		detailCol("created_by"), detailDecimal("trx_rate", 6), detailDecimal("mid_rate_dc", 6),
+	}}}},
 	{domain: ingestion.DetailTimeDeposit, jobKey: "time_deposit_detail", table: "fincloud_time_deposit_details", stage: "stg_fincloud_time_deposit_details", fields: []detailColumn{
 		detailID("account_no"), detailCol("cif_no"), detailDecimal("nominal", 6), detailDecimal("accrued_interest", 6),
 		detailDecimal("product_interest_rate", 2), detailCol("open_date"), detailCol("maturity_date"), detailCol("location_id"),
@@ -236,6 +242,10 @@ func (repository *DetailRepository) stageTransaction(ctx context.Context, tx *sq
 		}
 	}
 	for _, childSpecification := range specification.children {
+		children, present := record.Children[childSpecification.key]
+		if childSpecification.required && !present {
+			return fmt.Errorf("required %s child is missing", childSpecification.key)
+		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM `"+childSpecification.stage+"` WHERE ingestion_run_id=? AND account_no=?", runID, record.Identifier); err != nil {
 			return wrapDatabaseError(fmt.Errorf("delete staged %s children: %w", childSpecification.stage, err), "stage_detail", "delete_staged_child_rows", childSpecification.stage, 0, 0)
 		}
@@ -244,7 +254,9 @@ func (repository *DetailRepository) stageTransaction(ctx context.Context, tx *sq
 			childColumns = append(childColumns, field.name)
 		}
 		childColumns = append(childColumns, "raw_item_payload", "raw_item_checksum")
-		children := record.Children[childSpecification.key]
+		if childSpecification.fetched {
+			childColumns = append(childColumns, "last_fetched_at")
+		}
 		rows := make([][]any, len(children))
 		for index, child := range children {
 			if child.Identifier != record.Identifier || child.ItemIndex != index || len(child.RawItemPayload) == 0 || child.RawItemChecksum == "" {
@@ -258,7 +270,11 @@ func (repository *DetailRepository) stageTransaction(ctx context.Context, tx *sq
 				}
 				row = append(row, value)
 			}
-			rows[index] = append(row, string(child.RawItemPayload), child.RawItemChecksum)
+			row = append(row, string(child.RawItemPayload), child.RawItemChecksum)
+			if childSpecification.fetched {
+				row = append(row, record.LastFetchedAt.UTC())
+			}
+			rows[index] = row
 		}
 		if err := insertRows(ctx, tx, childSpecification.stage, childColumns, rows); err != nil {
 			return err
@@ -468,7 +484,20 @@ func reconcileDetailChildren(ctx context.Context, tx *sqlx.Tx, runID uint64, par
 	}
 
 	difference := detailDifference("current_child", "candidate_child", child.fields, "raw_item_checksum")
-	assignments := detailAssignments("current_child", "candidate_child", child.fields, "raw_item_payload", "raw_item_checksum")
+	if child.fetched {
+		updateUnchanged := "UPDATE " + finalTable + " current_child JOIN " + stageTable +
+			" candidate_child ON candidate_child.ingestion_run_id=? AND candidate_child.account_no=current_child.account_no AND candidate_child.item_index=current_child.item_index" +
+			" SET current_child.last_fetched_at=candidate_child.last_fetched_at,current_child.updated_at=current_child.updated_at" +
+			" WHERE NOT (" + difference + ") AND NOT (current_child.last_fetched_at <=> candidate_child.last_fetched_at)"
+		if _, err := tx.ExecContext(ctx, updateUnchanged, runID); err != nil {
+			return wrapDatabaseError(err, "publish_detail", "refresh_unchanged_children", child.table, 0, 0)
+		}
+	}
+	extra := []string{"raw_item_payload", "raw_item_checksum"}
+	if child.fetched {
+		extra = append(extra, "last_fetched_at")
+	}
+	assignments := detailAssignments("current_child", "candidate_child", child.fields, extra...)
 	updateChanged := "UPDATE " + finalTable + " current_child JOIN " + stageTable +
 		" candidate_child ON candidate_child.ingestion_run_id=? AND candidate_child.account_no=current_child.account_no AND candidate_child.item_index=current_child.item_index" +
 		" SET " + strings.Join(assignments, ",") + " WHERE " + difference
@@ -476,7 +505,7 @@ func reconcileDetailChildren(ctx context.Context, tx *sqlx.Tx, runID uint64, par
 		return wrapDatabaseError(err, "publish_detail", "update_changed_children", child.table, 0, 0)
 	}
 
-	columns := append([]string{"account_no", "item_index"}, detailColumnNames(child.fields, "raw_item_payload", "raw_item_checksum")...)
+	columns := append([]string{"account_no", "item_index"}, detailColumnNames(child.fields, extra...)...)
 	insertNew := "INSERT INTO " + finalTable + " (" + quotedColumns(columns) + ") SELECT " + selectedColumns("candidate_child", columns) +
 		" FROM " + stageTable + " candidate_child LEFT JOIN " + finalTable +
 		" current_child ON current_child.account_no=candidate_child.account_no AND current_child.item_index=candidate_child.item_index" +

@@ -389,7 +389,7 @@ func (c *Client) sanitizeTransportError(err error) error {
 		query := parsed.Query()
 		for key := range query {
 			normalized := strings.ToLower(key)
-			if strings.Contains(normalized, "session") || strings.Contains(normalized, "token") || strings.Contains(normalized, "auth") || strings.Contains(normalized, "password") {
+			if (strings.HasSuffix(parsed.Path, "/tabungan/inquiry/rekening/historyMutasi") && normalized == "id") || strings.Contains(normalized, "session") || strings.Contains(normalized, "token") || strings.Contains(normalized, "auth") || strings.Contains(normalized, "password") {
 				query.Set(key, "REDACTED")
 			} else {
 				for index, value := range query[key] {
@@ -429,7 +429,7 @@ func (c *Client) sanitizeRequest(request *http.Request) RequestDiagnostic {
 	result := RequestDiagnostic{Method: request.Method, Path: request.URL.Path, Query: map[string][]string{}, Headers: map[string][]string{}}
 	for key, values := range request.URL.Query() {
 		copy := append([]string(nil), values...)
-		if secretKey(key) {
+		if (strings.HasSuffix(request.URL.Path, "/tabungan/inquiry/rekening/historyMutasi") && strings.EqualFold(key, "id")) || secretKey(key) {
 			for index := range copy {
 				copy[index] = "REDACTED"
 			}
@@ -540,6 +540,9 @@ func (c *Client) readResponseBody(response *http.Response, keepAll bool, operati
 func (c *Client) sanitizeBody(operation string, value []byte) ([]byte, bool) {
 	if operation == "authenticate" {
 		return []byte("[REDACTED authentication response]"), true
+	}
+	if operation == "fetch saving account statement" {
+		return []byte("[REDACTED saving account statement response]"), true
 	}
 	result := append([]byte(nil), value...)
 	redacted := false

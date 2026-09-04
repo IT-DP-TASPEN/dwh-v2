@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -153,6 +154,48 @@ type SavingDetail struct {
 	CreditMutation   Scalar          `json:"mutasikredit"`
 }
 
+type SavingAccountStatement struct {
+	Mutations []SavingAccountStatementItem
+}
+
+type SavingAccountStatementItem struct {
+	RawPayload               json.RawMessage `json:"-"`
+	TransactionDate          *string         `json:"tgltransaksi"`
+	TransactionTime          *string         `json:"jam"`
+	OpeningBalance           *string         `json:"saldoawal"`
+	Debit                    *string         `json:"debit"`
+	Credit                   *string         `json:"kredit"`
+	ClosingBalance           *string         `json:"saldoakhir"`
+	ClosingBalanceEquivalent *string         `json:"saldoakhir_equivalent"`
+	TransactionType          *string         `json:"jenistransaksi"`
+	Description              *string         `json:"keterangan"`
+	Reference                *string         `json:"referensi"`
+	Location                 *string         `json:"lokasi"`
+	JournalNo                *string         `json:"nojurnal"`
+	CreatedBy                *string         `json:"rec_dibuat_oleh"`
+	TransactionRate          *StrictNumber   `json:"trx_rate"`
+	MidRateDC                *string         `json:"mid_rate_dc"`
+}
+
+type StrictNumber string
+
+func (number *StrictNumber) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+	parsed, ok := value.(json.Number)
+	if !ok {
+		return fmt.Errorf("Fincloud value must be a JSON number")
+	}
+	*number = StrictNumber(parsed.String())
+	return nil
+}
+
+func (number StrictNumber) String() string { return string(number) }
+
 type TimeDepositDetail struct {
 	RawPayload      json.RawMessage       `json:"-"`
 	ID              string                `json:"id"`
@@ -228,6 +271,105 @@ func (c *Client) FetchCIFDetail(ctx context.Context, cifNo string) (*CIFDetail, 
 
 func (c *Client) FetchSavingDetail(ctx context.Context, accountNo string) (*SavingDetail, error) {
 	return fetchDetail[SavingDetail](ctx, c, "fetch saving detail", "/tabungan/inquiry/rekening/tabungan", "id", accountNo)
+}
+
+func (c *Client) FetchSavingAccountStatement(ctx context.Context, accountNo string) (*SavingAccountStatement, error) {
+	const operation = "fetch saving account statement"
+	query := url.Values{"id": {accountNo}}
+	var envelope struct {
+		Status string          `json:"status"`
+		Data   json.RawMessage `json:"data"`
+	}
+	diagnostic, err := c.getJSON(ctx, operation, "/tabungan/inquiry/rekening/historyMutasi?"+query.Encode(), &envelope)
+	if err != nil {
+		return nil, err
+	}
+	if envelope.Status != "ok" {
+		return nil, applicationFailure(operation, "Fincloud reported a source failure", diagnostic, envelope.Status, "")
+	}
+	data := bytes.TrimSpace(envelope.Data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) || data[0] != '{' {
+		return nil, malformedStatement(operation, "data must be a present object", diagnostic, "statement_data")
+	}
+	var dataPayload struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(data, &dataPayload); err != nil {
+		return nil, malformedStatement(operation, "data was malformed", diagnostic, "statement_data")
+	}
+	result := bytes.TrimSpace(dataPayload.Result)
+	if len(result) == 0 || bytes.Equal(result, []byte("null")) || result[0] != '{' {
+		return nil, malformedStatement(operation, "result must be a present object", diagnostic, "statement_result")
+	}
+	var resultPayload struct {
+		Mutations json.RawMessage `json:"mutasi"`
+	}
+	if err := json.Unmarshal(result, &resultPayload); err != nil {
+		return nil, malformedStatement(operation, "result was malformed", diagnostic, "statement_result")
+	}
+	mutations := bytes.TrimSpace(resultPayload.Mutations)
+	if len(mutations) == 0 || bytes.Equal(mutations, []byte("null")) || mutations[0] != '[' {
+		return nil, malformedStatement(operation, "mutasi must be a present array", diagnostic, "statement_mutasi")
+	}
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(mutations, &rawItems); err != nil || rawItems == nil {
+		return nil, malformedStatement(operation, "mutasi must be a present array", diagnostic, "statement_mutasi")
+	}
+	statement := &SavingAccountStatement{Mutations: make([]SavingAccountStatementItem, len(rawItems))}
+	for index, raw := range rawItems {
+		item := bytes.TrimSpace(raw)
+		if len(item) == 0 || bytes.Equal(item, []byte("null")) || item[0] != '{' {
+			return nil, malformedStatement(operation, "mutasi item must be an object", diagnostic, "statement_item")
+		}
+		if err := json.Unmarshal(item, &statement.Mutations[index]); err != nil {
+			return nil, malformedStatement(operation, "mutasi item was malformed", diagnostic, "statement_item")
+		}
+		if err := statement.Mutations[index].validate(); err != nil {
+			return nil, malformedStatement(operation, "mutasi item contained an invalid value", diagnostic, "statement_item")
+		}
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, item); err != nil {
+			return nil, malformedStatement(operation, "mutasi item was malformed", diagnostic, "statement_item")
+		}
+		statement.Mutations[index].RawPayload = append(json.RawMessage(nil), compact.Bytes()...)
+	}
+	return statement, nil
+}
+
+func (item SavingAccountStatementItem) validate() error {
+	if item.TransactionDate != nil {
+		parsed, err := time.Parse("2006-01-02", *item.TransactionDate)
+		if err != nil || parsed.Format("2006-01-02") != *item.TransactionDate {
+			return fmt.Errorf("invalid transaction date")
+		}
+	}
+	if item.TransactionTime != nil {
+		parsed, err := time.Parse("15:04:05", *item.TransactionTime)
+		if err != nil || parsed.Format("15:04:05") != *item.TransactionTime {
+			return fmt.Errorf("invalid transaction time")
+		}
+	}
+	for _, value := range []*string{item.OpeningBalance, item.Debit, item.Credit, item.ClosingBalance, item.ClosingBalanceEquivalent, item.MidRateDC} {
+		if value != nil {
+			if _, err := Scalar(*value).Decimal(); err != nil {
+				return fmt.Errorf("invalid decimal")
+			}
+		}
+	}
+	if item.TransactionRate != nil {
+		if _, err := Scalar(item.TransactionRate.String()).Decimal(); err != nil {
+			return fmt.Errorf("invalid transaction rate")
+		}
+	}
+	return nil
+}
+
+func malformedStatement(operation, message string, diagnostic *DiagnosticPayload, stage string) error {
+	if diagnostic == nil {
+		diagnostic = &DiagnosticPayload{}
+	}
+	diagnostic.FailureKind, diagnostic.DecodeStage = "missing_required", stage
+	return &Error{Kind: ErrorMalformed, Operation: operation, Message: message, Cause: fmt.Errorf("source contract violation"), diagnostic: diagnostic}
 }
 
 func (c *Client) FetchTimeDepositDetail(ctx context.Context, accountNo string) (*TimeDepositDetail, error) {
