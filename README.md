@@ -84,13 +84,13 @@ Session settings:
 
 Authentication cookies are `HttpOnly`, `SameSite=Lax`, path `/`, and use the configured secure flag.
 
-The web runtime also requires Fincloud source configuration: `FINCLOUD_BASE_URL`, `FINCLOUD_USERNAME`, `FINCLOUD_PASSWORD`, `FINCLOUD_LOCATION_ID`, and `FINCLOUD_ROLE_ID`. The base URL must be absolute HTTPS without embedded credentials. `FINCLOUD_HTTP_TIMEOUT` defaults to `30s`; TLS verification is enabled unless `FINCLOUD_INSECURE_SKIP_VERIFY=true` is explicitly set. These values are validated only by the web runtime: migrations and `app admin create` do not use or require Fincloud. Client construction performs no login or connectivity probe, so temporary Fincloud unavailability does not prevent a correctly configured web process from starting.
+The web runtime requires `FINCLOUD_BASE_URL`, `APP_SECRET_ENCRYPTION_KEY`, and the Fincloud HTTP/TLS settings. The base URL must be absolute HTTPS without embedded credentials. `FINCLOUD_HTTP_TIMEOUT` defaults to `30s`; TLS verification is enabled unless `FINCLOUD_INSECURE_SKIP_VERIFY=true` is explicitly set. Fincloud usernames, passwords, roles, and locations are stored in managed Auth Profiles and bound explicitly to sources. Process startup performs no Fincloud login or connectivity probe.
 
-`FINCLOUD_LOCATION_ID` is login/session context only. It is never substituted for fixed-report data scope; complete report location/account-code dimensions are source-enumerated internally.
+An Auth Profile location ID is login/session context only. It is never substituted for fixed-report data scope; complete report location/account-code dimensions are source-enumerated internally.
 
 ## Permissions and management
 
-The 38 canonical permission keys are aggregated from features and synchronized additively at server and CLI bootstrap. Unknown database permissions and assignments are preserved. Migrations never run automatically at application startup. `audit.view` may be assigned to user or custom roles; administrators receive it through the normal superuser bypass.
+The 40 canonical permission keys are aggregated from features and synchronized additively at server and CLI bootstrap. Unknown database permissions and assignments are preserved. Migrations never run automatically at application startup. `audit.view` may be assigned to user or custom roles; administrators receive it through the normal superuser bypass.
 
 Each user has exactly one role. The `admin` role is an immutable superuser; non-admin roles use current database permission assignments. Permissions are loaded for every authenticated request, so changes apply on the next request without cache invalidation.
 

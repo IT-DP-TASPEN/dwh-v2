@@ -16,6 +16,7 @@ import (
 const runColumns = `r.id,r.kind,r.parent_run_id,r.child_position,r.job_key,r.status,r.parameter_kind,r.parameter_version,
 	r.parameters_json,r.parameter_checksum,r.trigger_type,r.trigger_reference,r.requested_by_user_id,u.username requested_by_username,
 	r.skip_reason,r.cancel_requested_at,r.cancel_reason,r.owner_id,r.heartbeat_at,r.snapshot_date,
+	r.fincloud_auth_profile_id,r.fincloud_auth_profile_revision,r.fincloud_auth_profile_name,r.fincloud_auth_username,r.fincloud_auth_role_id,r.fincloud_auth_location_id,
 	r.progress_total,r.progress_started,r.progress_succeeded,r.progress_failed,r.rows_processed,r.current_step,
 	r.error_class,r.error_message,r.error_step,r.created_at,r.started_at,r.finished_at`
 
@@ -456,7 +457,8 @@ func (repository *Repository) ScheduleOverview(ctx context.Context) (ScheduleOve
 		COALESCE(SUM(s.enabled=TRUE AND s.next_run_at<=UTC_TIMESTAMP(6)),0) overdue,
 		COALESCE(SUM(o.status='unresolved' AND o.retry_not_before>UTC_TIMESTAMP(6)),0) retrying,
 		COALESCE(SUM(s.delivery_block_reason='job_busy'),0) blocked_busy,
-		COALESCE(SUM(s.delivery_block_reason='source_disabled'),0) blocked_disabled
+		COALESCE(SUM(s.delivery_block_reason='source_disabled'),0) blocked_disabled,
+		COALESCE(SUM(s.delivery_block_reason='source_configuration_required'),0) blocked_configuration
 		FROM schedules s LEFT JOIN schedule_occurrences o ON o.active_schedule_id=s.id WHERE s.archived_at IS NULL`)
 	return result, err
 }

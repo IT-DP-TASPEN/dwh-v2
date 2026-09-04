@@ -13,9 +13,13 @@ import (
 	"time"
 
 	dashboardfeature "github.com/ibldzn/go-admin/internal/features/dashboard"
+	authprofilesfeature "github.com/ibldzn/go-admin/internal/features/fincloudauthprofiles"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	reportsfeature "github.com/ibldzn/go-admin/internal/features/reports"
 	schedulesfeature "github.com/ibldzn/go-admin/internal/features/schedules"
+	sourcesfeature "github.com/ibldzn/go-admin/internal/features/sources"
+	"github.com/ibldzn/go-admin/internal/fincloud"
+	"github.com/ibldzn/go-admin/internal/fincloudauth"
 	core "github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
@@ -38,6 +42,8 @@ type fixture struct {
 	folders     map[uint64]*uint64
 	folderNames map[uint64]string
 	schedules   map[uint64]schedulesfeature.Schedule
+	authProfile fincloudauth.Profile
+	sourceBound bool
 }
 
 func main() {
@@ -48,6 +54,7 @@ func main() {
 	fixture := &fixture{renderer: renderer, polls: map[uint64]int{}, childLoads: map[uint64]int{}, waveLoads: map[string]int{}}
 	fixture.resetReports()
 	fixture.resetSchedules()
+	fixture.resetFincloudAuth()
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.FileServer(http.FS(webfiles.Files)))
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
@@ -60,6 +67,10 @@ func main() {
 	mux.HandleFunc("/runs/", fixture.status)
 	mux.HandleFunc("/schedules", fixture.schedulesPage)
 	mux.HandleFunc("/schedules/bulk-action", fixture.scheduleMutation)
+	mux.HandleFunc("/fincloud-auth-profiles", fixture.authProfilesPage)
+	mux.HandleFunc("/fincloud-auth-profiles/", fixture.authProfilePage)
+	mux.HandleFunc("/sources", fixture.sourcesPage)
+	mux.HandleFunc("/sources/", fixture.sourceMutation)
 	mux.HandleFunc("/reports", fixture.reportsPage)
 	mux.HandleFunc("/reports/", fixture.reportMutation)
 	mux.HandleFunc("/exports", fixture.exportsPage)
@@ -387,6 +398,19 @@ func (fixture *fixture) schedulerWave(writer http.ResponseWriter, request *http.
 }
 
 func (fixture *fixture) page(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path == "/case/fincloud-auth" {
+		fixture.resetFincloudAuth()
+		http.Redirect(writer, request, "/fincloud-auth-profiles", http.StatusSeeOther)
+		return
+	}
+	if request.URL.Path == "/case/fincloud-auth-stale" {
+		fixture.resetFincloudAuth()
+		fixture.mu.Lock()
+		fixture.authProfile.RoleID, fixture.authProfile.LocationID = "Missing-Role", "Missing-Location"
+		fixture.mu.Unlock()
+		http.Redirect(writer, request, "/fincloud-auth-profiles/1/edit", http.StatusSeeOther)
+		return
+	}
 	if request.URL.Path == "/case/schedules" {
 		fixture.resetSchedules()
 		http.Redirect(writer, request, "/schedules", http.StatusSeeOther)
@@ -412,6 +436,142 @@ func (fixture *fixture) page(writer http.ResponseWriter, request *http.Request) 
 	}
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(writer, `<!doctype html><html lang="en"><head><meta charset="utf-8"><script defer src="/static/js/app.js"></script></head><body><main>%s</main></body></html>`, body)
+}
+
+func (fixture *fixture) resetFincloudAuth() {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	fixture.authProfile = fincloudauth.Profile{ID: 1, Name: "Operations", Username: "CaseSensitive", RoleID: "Role-A", LocationID: "Location-01", Status: fincloudauth.StatusDisabled, Revision: 1}
+	fixture.sourceBound = false
+}
+
+func (fixture *fixture) authProfilesPage(writer http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodPost {
+		_ = request.ParseForm()
+		fixture.mu.Lock()
+		fixture.authProfile = fincloudauth.Profile{ID: 1, Name: strings.TrimSpace(request.PostFormValue("name")), Username: request.PostFormValue("username"), RoleID: request.PostFormValue("role_id"), LocationID: request.PostFormValue("location_id"), Status: fincloudauth.StatusDisabled, Revision: 1}
+		fixture.mu.Unlock()
+		http.Redirect(writer, request, "/fincloud-auth-profiles/1", http.StatusSeeOther)
+		return
+	}
+	fixture.mu.Lock()
+	profile := fixture.authProfile
+	fixture.mu.Unlock()
+	canManage := request.URL.Query().Get("persona") != "view"
+	data := authprofilesfeature.ListData{Rows: []fincloudauth.Profile{profile}, CanManage: canManage}
+	fixture.renderAdmin(writer, request, "features/fincloudauthprofiles/index", "Fincloud Auth Profiles", "/fincloud-auth-profiles", data)
+}
+
+func (fixture *fixture) authProfilePage(writer http.ResponseWriter, request *http.Request) {
+	path := strings.TrimPrefix(request.URL.Path, "/fincloud-auth-profiles/")
+	if path == "new" && request.Method == http.MethodGet {
+		values := fixtureAuthListValues()
+		fixture.renderAdmin(writer, request, "features/fincloudauthprofiles/form", "New Fincloud Auth Profile", "/fincloud-auth-profiles", authprofilesfeature.FormData{Roles: values.Roles, Locations: values.Locations, Errors: map[string]string{}})
+		return
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	profile := fixture.authProfile
+	switch {
+	case path == "1" && request.Method == http.MethodGet:
+		data := authprofilesfeature.DetailData{Value: profile, CanManage: request.URL.Query().Get("persona") != "view"}
+		fixture.renderAdmin(writer, request, "features/fincloudauthprofiles/show", "Fincloud Auth Profile", "/fincloud-auth-profiles", data)
+	case path == "1/edit" && request.Method == http.MethodGet:
+		values := fixtureAuthListValues()
+		data := authprofilesfeature.FormData{ID: profile.ID, Revision: profile.Revision, Name: profile.Name, Username: profile.Username, RoleID: profile.RoleID, LocationID: profile.LocationID, Roles: values.Roles, Locations: values.Locations, RoleUnavailable: !hasListValue(values.Roles, profile.RoleID), LocationUnavailable: !hasListValue(values.Locations, profile.LocationID), Errors: map[string]string{}}
+		fixture.renderAdmin(writer, request, "features/fincloudauthprofiles/form", "Edit Fincloud Auth Profile", "/fincloud-auth-profiles", data)
+	case path == "1" && request.Method == http.MethodPost:
+		_ = request.ParseForm()
+		fixture.authProfile.Name = strings.TrimSpace(request.PostFormValue("name"))
+		fixture.authProfile.Username = request.PostFormValue("username")
+		fixture.authProfile.RoleID = request.PostFormValue("role_id")
+		fixture.authProfile.LocationID = request.PostFormValue("location_id")
+		fixture.authProfile.Revision++
+		http.Redirect(writer, request, "/fincloud-auth-profiles/1", http.StatusSeeOther)
+	case path == "1/test" && request.Method == http.MethodPost:
+		http.Redirect(writer, request, "/fincloud-auth-profiles/1?notice=fincloud-auth-profile-test-ok", http.StatusSeeOther)
+	case path == "1/state" && request.Method == http.MethodPost:
+		_ = request.ParseForm()
+		fixture.authProfile.Status = fincloudauth.Status(request.PostFormValue("status"))
+		fixture.authProfile.Revision++
+		http.Redirect(writer, request, "/fincloud-auth-profiles/1", http.StatusSeeOther)
+	default:
+		http.NotFound(writer, request)
+	}
+}
+
+func fixtureAuthListValues() fincloud.AuthListValues {
+	return fincloud.AuthListValues{Roles: []fincloud.ListValue{{ID: "Role-A", Description: "Operations"}, {ID: "Role-B", Description: "Reporting"}}, Locations: []fincloud.ListValue{{ID: "Location-01", Description: "Head Office"}, {ID: "Location-02", Description: "Branch"}}}
+}
+
+func hasListValue(values []fincloud.ListValue, id string) bool {
+	for _, value := range values {
+		if value.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (fixture *fixture) sourcesPage(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		http.Error(writer, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	fixture.mu.Lock()
+	profile, bound := fixture.authProfile, fixture.sourceBound
+	fixture.mu.Unlock()
+	catalog, _ := core.NewCatalog()
+	jobs := catalog.Jobs()
+	row := sourcesfeature.Source{Job: jobs[0], Category: "Fixed", Enabled: true, ConfigurationRequired: !bound || profile.Status != fincloudauth.StatusActive}
+	if bound {
+		row.AuthProfileID, row.AuthProfileName, row.AuthProfileStatus = &profile.ID, profile.Name, string(profile.Status)
+	}
+	data := sourcesfeature.ListData{Rows: []sourcesfeature.Source{row}, AuthProfiles: fixtureAuthProfiles(profile), CanManage: true}
+	fixture.renderAdmin(writer, request, "features/sources/index", "Sources", "/sources", data)
+}
+
+func (fixture *fixture) sourceMutation(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost || !strings.HasSuffix(request.URL.Path, "/auth-profile") {
+		http.NotFound(writer, request)
+		return
+	}
+	_ = request.ParseForm()
+	fixture.mu.Lock()
+	failed := request.PostFormValue("profile_id") == "2"
+	if !failed {
+		fixture.sourceBound = request.PostFormValue("profile_id") == "1"
+	}
+	profile, bound := fixture.authProfile, fixture.sourceBound
+	fixture.mu.Unlock()
+	if request.Header.Get("HX-Request") == "true" {
+		catalog, _ := core.NewCatalog()
+		row := sourcesfeature.Source{Job: catalog.Jobs()[0], Category: "Fixed", Enabled: true, ConfigurationRequired: !bound || profile.Status != fincloudauth.StatusActive}
+		if bound {
+			row.AuthProfileID, row.AuthProfileName, row.AuthProfileStatus = &profile.ID, profile.Name, string(profile.Status)
+		}
+		message := ""
+		if failed {
+			message = "Fincloud Auth Profile cannot be assigned; persisted selection restored."
+		}
+		data := sourcesfeature.SourceRowData{Source: row, AuthProfiles: fixtureAuthProfiles(profile), CanManage: true, Error: message}
+		if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/sources/index", "source-row", data); err != nil {
+			http.Error(writer, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	http.Redirect(writer, request, "/sources", http.StatusSeeOther)
+}
+
+func fixtureAuthProfiles(profile fincloudauth.Profile) []sourcesfeature.AuthProfileOption {
+	return []sourcesfeature.AuthProfileOption{{ID: profile.ID, Name: profile.Name, Status: string(profile.Status)}, {ID: 2, Name: "Rejected profile", Status: "active"}}
+}
+
+func (fixture *fixture) renderAdmin(writer http.ResponseWriter, request *http.Request, template, title, path string, data any) {
+	page := adminshell.PageData{Title: title, AppName: "Browser fixture", CurrentPath: path, Navigation: fixtureNavigation(true, path), Data: data}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, template, "admin", page); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (fixture *fixture) resetSchedules() {
@@ -864,6 +1024,11 @@ func detail(id uint64, polls int) ingestionfeature.RunDetail {
 		ProgressTotal: 10, ProgressSucceeded: uint64(polls), ProgressUnit: "items", CurrentStep: fmt.Sprintf("poll_%d", polls),
 		StartedAt: "2026-08-26 10:00:00", OwnerID: strings.Repeat("a", 64), HeartbeatAt: "2026-08-26 10:00:00",
 		HeartbeatEvidence: "2026-08-26T03:00:00Z",
+	}
+	if id == 1 {
+		run.FincloudAuthProfileID, run.FincloudAuthProfileRevision = 1, 7
+		run.FincloudAuthProfileName, run.FincloudAuthUsername = "Operations", "CaseSensitive"
+		run.FincloudAuthRoleID, run.FincloudAuthLocationID = "Role-A", "Location-01"
 	}
 	result := ingestionfeature.RunDetail{Run: run, Polling: true}
 	switch id {

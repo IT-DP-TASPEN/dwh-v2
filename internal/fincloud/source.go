@@ -12,11 +12,19 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
-type Location struct {
+type ListValue struct {
 	ID          string `json:"id"`
 	Description string `json:"descr"`
+}
+
+type Location = ListValue
+
+type AuthListValues struct {
+	Roles     []ListValue
+	Locations []ListValue
 }
 
 type AccountCode struct {
@@ -30,22 +38,85 @@ type JournalTransactionType struct {
 }
 
 func (c *Client) FetchAccessibleLocations(ctx context.Context) ([]Location, error) {
+	values, err := c.FetchAuthListValues(ctx)
+	return values.Locations, err
+}
+
+func (c *Client) FetchAuthListValues(ctx context.Context) (AuthListValues, error) {
+	const operation = "fetch authentication list values"
 	var payload struct {
-		Status string `json:"status"`
-		Data   struct {
-			Result struct {
-				Locations []Location `json:"locationid"`
-			} `json:"result"`
-		} `json:"data"`
+		Status string          `json:"status"`
+		Data   json.RawMessage `json:"data"`
 	}
-	diagnostic, err := c.getJSON(ctx, "fetch accessible locations", "/admin/access/listvalues", &payload)
+	diagnostic, err := c.getPreAuthJSON(ctx, operation, "/admin/access/listvalues", &payload)
 	if err != nil {
-		return nil, err
+		return AuthListValues{}, err
+	}
+	if payload.Status == "" {
+		return AuthListValues{}, malformedListValues(operation, "status is required", diagnostic, "listvalues_status")
 	}
 	if payload.Status != "ok" {
-		return nil, applicationFailure("fetch accessible locations", "Fincloud reported a source failure", diagnostic, payload.Status, "")
+		return AuthListValues{}, applicationFailure(operation, "Fincloud reported a list-values failure", diagnostic, payload.Status, "")
 	}
-	return payload.Data.Result.Locations, nil
+	data := bytes.TrimSpace(payload.Data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) || data[0] != '{' {
+		return AuthListValues{}, malformedListValues(operation, "data must be a present object", diagnostic, "listvalues_data")
+	}
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return AuthListValues{}, malformedListValues(operation, "data was malformed", diagnostic, "listvalues_data")
+	}
+	result := bytes.TrimSpace(envelope.Result)
+	if len(result) == 0 || bytes.Equal(result, []byte("null")) || result[0] != '{' {
+		return AuthListValues{}, malformedListValues(operation, "result must be a present object", diagnostic, "listvalues_result")
+	}
+	var lists struct {
+		Roles     json.RawMessage `json:"roleid"`
+		Locations json.RawMessage `json:"locationid"`
+	}
+	if err := json.Unmarshal(result, &lists); err != nil {
+		return AuthListValues{}, malformedListValues(operation, "result was malformed", diagnostic, "listvalues_result")
+	}
+	roles, err := decodeListValues(lists.Roles, "role", diagnostic)
+	if err != nil {
+		return AuthListValues{}, err
+	}
+	locations, err := decodeListValues(lists.Locations, "location", diagnostic)
+	if err != nil {
+		return AuthListValues{}, err
+	}
+	return AuthListValues{Roles: roles, Locations: locations}, nil
+}
+
+func decodeListValues(raw json.RawMessage, label string, diagnostic *DiagnosticPayload) ([]ListValue, error) {
+	data := bytes.TrimSpace(raw)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return nil, malformedListValues("fetch authentication list values", label+" list is required", diagnostic, "listvalues_"+label)
+	}
+	var values []ListValue
+	if err := json.Unmarshal(data, &values); err != nil {
+		diagnostic.FailureKind, diagnostic.DecodeStage = decodeFailureKind(err), "listvalues_"+label
+		return nil, &Error{Kind: ErrorMalformed, Operation: "fetch authentication list values", Message: label + " list was malformed", Cause: err, diagnostic: diagnostic}
+	}
+	if values == nil {
+		return nil, malformedListValues("fetch authentication list values", label+" list was malformed", diagnostic, "listvalues_"+label)
+	}
+	for _, value := range values {
+		if invalidAuthIdentifier(value.ID) || invalidAuthIdentifier(value.Description) || utf8.RuneCountInString(value.ID) > 128 || utf8.RuneCountInString(value.Description) > 128 {
+			return nil, malformedListValues("fetch authentication list values", label+" option was malformed", diagnostic, "listvalues_"+label+"_option")
+		}
+	}
+	return values, nil
+}
+
+func malformedListValues(operation, message string, diagnostic *DiagnosticPayload, stage string) error {
+	if diagnostic == nil {
+		diagnostic = &DiagnosticPayload{}
+	}
+	diagnostic.FailureKind, diagnostic.DecodeStage = "missing_required", stage
+	return &Error{Kind: ErrorMalformed, Operation: operation, Message: message, Cause: fmt.Errorf("source contract violation"), diagnostic: diagnostic}
 }
 
 func (c *Client) FetchAccountCodes(ctx context.Context) ([]AccountCode, error) {
@@ -378,9 +449,24 @@ func pathWithin(value, root string) bool {
 }
 
 func (c *Client) getJSON(ctx context.Context, operation, requestPath string, target any) (*DiagnosticPayload, error) {
-	resp, err := c.do(ctx, operation, func(sessionID string) (*http.Request, error) {
+	return c.getJSONRequest(ctx, operation, requestPath, target, true)
+}
+
+func (c *Client) getPreAuthJSON(ctx context.Context, operation, requestPath string, target any) (*DiagnosticPayload, error) {
+	return c.getJSONRequest(ctx, operation, requestPath, target, false)
+}
+
+func (c *Client) getJSONRequest(ctx context.Context, operation, requestPath string, target any, authenticated bool) (*DiagnosticPayload, error) {
+	build := func(sessionID string) (*http.Request, error) {
 		return c.newRequest(ctx, http.MethodGet, requestPath, nil, sessionID)
-	})
+	}
+	var resp *http.Response
+	var err error
+	if authenticated {
+		resp, err = c.do(ctx, operation, build)
+	} else {
+		resp, err = c.send(ctx, operation, "", build)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -39,13 +39,14 @@ const (
 )
 
 var (
-	ErrJobBusy               = errors.New("job already queued or running")
-	ErrSourceDisabled        = errors.New("source is disabled")
-	ErrTransition            = errors.New("run state transition rejected")
-	ErrOwnershipLost         = errors.New("ingestion run ownership lost")
-	ErrLeaseUnproven         = errors.New("ingestion run ownership could not be proven")
-	ErrCancellationRequested = errors.New("durable run cancellation requested")
-	ErrCoordinatorShutdown   = errors.New("ingestion coordinator shutting down")
+	ErrJobBusy                     = errors.New("job already queued or running")
+	ErrSourceDisabled              = errors.New("source is disabled")
+	ErrSourceConfigurationRequired = errors.New("source authentication configuration is required")
+	ErrTransition                  = errors.New("run state transition rejected")
+	ErrOwnershipLost               = errors.New("ingestion run ownership lost")
+	ErrLeaseUnproven               = errors.New("ingestion run ownership could not be proven")
+	ErrCancellationRequested       = errors.New("durable run cancellation requested")
+	ErrCoordinatorShutdown         = errors.New("ingestion coordinator shutting down")
 )
 
 type Run struct {

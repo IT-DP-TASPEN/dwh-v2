@@ -39,6 +39,7 @@ func TestFeatureCompositionOwnsCompleteRouteMatrix(t *testing.T) {
 	want := []string{
 		"GET /", "GET /audit-logs", "GET /audit-logs/{id}", "GET /ingestion", "GET /ingestion/summary",
 		"GET /datasources", "GET /datasources/new", "GET /datasources/{id}", "GET /datasources/{id}/edit",
+		"GET /fincloud-auth-profiles", "GET /fincloud-auth-profiles/new", "GET /fincloud-auth-profiles/{id}", "GET /fincloud-auth-profiles/{id}/edit",
 		"GET /report-templates", "GET /report-templates/new", "GET /report-templates/{id}", "GET /report-templates/{id}/edit", "GET /report-templates/{id}/access",
 		"GET /reports", "GET /reports/{id}", "GET /exports", "GET /exports/{id}", "GET /exports/{id}/download",
 		"GET /roles", "GET /roles/new", "GET /roles/{id}", "GET /roles/{id}/edit",
@@ -48,11 +49,12 @@ func TestFeatureCompositionOwnsCompleteRouteMatrix(t *testing.T) {
 		"GET /users", "GET /users/new", "GET /users/{id}", "GET /users/{id}/edit", "GET /users/{id}/reset-password",
 		"POST /impersonation/stop", "POST /roles", "POST /roles/{id}", "POST /roles/{id}/delete", "POST /roles/{id}/permissions",
 		"POST /datasources", "POST /datasources/{id}", "POST /datasources/{id}/test", "POST /datasources/{id}/state",
+		"POST /fincloud-auth-profiles", "POST /fincloud-auth-profiles/{id}", "POST /fincloud-auth-profiles/{id}/test", "POST /fincloud-auth-profiles/{id}/state",
 		"POST /report-templates", "POST /report-templates/{id}", "POST /report-templates/{id}/test", "POST /report-templates/{id}/test-options", "POST /report-templates/{id}/state", "POST /report-templates/{id}/access/{userID}",
 		"POST /reports/folders", "POST /reports/folders/{folderID}/rename", "POST /reports/folders/{folderID}/delete",
 		"POST /reports/{id}/star", "POST /reports/{id}/folder", "POST /reports/{id}/run", "POST /reports/{id}/export", "POST /reports/{id}/parameters/{key}/options",
 		"POST /runs/run-all", "POST /runs/{id}/cancel", "POST /runs/{id}/recover-abandoned",
-		"POST /sources/{jobKey}/runs", "POST /sources/{jobKey}/enable", "POST /sources/{jobKey}/disable",
+		"POST /sources/{jobKey}/runs", "POST /sources/{jobKey}/enable", "POST /sources/{jobKey}/disable", "POST /sources/{jobKey}/auth-profile",
 		"POST /schedules", "POST /schedules/bulk", "POST /schedules/bulk-action", "POST /schedules/{id}", "POST /schedules/{id}/enable", "POST /schedules/{id}/disable", "POST /schedules/{id}/archive",
 		"POST /users", "POST /users/{id}", "POST /users/{id}/activate", "POST /users/{id}/deactivate", "POST /users/{id}/impersonate", "POST /users/{id}/reset-password", "POST /users/{id}/role",
 	}

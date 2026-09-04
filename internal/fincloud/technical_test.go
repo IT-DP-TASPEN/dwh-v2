@@ -32,7 +32,7 @@ func TestTechnicalDiagnosticsPreserveHTTPApplicationAndDecodeEvidence(t *testing
 			_, err := client.FetchAccessibleLocations(context.Background())
 			return err
 		}},
-		{"dto", `{"status":"ok","data":{"result":[]}}`, "dto_decode", "ok", 200, func(client *Client) error {
+		{"dto", `{"status":"ok","data":{"result":{"roleid":{},"locationid":[]}}}`, "dto_decode", "ok", 200, func(client *Client) error {
 			_, err := client.FetchAccessibleLocations(context.Background())
 			return err
 		}},

@@ -57,6 +57,22 @@ func TestProgressOwnershipLossRemainsFatal(t *testing.T) {
 	}
 }
 
+func TestSourceFailureSeparatesAuthentication(t *testing.T) {
+	for _, failure := range []*fincloud.Error{
+		{Kind: fincloud.ErrorAuthentication, Operation: "authenticate", Message: "login failed"},
+		{Kind: fincloud.ErrorUnauthorized, Operation: "download", Message: "session rejected"},
+	} {
+		result := sourceFailure(context.Background(), failure, "fetch")
+		if result.Error.Class != "authentication" || result.Error.Step != "fetch" {
+			t.Fatalf("authentication failure=%+v", result)
+		}
+	}
+	result := sourceFailure(context.Background(), &fincloud.Error{Kind: fincloud.ErrorUpstream, Operation: "download", Message: "upstream failed"}, "fetch")
+	if result.Error.Class != "source" {
+		t.Fatalf("source failure=%+v", result)
+	}
+}
+
 func TestMaintenanceUsesOnlyExactRequestedDirectoryAndPreservesFailureClass(t *testing.T) {
 	requested, _ := ingestion.ParseCalendarDate("2026-08-24")
 	definition := ingestion.MaintenanceDefinitions()[0]

@@ -34,12 +34,12 @@ func TestConcurrentInitialLoginAndGenerationAwareReauthentication(t *testing.T) 
 			generation := logins.Add(1)
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session-`+string(rune('0'+generation))+`"}}}`)
-		case "/fincloud/admin/access/listvalues":
+		case "/fincloud/bukuBesar/laporan/mutasiAkun//listvalues":
 			if request.Header.Get("sessionid") == "session-1" {
 				response.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"locationid":[]}}}`)
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"noakun":[]}}}`)
 		default:
 			http.NotFound(response, request)
 		}
@@ -59,7 +59,7 @@ func TestConcurrentInitialLoginAndGenerationAwareReauthentication(t *testing.T) 
 		go func() {
 			defer group.Done()
 			<-start
-			_, callErr := client.FetchAccessibleLocations(context.Background())
+			_, callErr := client.FetchAccountCodes(context.Background())
 			errorsFound <- callErr
 		}()
 	}
@@ -121,7 +121,7 @@ func TestLoginWaiterHonorsContextCancellation(t *testing.T) {
 			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session"}}}`)
 			return
 		}
-		_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"locationid":[]}}}`)
+		_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"noakun":[]}}}`)
 	}))
 	defer server.Close()
 	client, err := newClient(testConfig(server.URL), server.Client())
@@ -130,13 +130,13 @@ func TestLoginWaiterHonorsContextCancellation(t *testing.T) {
 	}
 	leaderDone := make(chan error, 1)
 	go func() {
-		_, callErr := client.FetchAccessibleLocations(context.Background())
+		_, callErr := client.FetchAccountCodes(context.Background())
 		leaderDone <- callErr
 	}()
 	<-loginStarted
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	_, err = client.FetchAccessibleLocations(ctx)
+	_, err = client.FetchAccountCodes(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %v, want deadline exceeded", err)
 	}

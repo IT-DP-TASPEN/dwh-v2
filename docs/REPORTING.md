@@ -2,7 +2,7 @@
 
 Reporting uses separately configured MySQL accounts. Keep those accounts read-only, deny `EXECUTE`, and leave `multiStatements=false`; these are the primary controls against stored-program and multiple-result-set execution. Datasource TLS is either verified with system roots (`required`) or explicitly disabled. Insecure certificate verification, private CAs, and client certificates are not supported in V1.
 
-Set `REPORT_DATASOURCE_MASTER_KEY` to the standard-base64 encoding of exactly 32 random bytes. Datasource passwords are encrypted with AES-256-GCM and datasource-ID additional authenticated data. Losing or changing this key makes stored datasource credentials unreadable.
+Set `APP_SECRET_ENCRYPTION_KEY` to the standard-base64 encoding of exactly 32 random bytes. New datasource passwords use a purpose- and datasource-ID-bound AES-256-GCM envelope. Existing reporting v1 ciphertext remains readable with the same key; changing only the environment-variable name does not require re-encryption. Losing or changing the key makes stored datasource credentials unreadable.
 
 Interactive reads default to 10,000 rows, 8 MiB of encoded payload, 16 KiB per-cell previews, and 20 seconds. Crossing a row or payload bound cancels the query and discards its physical MySQL connection instead of draining unread rows. SQL is never rewritten and no `LIMIT` is injected. Full values remain available through background export, subject to XLSX format limits.
 

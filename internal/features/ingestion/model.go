@@ -17,39 +17,45 @@ type RunFilter struct {
 }
 
 type runRow struct {
-	ID                  uint64         `db:"id"`
-	Kind                string         `db:"kind"`
-	ParentRunID         sql.NullInt64  `db:"parent_run_id"`
-	ChildPosition       sql.NullInt64  `db:"child_position"`
-	JobKey              sql.NullString `db:"job_key"`
-	Status              string         `db:"status"`
-	ParameterKind       string         `db:"parameter_kind"`
-	ParameterVersion    uint16         `db:"parameter_version"`
-	ParametersJSON      []byte         `db:"parameters_json"`
-	ParameterChecksum   []byte         `db:"parameter_checksum"`
-	TriggerType         string         `db:"trigger_type"`
-	TriggerReference    sql.NullString `db:"trigger_reference"`
-	RequestedByUserID   sql.NullInt64  `db:"requested_by_user_id"`
-	RequestedByUsername sql.NullString `db:"requested_by_username"`
-	SkipReason          sql.NullString `db:"skip_reason"`
-	CancelRequestedAt   sql.NullTime   `db:"cancel_requested_at"`
-	CancelReason        sql.NullString `db:"cancel_reason"`
-	OwnerID             sql.NullString `db:"owner_id"`
-	HeartbeatAt         sql.NullTime   `db:"heartbeat_at"`
-	SnapshotDate        sql.NullTime   `db:"snapshot_date"`
-	ProgressTotal       uint64         `db:"progress_total"`
-	ProgressStarted     uint64         `db:"progress_started"`
-	ProgressSucceeded   uint64         `db:"progress_succeeded"`
-	ProgressFailed      uint64         `db:"progress_failed"`
-	RowsProcessed       uint64         `db:"rows_processed"`
-	CurrentStep         sql.NullString `db:"current_step"`
-	ErrorClass          sql.NullString `db:"error_class"`
-	ErrorMessage        sql.NullString `db:"error_message"`
-	ErrorStep           sql.NullString `db:"error_step"`
-	MapperDiagnostics   []byte         `db:"mapper_diagnostics"`
-	CreatedAt           time.Time      `db:"created_at"`
-	StartedAt           sql.NullTime   `db:"started_at"`
-	FinishedAt          sql.NullTime   `db:"finished_at"`
+	ID                          uint64         `db:"id"`
+	Kind                        string         `db:"kind"`
+	ParentRunID                 sql.NullInt64  `db:"parent_run_id"`
+	ChildPosition               sql.NullInt64  `db:"child_position"`
+	JobKey                      sql.NullString `db:"job_key"`
+	Status                      string         `db:"status"`
+	ParameterKind               string         `db:"parameter_kind"`
+	ParameterVersion            uint16         `db:"parameter_version"`
+	ParametersJSON              []byte         `db:"parameters_json"`
+	ParameterChecksum           []byte         `db:"parameter_checksum"`
+	TriggerType                 string         `db:"trigger_type"`
+	TriggerReference            sql.NullString `db:"trigger_reference"`
+	RequestedByUserID           sql.NullInt64  `db:"requested_by_user_id"`
+	RequestedByUsername         sql.NullString `db:"requested_by_username"`
+	SkipReason                  sql.NullString `db:"skip_reason"`
+	CancelRequestedAt           sql.NullTime   `db:"cancel_requested_at"`
+	CancelReason                sql.NullString `db:"cancel_reason"`
+	OwnerID                     sql.NullString `db:"owner_id"`
+	HeartbeatAt                 sql.NullTime   `db:"heartbeat_at"`
+	SnapshotDate                sql.NullTime   `db:"snapshot_date"`
+	FincloudAuthProfileID       sql.NullInt64  `db:"fincloud_auth_profile_id"`
+	FincloudAuthProfileRevision sql.NullInt64  `db:"fincloud_auth_profile_revision"`
+	FincloudAuthProfileName     sql.NullString `db:"fincloud_auth_profile_name"`
+	FincloudAuthUsername        sql.NullString `db:"fincloud_auth_username"`
+	FincloudAuthRoleID          sql.NullString `db:"fincloud_auth_role_id"`
+	FincloudAuthLocationID      sql.NullString `db:"fincloud_auth_location_id"`
+	ProgressTotal               uint64         `db:"progress_total"`
+	ProgressStarted             uint64         `db:"progress_started"`
+	ProgressSucceeded           uint64         `db:"progress_succeeded"`
+	ProgressFailed              uint64         `db:"progress_failed"`
+	RowsProcessed               uint64         `db:"rows_processed"`
+	CurrentStep                 sql.NullString `db:"current_step"`
+	ErrorClass                  sql.NullString `db:"error_class"`
+	ErrorMessage                sql.NullString `db:"error_message"`
+	ErrorStep                   sql.NullString `db:"error_step"`
+	MapperDiagnostics           []byte         `db:"mapper_diagnostics"`
+	CreatedAt                   time.Time      `db:"created_at"`
+	StartedAt                   sql.NullTime   `db:"started_at"`
+	FinishedAt                  sql.NullTime   `db:"finished_at"`
 }
 
 type StatusView struct {
@@ -128,24 +134,26 @@ func presentRunKind(value string) string {
 }
 
 type RunView struct {
-	ID                                           uint64
-	Kind, KindLabel, JobKey, JobName, Trigger    string
-	ParentRunID                                  *uint64
-	ChildPosition                                uint16
-	Status                                       StatusView
-	Parameters                                   []ParameterField
-	TriggerReference, RequestedBy                string
-	SkipReason, CancelReason                     string
-	CancelRequested                              bool
-	OwnerID                                      string
-	HeartbeatAt, HeartbeatEvidence, SnapshotDate string
-	ProgressTotal, ProgressStarted               uint64
-	ProgressSucceeded, ProgressFailed, Rows      uint64
-	ProgressUnit, CurrentStep                    string
-	ErrorClass, ErrorMessage, ErrorStep          string
-	CreatedAt, StartedAt, FinishedAt             string
-	Terminal, CanCancel, CanRecover              bool
-	RunAllSummary                                *RunAllSummary
+	ID                                                                                        uint64
+	Kind, KindLabel, JobKey, JobName, Trigger                                                 string
+	ParentRunID                                                                               *uint64
+	ChildPosition                                                                             uint16
+	Status                                                                                    StatusView
+	Parameters                                                                                []ParameterField
+	TriggerReference, RequestedBy                                                             string
+	SkipReason, CancelReason                                                                  string
+	CancelRequested                                                                           bool
+	OwnerID                                                                                   string
+	HeartbeatAt, HeartbeatEvidence, SnapshotDate                                              string
+	FincloudAuthProfileID, FincloudAuthProfileRevision                                        uint64
+	FincloudAuthProfileName, FincloudAuthUsername, FincloudAuthRoleID, FincloudAuthLocationID string
+	ProgressTotal, ProgressStarted                                                            uint64
+	ProgressSucceeded, ProgressFailed, Rows                                                   uint64
+	ProgressUnit, CurrentStep                                                                 string
+	ErrorClass, ErrorMessage, ErrorStep                                                       string
+	CreatedAt, StartedAt, FinishedAt                                                          string
+	Terminal, CanCancel, CanRecover                                                           bool
+	RunAllSummary                                                                             *RunAllSummary
 }
 
 type RunListItem struct {
@@ -274,10 +282,11 @@ type SourceOverview struct {
 	Disabled uint64 `db:"disabled"`
 }
 type ScheduleOverview struct {
-	Overdue         uint64 `db:"overdue"`
-	Retrying        uint64 `db:"retrying"`
-	BlockedBusy     uint64 `db:"blocked_busy"`
-	BlockedDisabled uint64 `db:"blocked_disabled"`
+	Overdue              uint64 `db:"overdue"`
+	Retrying             uint64 `db:"retrying"`
+	BlockedBusy          uint64 `db:"blocked_busy"`
+	BlockedDisabled      uint64 `db:"blocked_disabled"`
+	BlockedConfiguration uint64 `db:"blocked_configuration"`
 }
 
 type OverviewData struct {

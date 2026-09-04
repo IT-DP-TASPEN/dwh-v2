@@ -24,7 +24,7 @@ func TestSourceEnumerationReportProtocolAndTypedDetail(t *testing.T) {
 			}
 			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session-secret"}}}`)
 		case "/fincloud/admin/access/listvalues":
-			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"locationid":[{"id":"000","descr":"HQ"},{"id":"008","descr":"Branch"}]}}}`)
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"roleid":[],"locationid":[{"id":"000","descr":"HQ"},{"id":"008","descr":"Branch"}]}}}`)
 		case "/fincloud/bukuBesar/laporan/mutasiAkun//listvalues":
 			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"noakun":[{"id":"1.2","descr":"Cash"},{"id":"","descr":"Blank preserved for domain normalization"}]}}}`)
 		case "/fincloud/bukuBesar/laporan/jurnal//listvalues":
@@ -312,7 +312,7 @@ func TestSecureTLSDefaultAndExplicitOptIn(t *testing.T) {
 			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session"}}}`)
 			return
 		}
-		_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"locationid":[]}}}`)
+		_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"roleid":[],"locationid":[]}}}`)
 	}))
 	defer server.Close()
 	secure, err := NewClient(testConfig(server.URL))
@@ -351,7 +351,7 @@ func TestUnauthorizedBodiesAreClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = client.FetchAccessibleLocations(context.Background())
+	_, _ = client.FetchAccountCodes(context.Background())
 	if !firstUnauthorized.closed || !secondUnauthorized.closed {
 		t.Fatalf("unauthorized bodies closed first=%t second=%t", firstUnauthorized.closed, secondUnauthorized.closed)
 	}

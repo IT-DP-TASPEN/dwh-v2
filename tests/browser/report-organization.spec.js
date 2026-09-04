@@ -62,7 +62,7 @@ test("folder popovers use compact keyboard-accessible controls", async ({ page }
   await page.keyboard.press("Enter");
   await expect(kreditPopover).toBeVisible();
   await expect(kreditPopover).toHaveClass(/(^|\s)border-slate-200(\s|$)/);
-  await expect(kreditPopover).toHaveClass(/(^|\s)dark:border-slate-700(\s|$)/);
+  await expect(kreditPopover).toHaveClass(/(^|\s)dark:border-slate-800(\s|$)/);
   await expect(page.getByRole("button", { name: "Rename folder" }).filter({ visible: true })).toBeFocused();
 
   await page.keyboard.press("Escape");

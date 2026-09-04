@@ -16,20 +16,37 @@ import (
 )
 
 var ErrConflict = errors.New("source state changed")
+var ErrInvalidAuthProfile = errors.New("Fincloud Auth Profile cannot be assigned")
 
 type Source struct {
-	Job           core.JobDefinition
-	Category      string
-	Enabled       bool
-	ActiveRunID   *uint64
-	ScheduleCount uint64
+	Job                                core.JobDefinition
+	Category                           string
+	Enabled                            bool
+	ActiveRunID                        *uint64
+	ScheduleCount                      uint64
+	AuthProfileID                      *uint64
+	AuthProfileName, AuthProfileStatus string
+	ConfigurationRequired              bool
+}
+
+func (source Source) UsesAuthProfile(id uint64) bool {
+	return source.AuthProfileID != nil && *source.AuthProfileID == id
+}
+
+type AuthProfileOption struct {
+	ID     uint64 `db:"id"`
+	Name   string `db:"name"`
+	Status string `db:"status"`
 }
 
 type sourceState struct {
-	SourceID      string        `db:"source_id"`
-	Enabled       bool          `db:"enabled"`
-	ActiveRunID   sql.NullInt64 `db:"active_run_id"`
-	ScheduleCount uint64        `db:"schedule_count"`
+	SourceID          string         `db:"source_id"`
+	Enabled           bool           `db:"enabled"`
+	ActiveRunID       sql.NullInt64  `db:"active_run_id"`
+	ScheduleCount     uint64         `db:"schedule_count"`
+	AuthProfileID     sql.NullInt64  `db:"fincloud_auth_profile_id"`
+	AuthProfileName   sql.NullString `db:"fincloud_auth_profile_name"`
+	AuthProfileStatus sql.NullString `db:"fincloud_auth_profile_status"`
 }
 
 type Service struct {
@@ -52,12 +69,14 @@ func NewService(db *sqlx.DB, appenders ...audit.AppendFunc) (*Service, error) {
 
 func (service *Service) List(ctx context.Context, includeActiveRuns bool) ([]Source, error) {
 	var states []sourceState
-	err := service.db.SelectContext(ctx, &states, `SELECT s.source_id,s.enabled,
+	err := service.db.SelectContext(ctx, &states, `SELECT s.source_id,s.enabled,s.fincloud_auth_profile_id,
+		p.name fincloud_auth_profile_name,p.status fincloud_auth_profile_status,
 		NULL active_run_id,
 		COUNT(DISTINCT CASE WHEN sc.archived_at IS NULL THEN sc.id END) schedule_count
 		FROM source_settings s
+		LEFT JOIN fincloud_auth_profiles p ON p.id=s.fincloud_auth_profile_id
 		LEFT JOIN schedules sc ON sc.job_key=s.source_id
-		GROUP BY s.source_id,s.enabled`)
+		GROUP BY s.source_id,s.enabled,s.fincloud_auth_profile_id,p.name,p.status`)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +105,13 @@ func (service *Service) List(ctx context.Context, includeActiveRuns bool) ([]Sou
 		if !found {
 			return nil, fmt.Errorf("canonical source setting %q is missing", job.Key)
 		}
-		row := Source{Job: job, Category: categoryLabel(job.Category), Enabled: state.Enabled, ScheduleCount: state.ScheduleCount}
+		row := Source{Job: job, Category: categoryLabel(job.Category), Enabled: state.Enabled, ScheduleCount: state.ScheduleCount,
+			AuthProfileName: state.AuthProfileName.String, AuthProfileStatus: state.AuthProfileStatus.String}
+		if state.AuthProfileID.Valid {
+			id := uint64(state.AuthProfileID.Int64)
+			row.AuthProfileID = &id
+		}
+		row.ConfigurationRequired = row.Enabled && (row.AuthProfileID == nil || row.AuthProfileStatus != "active")
 		if state.ActiveRunID.Valid {
 			id := uint64(state.ActiveRunID.Int64)
 			row.ActiveRunID = &id
@@ -94,6 +119,14 @@ func (service *Service) List(ctx context.Context, includeActiveRuns bool) ([]Sou
 		result = append(result, row)
 	}
 	return result, nil
+}
+
+func (service *Service) AuthProfiles(ctx context.Context) ([]AuthProfileOption, error) {
+	rows := []AuthProfileOption{}
+	if err := service.db.SelectContext(ctx, &rows, `SELECT id,name,status FROM fincloud_auth_profiles WHERE status<>'archived' ORDER BY name,id`); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func (service *Service) Find(key string) (core.JobDefinition, bool) { return service.catalog.Find(key) }
@@ -139,6 +172,70 @@ func (service *Service) SetEnabled(ctx context.Context, key string, expected, en
 		}
 	}
 	return tx.Commit()
+}
+
+func (service *Service) SetAuthProfile(ctx context.Context, key string, expected, target *uint64, actor uint64, requesters ...securityctx.Requester) error {
+	if _, found := service.catalog.Find(key); !found {
+		return sql.ErrNoRows
+	}
+	tx, err := service.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var current sql.NullInt64
+	if err := tx.GetContext(ctx, &current, `SELECT fincloud_auth_profile_id FROM source_settings WHERE source_id=? FOR UPDATE`, key); err != nil {
+		return err
+	}
+	currentID := nullableProfileID(current)
+	if !sameProfileID(currentID, expected) {
+		return ErrConflict
+	}
+	if target != nil {
+		var status string
+		if err := tx.GetContext(ctx, &status, `SELECT status FROM fincloud_auth_profiles WHERE id=? FOR SHARE`, *target); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrInvalidAuthProfile
+			}
+			return err
+		}
+		if status == "archived" {
+			return ErrInvalidAuthProfile
+		}
+	}
+	if sameProfileID(currentID, target) {
+		return tx.Commit()
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE source_settings SET fincloud_auth_profile_id=?,updated_by_user_id=?
+		WHERE source_id=? AND fincloud_auth_profile_id <=> ?`, target, actor, key, expected)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return ErrConflict
+	}
+	if len(requesters) != 0 {
+		requester := requesters[0]
+		actorIdentity := audit.Identity{UserID: requester.Actor.UserID, Username: requester.Actor.Username}
+		effective := audit.Identity{UserID: requester.Effective.UserID, Username: requester.Effective.Username}
+		if err := service.appendAudit(ctx, tx, audit.Event{Attribution: audit.Attribution{Actor: &actorIdentity, Effective: &effective},
+			Action: audit.ActionSourceAuthProfileChanged, Metadata: audit.SourceAuthProfileChangedMetadata{SourceKey: key, FromProfileID: currentID, ToProfileID: target}, CreatedAt: time.Now().UTC()}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func nullableProfileID(value sql.NullInt64) *uint64 {
+	if !value.Valid {
+		return nil
+	}
+	id := uint64(value.Int64)
+	return &id
+}
+
+func sameProfileID(left, right *uint64) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
 func categoryLabel(category core.JobCategory) string {

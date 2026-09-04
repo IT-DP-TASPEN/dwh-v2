@@ -1,6 +1,6 @@
 {{define "toast"}}
 {{with .Notice}}
-<div x-data="{ open: true }" x-show="open" x-transition.opacity x-init="setTimeout(() => open = false, 5000)" role="status" aria-live="polite" aria-atomic="true" class="pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-xl border px-4 py-3 shadow-xl {{if eq .Severity "success"}}border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-100{{else}}border-slate-200 bg-white text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100{{end}}">
+<div x-data="{ open: true }" x-show="open" x-transition.opacity x-init="setTimeout(() => open = false, 5000)" role="status" aria-live="polite" aria-atomic="true" class="pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-xl border px-4 py-3 shadow-xl {{if eq .Severity "success"}}border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-100{{else}}border-slate-200 bg-white text-slate-900 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100{{end}}">
     <span class="mt-0.5" aria-hidden="true"><i data-lucide="circle-check-big" class="size-5"></i></span>
     <div class="min-w-0 flex-1"><p class="font-semibold">{{.Title}}</p><p class="mt-0.5 text-sm opacity-80">{{.Message}}</p></div>
     <button type="button" @click="open = false" class="rounded-md p-1 opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-current" aria-label="Dismiss notice"><i data-lucide="x" class="size-4"></i></button>

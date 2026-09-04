@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
@@ -38,11 +39,8 @@ func TestApplicationStartsReadyAndShutsDownWithinBudget(t *testing.T) {
 	t.Setenv("DB_USER", databaseConfig.User)
 	t.Setenv("DB_PASSWORD", databaseConfig.Password)
 	t.Setenv("FINCLOUD_BASE_URL", "https://127.0.0.1:1")
-	t.Setenv("FINCLOUD_USERNAME", "fake")
-	t.Setenv("FINCLOUD_PASSWORD", "fake")
-	t.Setenv("FINCLOUD_LOCATION_ID", "fake")
-	t.Setenv("FINCLOUD_ROLE_ID", "fake")
 	t.Setenv("FINCLOUD_INSECURE_SKIP_VERIFY", "false")
+	t.Setenv("APP_SECRET_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

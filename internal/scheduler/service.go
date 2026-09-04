@@ -780,10 +780,12 @@ func (service *Service) processTransaction(ctx context.Context, tx *sqlx.Tx, id 
 	attemptNo := occurrence.AttemptCount + 1
 	reference := fmt.Sprintf("schedule:%d:%s:attempt:%d", schedule.ID, occurrence.ScheduledFor.UTC().Format(time.RFC3339Nano), attemptNo)
 	runID, err := service.submit(ctx, tx, schedule.JobKey, parameters, ingestionrun.TriggerScheduler, reference, nullableUint64(schedule.CreatedByUserID))
-	if errors.Is(err, ingestionrun.ErrJobBusy) || errors.Is(err, ingestionrun.ErrSourceDisabled) {
+	if errors.Is(err, ingestionrun.ErrJobBusy) || errors.Is(err, ingestionrun.ErrSourceDisabled) || errors.Is(err, ingestionrun.ErrSourceConfigurationRequired) {
 		reason := "job_busy"
 		if errors.Is(err, ingestionrun.ErrSourceDisabled) {
 			reason = "source_disabled"
+		} else if errors.Is(err, ingestionrun.ErrSourceConfigurationRequired) {
+			reason = "source_configuration_required"
 		}
 		result, updateErr := tx.ExecContext(ctx, `UPDATE schedules SET delivery_block_reason=?,delivery_blocked_at=?,scheduler_not_before=?
 			WHERE id=? AND enabled=TRUE AND next_run_at=?`, reason, now, now.Add(deliveryDelay), schedule.ID, occurrence.ScheduledFor)

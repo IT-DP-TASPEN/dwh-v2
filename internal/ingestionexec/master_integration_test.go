@@ -9,9 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
-	"github.com/ibldzn/go-admin/internal/fincloud"
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/ingestionstore"
@@ -35,12 +33,8 @@ func TestMasterExecutorPublishesReferenceAndMarketingWithoutSnapshotDate(t *test
 		}
 	}))
 	defer server.Close()
-	client, err := fincloud.NewClient(fincloud.Config{BaseURL: server.URL, Username: "u", Password: "p", LocationID: "001", RoleID: "r", HTTPTimeout: time.Second, InsecureSkipVerify: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.CloseIdleConnections()
-	executor, err := New(client, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMasterRepository(db), ingestionstore.NewMaintenanceRepository(db), runs, catalog, 1, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sessions, authProfiles := integrationAuth(t, db, server.URL, "u", "p", "001", "r")
+	executor, err := New(sessions, authProfiles, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMasterRepository(db), ingestionstore.NewMaintenanceRepository(db), runs, catalog, 1, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

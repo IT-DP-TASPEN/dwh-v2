@@ -6,6 +6,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/access"
 	"github.com/ibldzn/go-admin/internal/features/auditlogs"
 	"github.com/ibldzn/go-admin/internal/features/datasources"
+	"github.com/ibldzn/go-admin/internal/features/fincloudauthprofiles"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	"github.com/ibldzn/go-admin/internal/features/reports"
 	"github.com/ibldzn/go-admin/internal/features/reporttemplates"
@@ -62,8 +63,8 @@ func TestPhaseFourNavigation(t *testing.T) {
 
 func TestPermissionAggregation(t *testing.T) {
 	definitions := PermissionDefinitions()
-	if len(definitions) != 38 {
-		t.Fatalf("got %d permissions, want 38", len(definitions))
+	if len(definitions) != 40 {
+		t.Fatalf("got %d permissions, want 40", len(definitions))
 	}
 	if err := access.ValidateRegistry(definitions); err != nil {
 		t.Fatal(err)
@@ -81,6 +82,7 @@ func TestPermissionAggregation(t *testing.T) {
 		schedulesfeature.PermissionEnableDisable: true, schedulesfeature.PermissionArchive: true,
 		datasources.PermissionView: true, datasources.PermissionCreate: true, datasources.PermissionUpdate: true,
 		datasources.PermissionChangeState: true, datasources.PermissionTest: true,
+		fincloudauthprofiles.PermissionView: true, fincloudauthprofiles.PermissionManage: true,
 		reporttemplates.PermissionView: true, reporttemplates.PermissionCreate: true, reporttemplates.PermissionUpdate: true,
 		reporttemplates.PermissionChangeState: true, reporttemplates.PermissionManageAccess: true,
 		reports.PermissionView: true, reports.PermissionExecute: true, reports.PermissionExport: true, reports.PermissionViewAllExports: true,

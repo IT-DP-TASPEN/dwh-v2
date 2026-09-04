@@ -11,6 +11,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/ibldzn/go-admin/internal/fincloud"
+	"github.com/ibldzn/go-admin/internal/fincloudauth"
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionexec"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
@@ -40,9 +41,9 @@ const (
 	ingestionRecoveryBatch     = 256
 )
 
-func New(ctx context.Context, db *sqlx.DB, client *fincloud.Client, logger *slog.Logger) (*Coordinator, error) {
-	if db == nil || client == nil || logger == nil {
-		return nil, fmt.Errorf("database, Fincloud client, and logger are required")
+func New(ctx context.Context, db *sqlx.DB, sessions *fincloud.SessionCoordinator, authProfiles *fincloudauth.Repository, logger *slog.Logger) (*Coordinator, error) {
+	if db == nil || sessions == nil || authProfiles == nil || logger == nil {
+		return nil, fmt.Errorf("database, Fincloud sessions, Auth Profiles, and logger are required")
 	}
 	catalog, err := ingestion.NewCatalog()
 	if err != nil {
@@ -63,7 +64,7 @@ func New(ctx context.Context, db *sqlx.DB, client *fincloud.Client, logger *slog
 	fixed := ingestionstore.NewFixedRepository(db)
 	details := ingestionstore.NewDetailRepository(db)
 	masters := ingestionstore.NewMasterRepository(db)
-	executor, err := ingestionexec.New(client, fixed, details, masters,
+	executor, err := ingestionexec.New(sessions, authProfiles, fixed, details, masters,
 		ingestionstore.NewMaintenanceRepository(db), runs, catalog, settings.FixedMemberConcurrency, settings.DetailConcurrency, logger)
 	if err != nil {
 		return nil, err

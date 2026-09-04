@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ibldzn/go-admin/internal/fincloud"
+	"github.com/ibldzn/go-admin/internal/fincloudauth"
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestiondiag"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
@@ -23,6 +24,8 @@ import (
 
 type Executor struct {
 	client            *fincloud.Client
+	sessions          *fincloud.SessionCoordinator
+	authProfiles      *fincloudauth.Repository
 	fixed             *ingestionstore.FixedRepository
 	detail            *ingestionstore.DetailRepository
 	master            *ingestionstore.MasterRepository
@@ -94,11 +97,11 @@ type maintenanceSourceSelection struct {
 func (failure *maintenanceDateError) Error() string { return failure.cause.Error() }
 func (failure *maintenanceDateError) Unwrap() error { return failure.cause }
 
-func New(client *fincloud.Client, fixed *ingestionstore.FixedRepository, detail *ingestionstore.DetailRepository, master *ingestionstore.MasterRepository, maintenance *ingestionstore.MaintenanceRepository, runs *ingestionrun.Repository, catalog ingestion.Catalog, fixedConcurrency, detailConcurrency int, logger *slog.Logger) (*Executor, error) {
-	if client == nil || fixed == nil || detail == nil || master == nil || maintenance == nil || runs == nil || fixedConcurrency < 1 || detailConcurrency < 1 || logger == nil {
+func New(sessions *fincloud.SessionCoordinator, authProfiles *fincloudauth.Repository, fixed *ingestionstore.FixedRepository, detail *ingestionstore.DetailRepository, master *ingestionstore.MasterRepository, maintenance *ingestionstore.MaintenanceRepository, runs *ingestionrun.Repository, catalog ingestion.Catalog, fixedConcurrency, detailConcurrency int, logger *slog.Logger) (*Executor, error) {
+	if sessions == nil || authProfiles == nil || fixed == nil || detail == nil || master == nil || maintenance == nil || runs == nil || fixedConcurrency < 1 || detailConcurrency < 1 || logger == nil {
 		return nil, fmt.Errorf("complete ingestion executor dependencies are required")
 	}
-	return &Executor{client: client, fixed: fixed, detail: detail, master: master, maintenance: maintenance, runs: runs, updateProgress: runs.UpdateProgress, catalog: catalog,
+	return &Executor{sessions: sessions, authProfiles: authProfiles, fixed: fixed, detail: detail, master: master, maintenance: maintenance, runs: runs, updateProgress: runs.UpdateProgress, catalog: catalog,
 		fixedConcurrency: fixedConcurrency, detailConcurrency: detailConcurrency, now: time.Now, logger: logger}, nil
 }
 
@@ -116,16 +119,53 @@ func (executor *Executor) Execute(ctx context.Context, run ingestionrun.Run, own
 		recordTerminalFallback(ctx, recorder, result)
 		return result
 	}
+	auth, err := executor.authProfiles.ResolveAndFreezeRunAuth(ctx, run.ID, ownerID, run.JobKey)
+	if err != nil {
+		if result, cancelled := cancellationFailure(ctx, "resolve_fincloud_auth", err); cancelled {
+			recordTerminalFallback(ctx, recorder, result)
+			return result
+		}
+		class, message := "persistence", "Fincloud authentication context could not be resolved"
+		switch {
+		case errors.Is(err, ingestionrun.ErrSourceDisabled):
+			class, message = "source_disabled", "source was disabled before execution"
+		case errors.Is(err, fincloudauth.ErrConfigurationRequired):
+			class, message = "configuration", "Fincloud authentication configuration is required"
+		}
+		result := failed(class, message, "resolve_fincloud_auth", err)
+		recordTerminalFallback(ctx, recorder, result)
+		return result
+	}
+	waiting := run.Progress
+	waiting.Step = "waiting_fincloud_session"
+	if err := executor.runs.UpdateProgress(ctx, run.ID, ownerID, waiting, run.MapperDiagnostics); err != nil {
+		result := ownershipFailure(err, "waiting_fincloud_session")
+		recordTerminalFallback(ctx, recorder, result)
+		return result
+	}
+	lease, err := executor.sessions.Acquire(ctx, auth)
+	if err != nil {
+		if result, cancelled := cancellationFailure(ctx, "waiting_fincloud_session", err); cancelled {
+			recordTerminalFallback(ctx, recorder, result)
+			return result
+		}
+		result := failed("source", "Fincloud session coordination failed", "waiting_fincloud_session", err)
+		recordTerminalFallback(ctx, recorder, result)
+		return result
+	}
+	defer lease.Release()
+	scoped := *executor
+	scoped.client = lease.Client()
 	var result Result
 	switch job.Category {
 	case ingestion.CategoryFixed:
-		result = executor.executeFixed(ctx, run, job)
+		result = scoped.executeFixed(ctx, run, job)
 	case ingestion.CategoryDetail:
-		result = executor.executeDetail(ctx, run, job)
+		result = scoped.executeDetail(ctx, run, job)
 	case ingestion.CategoryMaster:
-		result = executor.executeMaster(ctx, run, job)
+		result = scoped.executeMaster(ctx, run, job)
 	case ingestion.CategoryEOD, ingestion.CategoryCBR:
-		result = executor.executeMaintenance(ctx, run, job)
+		result = scoped.executeMaintenance(ctx, run, job)
 	default:
 		result = failed("contract", "unsupported job category", "start", fmt.Errorf("unsupported category %s", job.Category))
 	}
@@ -1102,6 +1142,10 @@ func jakartaSnapshotDate(now time.Time) ingestion.CalendarDate {
 func sourceFailure(ctx context.Context, err error, step string) Result {
 	if result, cancelled := cancellationFailure(ctx, step, err); cancelled {
 		return result
+	}
+	var source *fincloud.Error
+	if errors.As(err, &source) && (source.Kind == fincloud.ErrorAuthentication || source.Kind == fincloud.ErrorUnauthorized || source.Operation == "authenticate") {
+		return failed("authentication", "Fincloud authentication failed", step, err)
 	}
 	return failed("source", "Fincloud source operation failed", step, err)
 }

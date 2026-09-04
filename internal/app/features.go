@@ -12,6 +12,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/features/auditlogs"
 	"github.com/ibldzn/go-admin/internal/features/dashboard"
 	"github.com/ibldzn/go-admin/internal/features/datasources"
+	"github.com/ibldzn/go-admin/internal/features/fincloudauthprofiles"
 	"github.com/ibldzn/go-admin/internal/features/impersonation"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	"github.com/ibldzn/go-admin/internal/features/reports"
@@ -20,6 +21,8 @@ import (
 	schedulesfeature "github.com/ibldzn/go-admin/internal/features/schedules"
 	sourcesfeature "github.com/ibldzn/go-admin/internal/features/sources"
 	"github.com/ibldzn/go-admin/internal/features/users"
+	"github.com/ibldzn/go-admin/internal/fincloud"
+	"github.com/ibldzn/go-admin/internal/fincloudauth"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/reportexport"
@@ -29,12 +32,13 @@ import (
 )
 
 func PermissionDefinitions() []access.PermissionDefinition {
-	definitions := make([]access.PermissionDefinition, 0, 38)
+	definitions := make([]access.PermissionDefinition, 0, 40)
 	definitions = append(definitions, users.PermissionDefinitions()...)
 	definitions = append(definitions, roles.PermissionDefinitions()...)
 	definitions = append(definitions, auditlogs.PermissionDefinitions()...)
 	definitions = append(definitions, ingestionfeature.PermissionDefinitions()...)
 	definitions = append(definitions, sourcesfeature.PermissionDefinitions()...)
+	definitions = append(definitions, fincloudauthprofiles.PermissionDefinitions()...)
 	definitions = append(definitions, schedulesfeature.PermissionDefinitions()...)
 	definitions = append(definitions, datasources.PermissionDefinitions()...)
 	definitions = append(definitions, reporttemplates.PermissionDefinitions()...)
@@ -43,19 +47,22 @@ func PermissionDefinitions() []access.PermissionDefinition {
 }
 
 type featureDependencies struct {
-	database            *sqlx.DB
-	users               *user.Repository
-	access              *access.Repository
-	admin               *adminshell.Shell
-	cookies             browserauth.CookieManager
-	coordinator         *coordinator.Coordinator
-	scheduler           *scheduler.Service
-	reportingRepository *reporting.Repository
-	reportingService    *reporting.Service
-	reportingPools      *reporting.PoolManager
-	exportRepository    *reportexport.Repository
-	exportStorage       *reportexport.Storage
-	downloadTimeout     time.Duration
+	database             *sqlx.DB
+	users                *user.Repository
+	access               *access.Repository
+	admin                *adminshell.Shell
+	cookies              browserauth.CookieManager
+	coordinator          *coordinator.Coordinator
+	scheduler            *scheduler.Service
+	fincloudAuthProfiles *fincloudauth.Repository
+	fincloudSessions     *fincloud.SessionCoordinator
+	fincloudListValues   *fincloud.Client
+	reportingRepository  *reporting.Repository
+	reportingService     *reporting.Service
+	reportingPools       *reporting.PoolManager
+	exportRepository     *reportexport.Repository
+	exportStorage        *reportexport.Storage
+	downloadTimeout      time.Duration
 }
 
 func registerFeatureRoutes(router chi.Router, dependencies featureDependencies) {
@@ -81,6 +88,8 @@ func registerFeatureRoutes(router chi.Router, dependencies featureDependencies) 
 	}
 
 	datasourceHandler := datasources.NewHandler(dependencies.admin, dependencies.reportingRepository, dependencies.reportingService, dependencies.reportingPools)
+	fincloudAuthHandler := fincloudauthprofiles.NewHandler(dependencies.admin, dependencies.fincloudAuthProfiles,
+		fincloudauth.NewService(dependencies.fincloudAuthProfiles, dependencies.fincloudSessions), dependencies.fincloudListValues)
 	templateHandler := reporttemplates.NewHandler(dependencies.admin, dependencies.reportingRepository, dependencies.reportingService)
 	reportHandler := reports.NewHandler(dependencies.admin, dependencies.reportingRepository, dependencies.reportingService, dependencies.exportRepository, dependencies.exportStorage, dependencies.downloadTimeout)
 
@@ -91,6 +100,7 @@ func registerFeatureRoutes(router chi.Router, dependencies featureDependencies) 
 	auditlogs.NewHandler(dependencies.admin, auditLogService).RegisterRoutes(router)
 	ingestionfeature.NewHandler(dependencies.admin, ingestionService, dependencies.coordinator).RegisterRoutes(router)
 	sourcesfeature.NewHandler(dependencies.admin, sourceService, dependencies.coordinator).RegisterRoutes(router)
+	fincloudAuthHandler.RegisterRoutes(router)
 	schedulesfeature.NewHandler(dependencies.admin, scheduleService).RegisterRoutes(router)
 	datasourceHandler.RegisterRoutes(router)
 	templateHandler.RegisterRoutes(router)
@@ -101,7 +111,7 @@ func navigationGroups() []navigation.Group {
 	return []navigation.Group{
 		{Key: "general", Label: "General", Items: []navigation.Item{dashboard.Navigation()}},
 		{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.Item{
-			ingestionfeature.OverviewNavigation(), sourcesfeature.Navigation(), ingestionfeature.RunsNavigation(), schedulesfeature.Navigation(),
+			ingestionfeature.OverviewNavigation(), sourcesfeature.Navigation(), fincloudauthprofiles.Navigation(), ingestionfeature.RunsNavigation(), schedulesfeature.Navigation(),
 		}},
 		{Key: "reporting", Label: "Reporting", Items: []navigation.Item{
 			reports.Navigation(), reports.ExportsNavigation(),

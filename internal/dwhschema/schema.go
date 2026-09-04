@@ -92,6 +92,8 @@ var UserReferences = []UserReference{
 	{"source_settings", "updated_by_user_id", "fk_source_settings_updated_by_user"},
 	{"ingestion_runs", "requested_by_user_id", "fk_ingestion_runs_requested_by_user"},
 	{"schedules", "created_by_user_id", "fk_schedules_created_by_user"},
+	{"fincloud_auth_profiles", "created_by_user_id", "fk_fincloud_auth_profiles_created_by"},
+	{"fincloud_auth_profiles", "updated_by_user_id", "fk_fincloud_auth_profiles_updated_by"},
 }
 
 func CanonicalSourceKeys() ([]string, error) {

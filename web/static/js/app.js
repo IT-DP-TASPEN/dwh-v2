@@ -7237,6 +7237,13 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     ["path", { d: "m9 15 3 3 3-3" }]
   ];
 
+  // node_modules/lucide/dist/esm/icons/key.mjs
+  var Key = [
+    ["path", { d: "m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4" }],
+    ["path", { d: "m21 2-9.6 9.6" }],
+    ["circle", { cx: "7.5", cy: "15.5", r: "5.5" }]
+  ];
+
   // node_modules/lucide/dist/esm/icons/layout-dashboard.mjs
   var LayoutDashboard = [
     ["rect", { width: "7", height: "9", x: "3", y: "3", rx: "1" }],
@@ -7894,7 +7901,7 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     window.dispatchEvent(new CustomEvent("confirm-submit", { detail: { form, trigger: event.submitter } }));
   });
   var initializeIcons = () => createIcons({
-    icons: { Activity, CalendarClock, ChevronDown, CircleCheckBig, Database, FileCode, FileDown, History: RotateCcwClock, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Server, Settings, Shield, ShieldCheck, Table2, UserRound, Users, X }
+    icons: { Activity, CalendarClock, ChevronDown, CircleCheckBig, Database, FileCode, FileDown, History: RotateCcwClock, Key, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Server, Settings, Shield, ShieldCheck, Table2, UserRound, Users, X }
   });
   document.addEventListener("DOMContentLoaded", initializeIcons);
   document.body.addEventListener("htmx:afterSwap", initializeIcons);
@@ -7916,6 +7923,7 @@ lucide/dist/esm/icons/circle-check-big.mjs:
 lucide/dist/esm/icons/database.mjs:
 lucide/dist/esm/icons/file-code.mjs:
 lucide/dist/esm/icons/file-down.mjs:
+lucide/dist/esm/icons/key.mjs:
 lucide/dist/esm/icons/layout-dashboard.mjs:
 lucide/dist/esm/icons/log-out.mjs:
 lucide/dist/esm/icons/menu.mjs:

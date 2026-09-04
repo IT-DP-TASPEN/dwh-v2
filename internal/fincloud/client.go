@@ -160,6 +160,24 @@ type Client struct {
 }
 
 func NewClient(config Config) (*Client, error) {
+	httpClient, err := configuredHTTPClient(config)
+	if err != nil {
+		return nil, err
+	}
+	return newClient(config, httpClient)
+}
+
+// NewPreAuthClient creates a client for Fincloud endpoints that explicitly do
+// not require credentials or a session.
+func NewPreAuthClient(config Config) (*Client, error) {
+	httpClient, err := configuredHTTPClient(config)
+	if err != nil {
+		return nil, err
+	}
+	return newPreAuthClient(config, httpClient)
+}
+
+func configuredHTTPClient(config Config) (*http.Client, error) {
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, errors.New("unsupported default HTTP transport")
@@ -168,11 +186,18 @@ func NewClient(config Config) (*Client, error) {
 	if config.InsecureSkipVerify {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit operator opt-in
 	}
-	return newClient(config, &http.Client{Timeout: config.HTTPTimeout, Transport: transport})
+	return &http.Client{Timeout: config.HTTPTimeout, Transport: transport}, nil
 }
 
 func newClient(config Config, httpClient *http.Client) (*Client, error) {
-	if strings.TrimSpace(config.BaseURL) == "" || strings.TrimSpace(config.Username) == "" || strings.TrimSpace(config.Password) == "" || strings.TrimSpace(config.LocationID) == "" || strings.TrimSpace(config.RoleID) == "" {
+	if config.Password == "" || invalidAuthIdentifier(config.Username) || invalidAuthIdentifier(config.LocationID) || invalidAuthIdentifier(config.RoleID) {
+		return nil, errors.New("incomplete Fincloud configuration")
+	}
+	return newPreAuthClient(config, httpClient)
+}
+
+func newPreAuthClient(config Config, httpClient *http.Client) (*Client, error) {
+	if strings.TrimSpace(config.BaseURL) == "" {
 		return nil, errors.New("incomplete Fincloud configuration")
 	}
 	if config.HTTPTimeout <= 0 {
@@ -188,7 +213,18 @@ func newClient(config Config, httpClient *http.Client) (*Client, error) {
 	return &Client{config: config, baseURL: strings.TrimRight(config.BaseURL, "/"), httpClient: httpClient}, nil
 }
 
+func invalidAuthIdentifier(value string) bool {
+	return value == "" || value != strings.TrimSpace(value)
+}
+
 func (c *Client) CloseIdleConnections() { c.httpClient.CloseIdleConnections() }
+
+// Authenticate validates the configured username, password, role, and location
+// using Fincloud's login contract without calling a source endpoint.
+func (c *Client) Authenticate(ctx context.Context) error {
+	_, err := c.ensureSession(ctx, nil)
+	return err
+}
 
 func (c *Client) do(ctx context.Context, operation string, build func(sessionID string) (*http.Request, error)) (*http.Response, error) {
 	current, err := c.ensureSession(ctx, nil)

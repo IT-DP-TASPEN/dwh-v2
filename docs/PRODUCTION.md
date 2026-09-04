@@ -27,12 +27,10 @@ DB_USER=new_dwh_runtime
 DB_PASSWORD=replace-me
 
 FINCLOUD_BASE_URL=https://fincloud.example/fincloud
-FINCLOUD_USERNAME=replace-me
-FINCLOUD_PASSWORD=replace-me
-FINCLOUD_LOCATION_ID=replace-me
-FINCLOUD_ROLE_ID=replace-me
 FINCLOUD_HTTP_TIMEOUT=30s
 FINCLOUD_INSECURE_SKIP_VERIFY=true
+
+APP_SECRET_ENCRYPTION_KEY=replace-with-standard-base64-32-byte-key
 ```
 
 Production rejects HTTP `APP_URL`, registration, insecure session cookies, empty database passwords, and non-loopback bind addresses. Fincloud TLS verification remains enabled by default. The accepted temporary exception requires the explicit Fincloud-only opt-out above and emits a warning without credentials or endpoint details.
@@ -114,3 +112,35 @@ WHERE kind='run_all_parent'
 Do not deploy the 41-job binary while this count is nonzero. Apply `20260903090000_rename_live_snapshot.sql` before `20260903091000_create_master_reference_ingestion.sql`, verify no executable legacy live-snapshot rows remain and exactly 41 source settings exist, then start only the new binary.
 
 The candidate smoke order—Vault, Balance Sheet, representative EOD, representative CBR, detail, then CoA—is not proven or mandatory. Live evidence decides the final selection and order.
+
+## Fincloud Auth Profile rollout
+
+This migration requires a quiesced cutover. Do not disable sources individually. Record the IDs of enabled schedules, use the existing bulk schedule action to disable them, and configure the reverse proxy to reject these ingestion-producing requests while retaining read and Auth Profile administration access:
+
+```text
+POST /sources/{jobKey}/runs
+POST /runs/run-all
+POST /runs/{id}/recover-abandoned
+```
+
+Drain the old process and require this query to return zero:
+
+```sql
+SELECT COUNT(*)
+FROM ingestion_runs
+WHERE status IN ('planned', 'queued', 'running');
+```
+
+Then stop the old application writers and run the query again. Only after the old binary is stopped, remove its legacy reporting-key variable and set `APP_SECRET_ENCRYPTION_KEY` using the exact same decoded 32-byte key. The new binary recognizes only `APP_SECRET_ENCRYPTION_KEY`. Existing reporting-datasource v1 ciphertext does not need re-encryption.
+
+Apply `20260903120000_create_fincloud_auth_profiles.sql`, deploy the new binary with schedules still disabled and the ingress block still active, then create, Test, and Activate Auth Profiles. Explicitly bind every enabled source. This readiness query must return zero before ingestion resumes:
+
+```sql
+SELECT COUNT(*)
+FROM source_settings s
+LEFT JOIN fincloud_auth_profiles p ON p.id = s.fincloud_auth_profile_id
+WHERE s.enabled = TRUE
+  AND (p.id IS NULL OR p.status <> 'active');
+```
+
+After the UI and query both show zero configuration-required enabled sources, bulk-enable exactly the schedules recorded before the cutover, remove the ingress block, and confirm scheduler, direct, Run All, and reporting-v1 access.

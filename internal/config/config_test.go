@@ -125,7 +125,7 @@ func TestParseRuntimeRequiresFincloudOnlyAtRuntimeBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Fincloud.LocationID != "001" || got.Fincloud.RoleID != "role-1" || got.Fincloud.HTTPTimeout != 30*time.Second {
+	if got.Fincloud.HTTPTimeout != 30*time.Second {
 		t.Fatalf("unexpected Fincloud config: %+v", got.Fincloud)
 	}
 	if got.Reporting.InteractiveMaxRows != 10000 || got.Reporting.InteractivePayloadBytes != 8<<20 || got.Reporting.DynamicOptionMaxRows != 1000 || got.Reporting.DynamicOptionPayloadBytes != 1<<20 || got.Reporting.CellPreviewBytes != 16<<10 {
@@ -143,7 +143,6 @@ func TestParseFincloudValidation(t *testing.T) {
 		{"http URL", "FINCLOUD_BASE_URL", "http://fincloud.test", "absolute https"},
 		{"embedded credentials", "FINCLOUD_BASE_URL", "https://user:pass@fincloud.test", "without credentials"},
 		{"query", "FINCLOUD_BASE_URL", "https://fincloud.test?token=x", "without credentials"},
-		{"blank location", "FINCLOUD_LOCATION_ID", " ", "FINCLOUD_LOCATION_ID"},
 		{"invalid timeout", "FINCLOUD_HTTP_TIMEOUT", "0s", "FINCLOUD_HTTP_TIMEOUT"},
 		{"invalid insecure flag", "FINCLOUD_INSECURE_SKIP_VERIFY", "sometimes", "FINCLOUD_INSECURE_SKIP_VERIFY"},
 	}
@@ -161,7 +160,7 @@ func TestParseFincloudValidation(t *testing.T) {
 
 func TestParseReportingValidation(t *testing.T) {
 	tests := []struct{ key, value, want string }{
-		{"REPORT_DATASOURCE_MASTER_KEY", "short", "exactly 32 bytes"},
+		{"APP_SECRET_ENCRYPTION_KEY", "short", "exactly 32 bytes"},
 		{"REPORT_INTERACTIVE_PAYLOAD_BYTES", "0", "positive integer"},
 		{"REPORT_DYNAMIC_OPTION_MAX_ROWS", "0", "positive integer"},
 		{"REPORT_DYNAMIC_OPTION_PAYLOAD_BYTES", "100", "at least 4096"},
@@ -212,11 +211,7 @@ func baseValues(key, value string) map[string]string {
 func runtimeValues() map[string]string {
 	values := baseValues("", "")
 	values["FINCLOUD_BASE_URL"] = "https://fincloud.test/base"
-	values["FINCLOUD_USERNAME"] = "user"
-	values["FINCLOUD_PASSWORD"] = "secret"
-	values["FINCLOUD_LOCATION_ID"] = "001"
-	values["FINCLOUD_ROLE_ID"] = "role-1"
-	values["REPORT_DATASOURCE_MASTER_KEY"] = base64.StdEncoding.EncodeToString(make([]byte, 32))
+	values["APP_SECRET_ENCRYPTION_KEY"] = base64.StdEncoding.EncodeToString(make([]byte, 32))
 	return values
 }
 

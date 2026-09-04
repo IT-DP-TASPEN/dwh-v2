@@ -10,6 +10,7 @@ import {
   FileCode,
   FileDown,
   History,
+  Key,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -532,7 +533,7 @@ document.addEventListener("submit", (event) => {
 
 const initializeIcons = () =>
   createIcons({
-    icons: { Activity, CalendarClock, ChevronDown, CircleCheckBig, Database, FileCode, FileDown, History, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Server, Settings, Shield, ShieldCheck, Table2, UserRound, Users, X },
+    icons: { Activity, CalendarClock, ChevronDown, CircleCheckBig, Database, FileCode, FileDown, History, Key, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Server, Settings, Shield, ShieldCheck, Table2, UserRound, Users, X },
   });
 
 document.addEventListener("DOMContentLoaded", initializeIcons);

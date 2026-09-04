@@ -298,6 +298,9 @@ func scheduleState(value Schedule, overdue bool) string {
 	if value.DeliveryBlockReason == "source_disabled" {
 		return "Blocked — source disabled"
 	}
+	if value.DeliveryBlockReason == "source_configuration_required" {
+		return "Blocked — source authentication required"
+	}
 	if value.DeliveryBlockReason == "job_busy" {
 		return "Blocked — job busy"
 	}

@@ -10,6 +10,6 @@ const (
 func PermissionDefinitions() []access.PermissionDefinition {
 	return []access.PermissionDefinition{
 		{Key: PermissionView, Name: "View Sources", Group: "Ingestion", Description: "View ingestion source settings"},
-		{Key: PermissionManage, Name: "Manage Sources", Group: "Ingestion", Description: "Enable and disable ingestion sources"},
+		{Key: PermissionManage, Name: "Manage Sources", Group: "Ingestion", Description: "Enable, disable, and assign authentication to ingestion sources"},
 	}
 }

@@ -49,21 +49,21 @@ func (repository *Repository) RuntimeSettings(ctx context.Context) (RuntimeSetti
 }
 
 func (repository *Repository) Submit(ctx context.Context, jobKey string, parameters Parameters, trigger Trigger, reference string, requester *uint64) (uint64, error) {
-	return repository.submit(ctx, jobKey, parameters, trigger, reference, requester, nil)
+	return repository.submit(ctx, jobKey, parameters, trigger, reference, requester, nil, false)
 }
 
 func (repository *Repository) SubmitManual(ctx context.Context, jobKey string, parameters Parameters, trigger Trigger, reference string, requester securityctx.Requester) (uint64, error) {
 	actor := requester.Actor.UserID
-	return repository.submit(ctx, jobKey, parameters, trigger, reference, &actor, &requester)
+	return repository.submit(ctx, jobKey, parameters, trigger, reference, &actor, &requester, true)
 }
 
-func (repository *Repository) submit(ctx context.Context, jobKey string, parameters Parameters, trigger Trigger, reference string, requestedBy *uint64, auditRequester *securityctx.Requester) (uint64, error) {
+func (repository *Repository) submit(ctx context.Context, jobKey string, parameters Parameters, trigger Trigger, reference string, requestedBy *uint64, auditRequester *securityctx.Requester, requireAuth bool) (uint64, error) {
 	tx, err := repository.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	id, err := repository.SubmitInTx(ctx, tx, jobKey, parameters, trigger, reference, requestedBy)
+	id, err := repository.submitInTx(ctx, tx, jobKey, parameters, trigger, reference, requestedBy, requireAuth)
 	if err != nil {
 		return 0, err
 	}
@@ -81,6 +81,10 @@ func (repository *Repository) submit(ctx context.Context, jobKey string, paramet
 // SubmitInTx is the canonical job-submission path for callers that must link a
 // run to their own durable state in the same transaction.
 func (repository *Repository) SubmitInTx(ctx context.Context, tx *sqlx.Tx, jobKey string, parameters Parameters, trigger Trigger, reference string, requester *uint64) (uint64, error) {
+	return repository.submitInTx(ctx, tx, jobKey, parameters, trigger, reference, requester, trigger == TriggerScheduler)
+}
+
+func (repository *Repository) submitInTx(ctx context.Context, tx *sqlx.Tx, jobKey string, parameters Parameters, trigger Trigger, reference string, requester *uint64, requireAuth bool) (uint64, error) {
 	if tx == nil {
 		return 0, fmt.Errorf("transaction is required")
 	}
@@ -94,12 +98,18 @@ func (repository *Repository) SubmitInTx(ctx context.Context, tx *sqlx.Tx, jobKe
 	if err := parameters.Validate(job); err != nil {
 		return 0, err
 	}
-	enabled, err := sourceEnabled(ctx, tx, jobKey)
-	if err != nil {
-		return 0, err
-	}
-	if !enabled {
-		return 0, ErrSourceDisabled
+	if requireAuth {
+		if err := sourceReady(ctx, tx, jobKey); err != nil {
+			return 0, err
+		}
+	} else {
+		enabled, err := sourceEnabled(ctx, tx, jobKey)
+		if err != nil {
+			return 0, err
+		}
+		if !enabled {
+			return 0, ErrSourceDisabled
+		}
 	}
 	result, err := insertRun(ctx, tx, KindJob, nil, nil, jobKey, StatusQueued, parameters, trigger, reference, requester)
 	if duplicate(err) {
@@ -759,6 +769,33 @@ func sourceEnabled(ctx context.Context, tx *sqlx.Tx, key string) (bool, error) {
 		return false, err
 	}
 	return enabled, nil
+}
+
+func sourceReady(ctx context.Context, tx *sqlx.Tx, key string) error {
+	var source struct {
+		Enabled   bool          `db:"enabled"`
+		ProfileID sql.NullInt64 `db:"fincloud_auth_profile_id"`
+	}
+	if err := tx.GetContext(ctx, &source, `SELECT enabled,fincloud_auth_profile_id FROM source_settings WHERE source_id=? FOR UPDATE`, key); err != nil {
+		return err
+	}
+	if !source.Enabled {
+		return ErrSourceDisabled
+	}
+	if !source.ProfileID.Valid {
+		return ErrSourceConfigurationRequired
+	}
+	var status string
+	if err := tx.GetContext(ctx, &status, `SELECT status FROM fincloud_auth_profiles WHERE id=? FOR SHARE`, source.ProfileID.Int64); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSourceConfigurationRequired
+		}
+		return err
+	}
+	if status != "active" {
+		return ErrSourceConfigurationRequired
+	}
+	return nil
 }
 
 func insertRun(ctx context.Context, tx *sqlx.Tx, kind Kind, parent *uint64, position *uint16, jobKey string, status Status, parameters Parameters, trigger Trigger, reference string, requester *uint64) (sql.Result, error) {

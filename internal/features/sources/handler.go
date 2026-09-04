@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -22,8 +23,10 @@ const maxFormBody = 32 << 10
 
 type sourceService interface {
 	List(context.Context, bool) ([]Source, error)
+	AuthProfiles(context.Context) ([]AuthProfileOption, error)
 	Find(string) (core.JobDefinition, bool)
 	SetEnabled(context.Context, string, bool, bool, uint64, ...securityctx.Requester) error
+	SetAuthProfile(context.Context, string, *uint64, *uint64, uint64, ...securityctx.Requester) error
 }
 
 type submitter interface {
@@ -38,8 +41,26 @@ type Handler struct {
 
 type ListData struct {
 	Rows              []Source
+	AuthProfiles      []AuthProfileOption
 	CanManage, CanRun bool
 	CanViewRuns       bool
+}
+
+type SourceRowData struct {
+	Source       Source
+	AuthProfiles []AuthProfileOption
+	CanManage    bool
+	CanRun       bool
+	CanViewRuns  bool
+	Error        string
+}
+
+func (data ListData) RowViews() []SourceRowData {
+	rows := make([]SourceRowData, len(data.Rows))
+	for index, source := range data.Rows {
+		rows[index] = SourceRowData{Source: source, AuthProfiles: data.AuthProfiles, CanManage: data.CanManage, CanRun: data.CanRun, CanViewRuns: data.CanViewRuns}
+	}
+	return rows
 }
 
 type RunForm struct {
@@ -63,9 +84,87 @@ func (handler *Handler) Sources(writer http.ResponseWriter, request *http.Reques
 		handler.admin.Internal(writer, request, "list sources", err)
 		return
 	}
+	profiles, err := handler.service.AuthProfiles(request.Context())
+	if err != nil {
+		handler.admin.Internal(writer, request, "list source Auth Profiles", err)
+		return
+	}
 	handler.admin.RenderPage(writer, request, http.StatusOK, "features/sources/index", "Sources", ListData{
-		Rows: rows, CanManage: principal.Can(PermissionManage), CanRun: principal.Can("ingestion.run"), CanViewRuns: canViewRuns,
+		Rows: rows, AuthProfiles: profiles, CanManage: principal.Can(PermissionManage), CanRun: principal.Can("ingestion.run"), CanViewRuns: canViewRuns,
 	})
+}
+
+func (handler *Handler) SetAuthProfile(writer http.ResponseWriter, request *http.Request) {
+	job, ok := handler.job(writer, request)
+	if !ok || !webutil.ParseForm(writer, request, maxFormBody) {
+		return
+	}
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	expected, validExpected := optionalID(request.PostFormValue("expected_profile_id"))
+	target, validTarget := optionalID(request.PostFormValue("profile_id"))
+	if !validExpected || !validTarget {
+		handler.authProfileResult(writer, request, job.Key, principal, "Invalid Auth Profile selection; persisted selection restored.", http.StatusUnprocessableEntity)
+		return
+	}
+	if err := handler.service.SetAuthProfile(request.Context(), job.Key, expected, target, principal.Actor.UserID, principal.SecurityContext()); err != nil {
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrInvalidAuthProfile) {
+			handler.authProfileResult(writer, request, job.Key, principal, err.Error()+"; persisted selection restored.", http.StatusConflict)
+			return
+		}
+		if request.Header.Get("HX-Request") == "true" {
+			handler.authProfileResult(writer, request, job.Key, principal, "Auth Profile assignment could not be saved; persisted selection restored.", http.StatusInternalServerError)
+			return
+		}
+		handler.admin.Internal(writer, request, "assign source Auth Profile", err)
+		return
+	}
+	if request.Header.Get("HX-Request") == "true" {
+		handler.authProfileResult(writer, request, job.Key, principal, "", http.StatusOK)
+		return
+	}
+	http.Redirect(writer, request, "/sources?notice=source-auth-profile-updated", http.StatusSeeOther)
+}
+
+func (handler *Handler) authProfileResult(writer http.ResponseWriter, request *http.Request, key string, principal browserauth.Principal, message string, fallbackStatus int) {
+	if request.Header.Get("HX-Request") != "true" {
+		http.Error(writer, message, fallbackStatus)
+		return
+	}
+	canViewRuns := principal.Can("ingestion.view")
+	rows, err := handler.service.List(request.Context(), canViewRuns)
+	if err != nil {
+		handler.admin.Internal(writer, request, "reload source after Auth Profile assignment", err)
+		return
+	}
+	profiles, err := handler.service.AuthProfiles(request.Context())
+	if err != nil {
+		handler.admin.Internal(writer, request, "reload source Auth Profiles after assignment", err)
+		return
+	}
+	for _, source := range rows {
+		if source.Job.Key == key {
+			data := SourceRowData{Source: source, AuthProfiles: profiles, CanManage: principal.Can(PermissionManage), CanRun: principal.Can("ingestion.run"), CanViewRuns: canViewRuns, Error: message}
+			if err := handler.admin.RenderPartial(writer, http.StatusOK, "features/sources/index", "source-row", data); err != nil {
+				handler.admin.Internal(writer, request, "render source after Auth Profile assignment", err)
+			}
+			return
+		}
+	}
+	handler.admin.NotFound(writer, request)
+}
+
+func optionalID(value string) (*uint64, bool) {
+	if value == "" {
+		return nil, true
+	}
+	id, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || id == 0 {
+		return nil, false
+	}
+	return &id, true
 }
 
 func (handler *Handler) RunPage(writer http.ResponseWriter, request *http.Request) {
@@ -99,7 +198,7 @@ func (handler *Handler) Submit(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	id, err := handler.coordinator.SubmitManual(request.Context(), job.Key, parameters, ingestionrun.TriggerDirect, "web:"+middleware.GetReqID(request.Context()), principal.SecurityContext())
-	if errors.Is(err, ingestionrun.ErrJobBusy) || errors.Is(err, ingestionrun.ErrSourceDisabled) {
+	if errors.Is(err, ingestionrun.ErrJobBusy) || errors.Is(err, ingestionrun.ErrSourceDisabled) || errors.Is(err, ingestionrun.ErrSourceConfigurationRequired) {
 		http.Error(writer, err.Error(), http.StatusConflict)
 		return
 	}

@@ -9,4 +9,5 @@ func (handler *Handler) RegisterRoutes(router chi.Router) {
 	router.With(view, handler.admin.RequirePermission("ingestion.run")).Post("/sources/{jobKey}/runs", handler.Submit)
 	router.With(view, handler.admin.RequirePermission(PermissionManage)).Post("/sources/{jobKey}/enable", handler.Enable)
 	router.With(view, handler.admin.RequirePermission(PermissionManage)).Post("/sources/{jobKey}/disable", handler.Disable)
+	router.With(view, handler.admin.RequirePermission(PermissionManage)).Post("/sources/{jobKey}/auth-profile", handler.SetAuthProfile)
 }

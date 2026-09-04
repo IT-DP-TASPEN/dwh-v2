@@ -76,10 +76,6 @@ type ReportingConfig struct {
 
 type FincloudConfig struct {
 	BaseURL            string
-	Username           string
-	Password           string
-	LocationID         string
-	RoleID             string
 	HTTPTimeout        time.Duration
 	InsecureSkipVerify bool
 }
@@ -165,9 +161,9 @@ func parseReporting(lookup lookupEnv, environment string) (ReportingConfig, erro
 		}
 		return fallback
 	}
-	keyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value("REPORT_DATASOURCE_MASTER_KEY", "")))
+	keyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value("APP_SECRET_ENCRYPTION_KEY", "")))
 	if err != nil || len(keyBytes) != 32 {
-		return ReportingConfig{}, fmt.Errorf("REPORT_DATASOURCE_MASTER_KEY must be standard base64 encoding of exactly 32 bytes")
+		return ReportingConfig{}, fmt.Errorf("APP_SECRET_ENCRYPTION_KEY must be standard base64 encoding of exactly 32 bytes")
 	}
 	exportDir := strings.TrimSpace(value("REPORT_EXPORT_DIR", ""))
 	if exportDir == "" {
@@ -293,10 +289,6 @@ func parseFincloud(lookup lookupEnv) (FincloudConfig, error) {
 
 	config := FincloudConfig{
 		BaseURL:            strings.TrimSpace(value("FINCLOUD_BASE_URL", "")),
-		Username:           strings.TrimSpace(value("FINCLOUD_USERNAME", "")),
-		Password:           value("FINCLOUD_PASSWORD", ""),
-		LocationID:         strings.TrimSpace(value("FINCLOUD_LOCATION_ID", "")),
-		RoleID:             strings.TrimSpace(value("FINCLOUD_ROLE_ID", "")),
 		HTTPTimeout:        timeout,
 		InsecureSkipVerify: insecureSkipVerify,
 	}
@@ -306,10 +298,6 @@ func parseFincloud(lookup lookupEnv) (FincloudConfig, error) {
 		value string
 	}{
 		{"FINCLOUD_BASE_URL", config.BaseURL},
-		{"FINCLOUD_USERNAME", config.Username},
-		{"FINCLOUD_PASSWORD", strings.TrimSpace(config.Password)},
-		{"FINCLOUD_LOCATION_ID", config.LocationID},
-		{"FINCLOUD_ROLE_ID", config.RoleID},
 	}
 	for _, field := range required {
 		if field.value == "" {

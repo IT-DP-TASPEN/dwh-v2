@@ -85,6 +85,8 @@
     --container-md: 28rem;
     --container-xl: 36rem;
     --container-2xl: 42rem;
+    --container-3xl: 48rem;
+    --container-4xl: 56rem;
     --container-7xl: 80rem;
     --text-xs: 0.75rem;
     --text-xs--line-height: calc(1 / 0.75);
@@ -545,11 +547,20 @@
   .max-w-2xl {
     max-width: var(--container-2xl);
   }
+  .max-w-3xl {
+    max-width: var(--container-3xl);
+  }
+  .max-w-4xl {
+    max-width: var(--container-4xl);
+  }
   .max-w-7xl {
     max-width: var(--container-7xl);
   }
   .max-w-40 {
     max-width: calc(var(--spacing) * 40);
+  }
+  .max-w-48 {
+    max-width: calc(var(--spacing) * 48);
   }
   .max-w-80 {
     max-width: calc(var(--spacing) * 80);
@@ -616,6 +627,9 @@
   }
   .items-center {
     align-items: center;
+  }
+  .items-end {
+    align-items: flex-end;
   }
   .items-start {
     align-items: flex-start;
@@ -1506,6 +1520,9 @@
   }
   .dark\:border-orange-900:where(.dark, .dark *) {
     border-color: var(--color-orange-900);
+  }
+  .dark\:border-red-800:where(.dark, .dark *) {
+    border-color: var(--color-red-800);
   }
   .dark\:border-red-900:where(.dark, .dark *) {
     border-color: var(--color-red-900);

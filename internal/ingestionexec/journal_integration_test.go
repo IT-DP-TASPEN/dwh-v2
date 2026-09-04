@@ -13,9 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
-	"github.com/ibldzn/go-admin/internal/fincloud"
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/ingestionstore"
@@ -85,12 +83,8 @@ func TestJournalTransactionPartitionsPublishAtomically(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client, err := fincloud.NewClient(fincloud.Config{BaseURL: server.URL, Username: "user", Password: "pass", LocationID: "001", RoleID: "role", HTTPTimeout: time.Second, InsecureSkipVerify: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.CloseIdleConnections()
-	executor, err := New(client, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMasterRepository(db), ingestionstore.NewMaintenanceRepository(db),
+	sessions, authProfiles := integrationAuth(t, db, server.URL, "user", "pass", "001", "role")
+	executor, err := New(sessions, authProfiles, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMasterRepository(db), ingestionstore.NewMaintenanceRepository(db),
 		runs, catalog, 4, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)

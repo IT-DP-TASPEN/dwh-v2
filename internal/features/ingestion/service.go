@@ -408,6 +408,8 @@ func (service *Service) NeedsAttention(ctx context.Context, includeRuns, include
 				status.Key, status.Label = "job_busy", "Job busy"
 			case "source_disabled":
 				status.Key, status.Label = "source_disabled", "Source disabled"
+			case "source_configuration_required":
+				status.Key, status.Label = "source_configuration_required", "Authentication required"
 			default:
 				if row.RetryWaiting {
 					status.Key, status.Label = "retry_waiting", "Retry waiting"
@@ -478,6 +480,14 @@ func (service *Service) view(row runRow) RunView {
 	}
 	if row.SnapshotDate.Valid {
 		view.SnapshotDate = row.SnapshotDate.Time.Format("2006-01-02")
+	}
+	if row.FincloudAuthProfileID.Valid {
+		view.FincloudAuthProfileID = uint64(row.FincloudAuthProfileID.Int64)
+		view.FincloudAuthProfileRevision = uint64(row.FincloudAuthProfileRevision.Int64)
+		view.FincloudAuthProfileName = row.FincloudAuthProfileName.String
+		view.FincloudAuthUsername = row.FincloudAuthUsername.String
+		view.FincloudAuthRoleID = row.FincloudAuthRoleID.String
+		view.FincloudAuthLocationID = row.FincloudAuthLocationID.String
 	}
 	view.Parameters = parameterFields(row.parameters())
 	view.Terminal = ingestionrun.IsTerminal(ingestionrun.Status(row.Status))

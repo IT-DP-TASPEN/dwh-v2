@@ -15,58 +15,64 @@ type Action string
 const MaxMetadataBytes = 64 << 10
 
 const (
-	ActionAuthLogin                      Action = "auth.login"
-	ActionAuthLogout                     Action = "auth.logout"
-	ActionAuthRegistration               Action = "auth.registration"
-	ActionImpersonationStarted           Action = "impersonation.started"
-	ActionImpersonationStopped           Action = "impersonation.stopped"
-	ActionUserCreated                    Action = "user.created"
-	ActionUserProfileUpdated             Action = "user.profile_updated"
-	ActionUserRoleChanged                Action = "user.role_changed"
-	ActionUserActivated                  Action = "user.activated"
-	ActionUserDeactivated                Action = "user.deactivated"
-	ActionUserPasswordReset              Action = "user.password_reset"
-	ActionRoleCreated                    Action = "role.created"
-	ActionRoleUpdated                    Action = "role.updated"
-	ActionRoleDeleted                    Action = "role.deleted"
-	ActionRolePermissionsUpdated         Action = "role.permissions_updated"
-	ActionAdminBootstrap                 Action = "admin.bootstrap"
-	ActionIngestionRunSubmitted          Action = "ingestion.run_submitted"
-	ActionIngestionRunAllSubmitted       Action = "ingestion.run_all_submitted"
-	ActionIngestionCancellationRequested Action = "ingestion.cancellation_requested"
-	ActionIngestionAbandonedRecovered    Action = "ingestion.abandoned_recovered"
-	ActionSourceStateChanged             Action = "source.state_changed"
-	ActionScheduleCreated                Action = "schedule.created"
-	ActionScheduleUpdated                Action = "schedule.updated"
-	ActionScheduleStateChanged           Action = "schedule.state_changed"
-	ActionScheduleBulkEnable             Action = "schedule.bulk_enable"
-	ActionScheduleBulkDisable            Action = "schedule.bulk_disable"
-	ActionScheduleBulkArchive            Action = "schedule.bulk_archive"
-	ActionReportDatasourceCreated        Action = "report_datasource.created"
-	ActionReportDatasourceUpdated        Action = "report_datasource.updated"
-	ActionReportDatasourceStateChanged   Action = "report_datasource.state_changed"
-	ActionReportDatasourceTested         Action = "report_datasource.tested"
-	ActionReportTemplateCreated          Action = "report_template.created"
-	ActionReportTemplateUpdated          Action = "report_template.updated"
-	ActionReportTemplateStateChanged     Action = "report_template.state_changed"
-	ActionReportTemplateAccessChanged    Action = "report_template.access_changed"
-	ActionReportExecuted                 Action = "report.executed"
-	ActionReportTemplateQueryTested      Action = "report_template.query_tested"
-	ActionReportTemplateOptionsTested    Action = "report_template.options_tested"
-	ActionReportExportSubmitted          Action = "report_export.submitted"
-	ActionReportExportDownloaded         Action = "report_export.downloaded"
+	ActionAuthLogin                       Action = "auth.login"
+	ActionAuthLogout                      Action = "auth.logout"
+	ActionAuthRegistration                Action = "auth.registration"
+	ActionImpersonationStarted            Action = "impersonation.started"
+	ActionImpersonationStopped            Action = "impersonation.stopped"
+	ActionUserCreated                     Action = "user.created"
+	ActionUserProfileUpdated              Action = "user.profile_updated"
+	ActionUserRoleChanged                 Action = "user.role_changed"
+	ActionUserActivated                   Action = "user.activated"
+	ActionUserDeactivated                 Action = "user.deactivated"
+	ActionUserPasswordReset               Action = "user.password_reset"
+	ActionRoleCreated                     Action = "role.created"
+	ActionRoleUpdated                     Action = "role.updated"
+	ActionRoleDeleted                     Action = "role.deleted"
+	ActionRolePermissionsUpdated          Action = "role.permissions_updated"
+	ActionAdminBootstrap                  Action = "admin.bootstrap"
+	ActionIngestionRunSubmitted           Action = "ingestion.run_submitted"
+	ActionIngestionRunAllSubmitted        Action = "ingestion.run_all_submitted"
+	ActionIngestionCancellationRequested  Action = "ingestion.cancellation_requested"
+	ActionIngestionAbandonedRecovered     Action = "ingestion.abandoned_recovered"
+	ActionSourceStateChanged              Action = "source.state_changed"
+	ActionSourceAuthProfileChanged        Action = "source.auth_profile_changed"
+	ActionFincloudAuthProfileCreated      Action = "fincloud_auth_profile.created"
+	ActionFincloudAuthProfileUpdated      Action = "fincloud_auth_profile.updated"
+	ActionFincloudAuthProfileStateChanged Action = "fincloud_auth_profile.state_changed"
+	ActionFincloudAuthProfileTested       Action = "fincloud_auth_profile.tested"
+	ActionScheduleCreated                 Action = "schedule.created"
+	ActionScheduleUpdated                 Action = "schedule.updated"
+	ActionScheduleStateChanged            Action = "schedule.state_changed"
+	ActionScheduleBulkEnable              Action = "schedule.bulk_enable"
+	ActionScheduleBulkDisable             Action = "schedule.bulk_disable"
+	ActionScheduleBulkArchive             Action = "schedule.bulk_archive"
+	ActionReportDatasourceCreated         Action = "report_datasource.created"
+	ActionReportDatasourceUpdated         Action = "report_datasource.updated"
+	ActionReportDatasourceStateChanged    Action = "report_datasource.state_changed"
+	ActionReportDatasourceTested          Action = "report_datasource.tested"
+	ActionReportTemplateCreated           Action = "report_template.created"
+	ActionReportTemplateUpdated           Action = "report_template.updated"
+	ActionReportTemplateStateChanged      Action = "report_template.state_changed"
+	ActionReportTemplateAccessChanged     Action = "report_template.access_changed"
+	ActionReportExecuted                  Action = "report.executed"
+	ActionReportTemplateQueryTested       Action = "report_template.query_tested"
+	ActionReportTemplateOptionsTested     Action = "report_template.options_tested"
+	ActionReportExportSubmitted           Action = "report_export.submitted"
+	ActionReportExportDownloaded          Action = "report_export.downloaded"
 )
 
 type ResourceType string
 
 const (
-	ResourceUser             ResourceType = "user"
-	ResourceRole             ResourceType = "role"
-	ResourceIngestionRun     ResourceType = "ingestion_run"
-	ResourceSchedule         ResourceType = "schedule"
-	ResourceReportDatasource ResourceType = "report_datasource"
-	ResourceReportTemplate   ResourceType = "report_template"
-	ResourceReportExport     ResourceType = "report_export"
+	ResourceUser                ResourceType = "user"
+	ResourceRole                ResourceType = "role"
+	ResourceIngestionRun        ResourceType = "ingestion_run"
+	ResourceSchedule            ResourceType = "schedule"
+	ResourceReportDatasource    ResourceType = "report_datasource"
+	ResourceReportTemplate      ResourceType = "report_template"
+	ResourceReportExport        ResourceType = "report_export"
+	ResourceFincloudAuthProfile ResourceType = "fincloud_auth_profile"
 )
 
 type Identity struct {
@@ -239,6 +245,41 @@ type SourceStateChangeMetadata struct {
 
 func (SourceStateChangeMetadata) auditMetadata() {}
 
+type SourceAuthProfileChangedMetadata struct {
+	SourceKey     string  `json:"source_key"`
+	FromProfileID *uint64 `json:"from_profile_id,omitempty"`
+	ToProfileID   *uint64 `json:"to_profile_id,omitempty"`
+}
+
+func (SourceAuthProfileChangedMetadata) auditMetadata() {}
+
+type FincloudAuthProfileUpdatedMetadata struct {
+	Name            string `json:"name"`
+	Username        string `json:"username"`
+	RoleID          string `json:"role_id"`
+	LocationID      string `json:"location_id"`
+	Status          string `json:"status"`
+	Revision        uint64 `json:"revision"`
+	PasswordChanged bool   `json:"password_changed"`
+}
+
+func (FincloudAuthProfileUpdatedMetadata) auditMetadata() {}
+
+type FincloudAuthProfileStateMetadata struct {
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Revision uint64 `json:"revision"`
+}
+
+func (FincloudAuthProfileStateMetadata) auditMetadata() {}
+
+type FincloudAuthProfileTestedMetadata struct {
+	Revision uint64 `json:"revision,omitempty"`
+	Outcome  string `json:"outcome"`
+}
+
+func (FincloudAuthProfileTestedMetadata) auditMetadata() {}
+
 type IngestionSubmissionMetadata struct {
 	JobKey string `json:"job_key,omitempty"`
 	From   string `json:"from,omitempty"`
@@ -275,7 +316,7 @@ func Append(ctx context.Context, executor sqlx.ExtContext, event Event) error {
 		return fmt.Errorf("audit resource type and ID must be set together")
 	}
 	if event.Resource != "" && event.Resource != ResourceUser && event.Resource != ResourceRole && event.Resource != ResourceIngestionRun &&
-		event.Resource != ResourceSchedule && event.Resource != ResourceReportDatasource && event.Resource != ResourceReportTemplate && event.Resource != ResourceReportExport {
+		event.Resource != ResourceSchedule && event.Resource != ResourceReportDatasource && event.Resource != ResourceReportTemplate && event.Resource != ResourceReportExport && event.Resource != ResourceFincloudAuthProfile {
 		return fmt.Errorf("unknown audit resource type %q", event.Resource)
 	}
 	if event.CreatedAt.IsZero() {
@@ -356,6 +397,11 @@ func knownAction(action Action) bool {
 		ActionIngestionCancellationRequested,
 		ActionIngestionAbandonedRecovered,
 		ActionSourceStateChanged,
+		ActionSourceAuthProfileChanged,
+		ActionFincloudAuthProfileCreated,
+		ActionFincloudAuthProfileUpdated,
+		ActionFincloudAuthProfileStateChanged,
+		ActionFincloudAuthProfileTested,
 		ActionScheduleCreated,
 		ActionScheduleUpdated,
 		ActionScheduleStateChanged,

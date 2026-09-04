@@ -20,12 +20,14 @@ import (
 	"github.com/ibldzn/go-admin/internal/database"
 	"github.com/ibldzn/go-admin/internal/dwhschema"
 	"github.com/ibldzn/go-admin/internal/fincloud"
+	"github.com/ibldzn/go-admin/internal/fincloudauth"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/render"
 	"github.com/ibldzn/go-admin/internal/reportexport"
 	"github.com/ibldzn/go-admin/internal/reporting"
 	"github.com/ibldzn/go-admin/internal/scheduler"
+	"github.com/ibldzn/go-admin/internal/secretcrypto"
 	"github.com/ibldzn/go-admin/internal/server"
 	"github.com/ibldzn/go-admin/internal/user"
 	webfiles "github.com/ibldzn/go-admin/web"
@@ -79,21 +81,31 @@ func Run(ctx context.Context) error {
 	}
 	logger.Info("access control initialized")
 
-	fincloudClient, err := fincloud.NewClient(fincloud.Config{
+	secretCipher := secretcrypto.New(applicationConfig.Reporting.MasterKey)
+	authProfiles, err := fincloudauth.NewRepository(databaseConnection, secretCipher)
+	if err != nil {
+		return fmt.Errorf("initialize Fincloud Auth Profiles: %w", err)
+	}
+	fincloudSessions, err := fincloud.NewSessionCoordinator(fincloud.SessionCoordinatorConfig{
 		BaseURL:            applicationConfig.Fincloud.BaseURL,
-		Username:           applicationConfig.Fincloud.Username,
-		Password:           applicationConfig.Fincloud.Password,
-		LocationID:         applicationConfig.Fincloud.LocationID,
-		RoleID:             applicationConfig.Fincloud.RoleID,
 		HTTPTimeout:        applicationConfig.Fincloud.HTTPTimeout,
 		InsecureSkipVerify: applicationConfig.Fincloud.InsecureSkipVerify,
 	})
 	if err != nil {
-		return fmt.Errorf("initialize Fincloud client: %w", err)
+		return fmt.Errorf("initialize Fincloud session coordinator: %w", err)
 	}
-	defer fincloudClient.CloseIdleConnections()
+	defer fincloudSessions.Close()
+	fincloudListValues, err := fincloud.NewPreAuthClient(fincloud.Config{
+		BaseURL:            applicationConfig.Fincloud.BaseURL,
+		HTTPTimeout:        applicationConfig.Fincloud.HTTPTimeout,
+		InsecureSkipVerify: applicationConfig.Fincloud.InsecureSkipVerify,
+	})
+	if err != nil {
+		return fmt.Errorf("initialize Fincloud list-values client: %w", err)
+	}
+	defer fincloudListValues.CloseIdleConnections()
 	runtimeContext := context.WithoutCancel(ctx)
-	ingestionCoordinator, err := coordinator.New(ctx, databaseConnection, fincloudClient, logger)
+	ingestionCoordinator, err := coordinator.New(ctx, databaseConnection, fincloudSessions, authProfiles, logger)
 	if err != nil {
 		return fmt.Errorf("initialize ingestion coordinator: %w", err)
 	}
@@ -194,6 +206,7 @@ func Run(ctx context.Context) error {
 			registerFeatureRoutes(router, featureDependencies{
 				database: databaseConnection, users: userRepository, access: accessRepository,
 				admin: adminHTTP, cookies: cookieManager, coordinator: ingestionCoordinator, scheduler: scheduleService,
+				fincloudAuthProfiles: authProfiles, fincloudSessions: fincloudSessions, fincloudListValues: fincloudListValues,
 				reportingRepository: reportingRepository, reportingService: reportingService, reportingPools: reportingPools,
 				exportRepository: exportRepository, exportStorage: exportStorage, downloadTimeout: applicationConfig.Reporting.DownloadTimeout,
 			})
