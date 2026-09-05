@@ -9,7 +9,9 @@ import (
 	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/browserauth"
 	"github.com/ibldzn/go-admin/internal/coordinator"
+	"github.com/ibldzn/go-admin/internal/customdataset"
 	"github.com/ibldzn/go-admin/internal/features/auditlogs"
+	customdatasetsfeature "github.com/ibldzn/go-admin/internal/features/customdatasets"
 	"github.com/ibldzn/go-admin/internal/features/dashboard"
 	"github.com/ibldzn/go-admin/internal/features/datasources"
 	"github.com/ibldzn/go-admin/internal/features/fincloudauthprofiles"
@@ -43,26 +45,29 @@ func PermissionDefinitions() []access.PermissionDefinition {
 	definitions = append(definitions, datasources.PermissionDefinitions()...)
 	definitions = append(definitions, reporttemplates.PermissionDefinitions()...)
 	definitions = append(definitions, reports.PermissionDefinitions()...)
+	definitions = append(definitions, customdatasetsfeature.PermissionDefinitions()...)
 	return definitions
 }
 
 type featureDependencies struct {
-	database             *sqlx.DB
-	users                *user.Repository
-	access               *access.Repository
-	admin                *adminshell.Shell
-	cookies              browserauth.CookieManager
-	coordinator          *coordinator.Coordinator
-	scheduler            *scheduler.Service
-	fincloudAuthProfiles *fincloudauth.Repository
-	fincloudSessions     *fincloud.SessionCoordinator
-	fincloudListValues   *fincloud.Client
-	reportingRepository  *reporting.Repository
-	reportingService     *reporting.Service
-	reportingPools       *reporting.PoolManager
-	exportRepository     *reportexport.Repository
-	exportStorage        *reportexport.Storage
-	downloadTimeout      time.Duration
+	database                *sqlx.DB
+	users                   *user.Repository
+	access                  *access.Repository
+	admin                   *adminshell.Shell
+	cookies                 browserauth.CookieManager
+	coordinator             *coordinator.Coordinator
+	scheduler               *scheduler.Service
+	fincloudAuthProfiles    *fincloudauth.Repository
+	fincloudSessions        *fincloud.SessionCoordinator
+	fincloudListValues      *fincloud.Client
+	reportingRepository     *reporting.Repository
+	reportingService        *reporting.Service
+	reportingPools          *reporting.PoolManager
+	exportRepository        *reportexport.Repository
+	exportStorage           *reportexport.Storage
+	downloadTimeout         time.Duration
+	customDatasetRepository *customdataset.Repository
+	customDatasetStorage    *customdataset.Storage
 }
 
 func registerFeatureRoutes(router chi.Router, dependencies featureDependencies) {
@@ -92,6 +97,7 @@ func registerFeatureRoutes(router chi.Router, dependencies featureDependencies) 
 		fincloudauth.NewService(dependencies.fincloudAuthProfiles, dependencies.fincloudSessions), dependencies.fincloudListValues)
 	templateHandler := reporttemplates.NewHandler(dependencies.admin, dependencies.reportingRepository, dependencies.reportingService)
 	reportHandler := reports.NewHandler(dependencies.admin, dependencies.reportingRepository, dependencies.reportingService, dependencies.exportRepository, dependencies.exportStorage, dependencies.downloadTimeout)
+	customDatasetHandler := customdatasetsfeature.NewHandler(dependencies.admin, dependencies.customDatasetRepository, dependencies.customDatasetStorage)
 
 	dashboard.NewHandler(dependencies.admin, dashboard.NewService(ingestionService, dependencies.exportRepository)).RegisterRoutes(router)
 	users.NewHandler(dependencies.admin, userService, dependencies.cookies, roles.PermissionAssign, impersonation.CanStart).RegisterRoutes(router)
@@ -105,13 +111,14 @@ func registerFeatureRoutes(router chi.Router, dependencies featureDependencies) 
 	datasourceHandler.RegisterRoutes(router)
 	templateHandler.RegisterRoutes(router)
 	reportHandler.RegisterRoutes(router)
+	customDatasetHandler.RegisterRoutes(router)
 }
 
 func navigationGroups() []navigation.Group {
 	return []navigation.Group{
 		{Key: "general", Label: "General", Items: []navigation.Item{dashboard.Navigation()}},
 		{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.Item{
-			ingestionfeature.OverviewNavigation(), sourcesfeature.Navigation(), fincloudauthprofiles.Navigation(), ingestionfeature.RunsNavigation(), schedulesfeature.Navigation(),
+			ingestionfeature.OverviewNavigation(), sourcesfeature.Navigation(), customdatasetsfeature.Navigation(), fincloudauthprofiles.Navigation(), ingestionfeature.RunsNavigation(), schedulesfeature.Navigation(),
 		}},
 		{Key: "reporting", Label: "Reporting", Items: []navigation.Item{
 			reports.Navigation(), reports.ExportsNavigation(),

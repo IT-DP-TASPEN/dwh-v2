@@ -49,8 +49,14 @@ type Config struct {
 // instead, so migrations and administrator bootstrap remain independent.
 type RuntimeConfig struct {
 	Config
-	Fincloud  FincloudConfig
-	Reporting ReportingConfig
+	Fincloud      FincloudConfig
+	Reporting     ReportingConfig
+	CustomDataset CustomDatasetConfig
+}
+
+type CustomDatasetConfig struct {
+	Directory   string
+	Concurrency int
 }
 
 type ReportingConfig struct {
@@ -151,7 +157,33 @@ func parseRuntime(lookup lookupEnv) (RuntimeConfig, error) {
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
-	return RuntimeConfig{Config: base, Fincloud: fincloudConfig, Reporting: reportingConfig}, nil
+	customDatasetConfig, err := parseCustomDataset(lookup, base.App.Environment)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	return RuntimeConfig{Config: base, Fincloud: fincloudConfig, Reporting: reportingConfig, CustomDataset: customDatasetConfig}, nil
+}
+
+func parseCustomDataset(lookup lookupEnv, environment string) (CustomDatasetConfig, error) {
+	directory := ""
+	if value, ok := lookup("CUSTOM_DATASET_DIR"); ok {
+		directory = strings.TrimSpace(value)
+	}
+	if directory == "" {
+		if environment == "production" {
+			return CustomDatasetConfig{}, fmt.Errorf("CUSTOM_DATASET_DIR must not be empty in production")
+		}
+		directory = "./var/custom-datasets"
+	}
+	concurrency := 1
+	if value, ok := lookup("CUSTOM_DATASET_MAX_CONCURRENT_IMPORTS"); ok {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 {
+			return CustomDatasetConfig{}, fmt.Errorf("CUSTOM_DATASET_MAX_CONCURRENT_IMPORTS must be a positive integer")
+		}
+		concurrency = parsed
+	}
+	return CustomDatasetConfig{Directory: directory, Concurrency: concurrency}, nil
 }
 
 func parseReporting(lookup lookupEnv, environment string) (ReportingConfig, error) {

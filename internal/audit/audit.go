@@ -60,6 +60,15 @@ const (
 	ActionReportTemplateOptionsTested     Action = "report_template.options_tested"
 	ActionReportExportSubmitted           Action = "report_export.submitted"
 	ActionReportExportDownloaded          Action = "report_export.downloaded"
+	ActionCustomDatasetUploadStored       Action = "custom_dataset.upload_stored"
+	ActionCustomDatasetProvisioned        Action = "custom_dataset.provisioned"
+	ActionCustomDatasetActivated          Action = "custom_dataset.activated"
+	ActionCustomDatasetUpdated            Action = "custom_dataset.updated"
+	ActionCustomDatasetArchived           Action = "custom_dataset.archived"
+	ActionCustomDatasetSchemaRevised      Action = "custom_dataset.schema_revised"
+	ActionCustomDatasetImportSubmitted    Action = "custom_dataset.import_submitted"
+	ActionCustomDatasetImportSucceeded    Action = "custom_dataset.import_succeeded"
+	ActionCustomDatasetImportFailed       Action = "custom_dataset.import_failed"
 )
 
 type ResourceType string
@@ -73,6 +82,9 @@ const (
 	ResourceReportTemplate      ResourceType = "report_template"
 	ResourceReportExport        ResourceType = "report_export"
 	ResourceFincloudAuthProfile ResourceType = "fincloud_auth_profile"
+	ResourceCustomDataset       ResourceType = "custom_dataset"
+	ResourceCustomDatasetUpload ResourceType = "custom_dataset_upload"
+	ResourceCustomDatasetImport ResourceType = "custom_dataset_import"
 )
 
 type Identity struct {
@@ -136,6 +148,19 @@ type OutcomeMetadata struct {
 }
 
 func (OutcomeMetadata) auditMetadata() {}
+
+type CustomDatasetMetadata struct {
+	DatasetID      uint64 `json:"dataset_id,omitempty"`
+	UploadID       uint64 `json:"upload_id,omitempty"`
+	ImportID       uint64 `json:"import_id,omitempty"`
+	SchemaRevision uint64 `json:"schema_revision,omitempty"`
+	Rows           uint64 `json:"rows,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	SHA256         string `json:"sha256,omitempty"`
+	Outcome        string `json:"outcome,omitempty"`
+}
+
+func (CustomDatasetMetadata) auditMetadata() {}
 
 type ReportIdentityMetadata struct {
 	ReportTemplateID uint64 `json:"report_template_id"`
@@ -316,7 +341,8 @@ func Append(ctx context.Context, executor sqlx.ExtContext, event Event) error {
 		return fmt.Errorf("audit resource type and ID must be set together")
 	}
 	if event.Resource != "" && event.Resource != ResourceUser && event.Resource != ResourceRole && event.Resource != ResourceIngestionRun &&
-		event.Resource != ResourceSchedule && event.Resource != ResourceReportDatasource && event.Resource != ResourceReportTemplate && event.Resource != ResourceReportExport && event.Resource != ResourceFincloudAuthProfile {
+		event.Resource != ResourceSchedule && event.Resource != ResourceReportDatasource && event.Resource != ResourceReportTemplate && event.Resource != ResourceReportExport && event.Resource != ResourceFincloudAuthProfile &&
+		event.Resource != ResourceCustomDataset && event.Resource != ResourceCustomDatasetUpload && event.Resource != ResourceCustomDatasetImport {
 		return fmt.Errorf("unknown audit resource type %q", event.Resource)
 	}
 	if event.CreatedAt.IsZero() {
@@ -420,7 +446,16 @@ func knownAction(action Action) bool {
 		ActionReportTemplateQueryTested,
 		ActionReportTemplateOptionsTested,
 		ActionReportExportSubmitted,
-		ActionReportExportDownloaded:
+		ActionReportExportDownloaded,
+		ActionCustomDatasetUploadStored,
+		ActionCustomDatasetProvisioned,
+		ActionCustomDatasetActivated,
+		ActionCustomDatasetUpdated,
+		ActionCustomDatasetArchived,
+		ActionCustomDatasetSchemaRevised,
+		ActionCustomDatasetImportSubmitted,
+		ActionCustomDatasetImportSucceeded,
+		ActionCustomDatasetImportFailed:
 		return true
 	default:
 		return false

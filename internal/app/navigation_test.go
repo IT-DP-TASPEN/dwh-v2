@@ -5,6 +5,7 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/access"
 	"github.com/ibldzn/go-admin/internal/features/auditlogs"
+	"github.com/ibldzn/go-admin/internal/features/customdatasets"
 	"github.com/ibldzn/go-admin/internal/features/datasources"
 	"github.com/ibldzn/go-admin/internal/features/fincloudauthprofiles"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
@@ -40,6 +41,7 @@ func TestPhaseFourNavigation(t *testing.T) {
 		{name: "ingestion overview", path: "/ingestion", permissions: []string{ingestionfeature.PermissionView}, groups: 2, active: "ingestion-overview"},
 		{name: "source-only overview", path: "/ingestion", permissions: []string{sourcesfeature.PermissionView}, groups: 1, active: "ingestion-overview"},
 		{name: "sources", path: "/sources", permissions: []string{sourcesfeature.PermissionView}, groups: 1, active: "sources"},
+		{name: "custom datasets", path: "/custom-datasets/7", permissions: []string{customdatasets.PermissionView}, groups: 1, active: "custom-datasets"},
 		{name: "runs", path: "/runs/7", permissions: []string{ingestionfeature.PermissionView}, groups: 2, active: "ingestion-runs"},
 		{name: "schedules", path: "/schedules/7", permissions: []string{schedulesfeature.PermissionView}, groups: 1, active: "schedules"},
 		{name: "management hidden", path: "/", permissions: nil, groups: 0},
@@ -63,8 +65,8 @@ func TestPhaseFourNavigation(t *testing.T) {
 
 func TestPermissionAggregation(t *testing.T) {
 	definitions := PermissionDefinitions()
-	if len(definitions) != 40 {
-		t.Fatalf("got %d permissions, want 40", len(definitions))
+	if len(definitions) != 42 {
+		t.Fatalf("got %d permissions, want 42", len(definitions))
 	}
 	if err := access.ValidateRegistry(definitions); err != nil {
 		t.Fatal(err)
@@ -86,6 +88,7 @@ func TestPermissionAggregation(t *testing.T) {
 		reporttemplates.PermissionView: true, reporttemplates.PermissionCreate: true, reporttemplates.PermissionUpdate: true,
 		reporttemplates.PermissionChangeState: true, reporttemplates.PermissionManageAccess: true,
 		reports.PermissionView: true, reports.PermissionExecute: true, reports.PermissionExport: true, reports.PermissionViewAllExports: true,
+		customdatasets.PermissionView: true, customdatasets.PermissionManage: true,
 	}
 	for _, definition := range definitions {
 		delete(want, definition.Key)

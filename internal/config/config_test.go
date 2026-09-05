@@ -131,6 +131,9 @@ func TestParseRuntimeRequiresFincloudOnlyAtRuntimeBoundary(t *testing.T) {
 	if got.Reporting.InteractiveMaxRows != 10000 || got.Reporting.InteractivePayloadBytes != 8<<20 || got.Reporting.DynamicOptionMaxRows != 1000 || got.Reporting.DynamicOptionPayloadBytes != 1<<20 || got.Reporting.CellPreviewBytes != 16<<10 {
 		t.Fatalf("unexpected reporting config: %+v", got.Reporting)
 	}
+	if got.CustomDataset.Directory != "./var/custom-datasets" || got.CustomDataset.Concurrency != 1 {
+		t.Fatalf("unexpected custom dataset config: %+v", got.CustomDataset)
+	}
 }
 
 func TestParseFincloudValidation(t *testing.T) {
@@ -181,6 +184,14 @@ func TestParseReportingValidation(t *testing.T) {
 	if _, err := parseRuntime(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "REPORT_EXPORT_DIR") {
 		t.Fatalf("production export directory error=%v", err)
 	}
+	values = runtimeValues()
+	productionValues(values)
+	values["APP_ENV"] = "production"
+	values["REPORT_EXPORT_DIR"] = "/srv/go-admin/report-exports"
+	delete(values, "CUSTOM_DATASET_DIR")
+	if _, err := parseRuntime(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "CUSTOM_DATASET_DIR") {
+		t.Fatalf("production custom dataset directory error=%v", err)
+	}
 }
 
 func TestLoadEnvironmentOverridesDotEnv(t *testing.T) {
@@ -221,6 +232,7 @@ func productionValues(values map[string]string) {
 	values["ALLOW_REGISTRATION"] = "false"
 	values["SESSION_SECURE"] = "true"
 	values["DB_PASSWORD"] = "secret"
+	values["CUSTOM_DATASET_DIR"] = "/srv/go-admin/custom-datasets"
 }
 
 func cloneValues(values map[string]string) map[string]string {

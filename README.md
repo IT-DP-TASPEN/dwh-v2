@@ -23,6 +23,7 @@ Production builds embed templates and generated assets in one Go binary. Develop
 - Read-only, permission-gated audit log viewer
 - Hourly expired-session cleanup
 - Unit, race, and opt-in real-MySQL integration tests
+- Immutable UTF-8 CSV custom datasets with typed schemas, atomic Replace/Append publication, stable SQL views, and retained import history
 
 ## Quick start
 
@@ -90,7 +91,7 @@ An Auth Profile location ID is login/session context only. It is never substitut
 
 ## Permissions and management
 
-The 40 canonical permission keys are aggregated from features and synchronized additively at server and CLI bootstrap. Unknown database permissions and assignments are preserved. Migrations never run automatically at application startup. `audit.view` may be assigned to user or custom roles; administrators receive it through the normal superuser bypass.
+The 42 canonical permission keys are aggregated from features and synchronized additively at server and CLI bootstrap. Unknown database permissions and assignments are preserved. Migrations never run automatically at application startup. `audit.view` may be assigned to user or custom roles; administrators receive it through the normal superuser bypass.
 
 Each user has exactly one role. The `admin` role is an immutable superuser; non-admin roles use current database permission assignments. Permissions are loaded for every authenticated request, so changes apply on the next request without cache invalidation.
 

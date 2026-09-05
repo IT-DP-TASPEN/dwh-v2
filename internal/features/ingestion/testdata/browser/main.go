@@ -6,12 +6,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ibldzn/go-admin/internal/customdataset"
+	customdatasetsfeature "github.com/ibldzn/go-admin/internal/features/customdatasets"
 	dashboardfeature "github.com/ibldzn/go-admin/internal/features/dashboard"
 	authprofilesfeature "github.com/ibldzn/go-admin/internal/features/fincloudauthprofiles"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
@@ -33,17 +36,21 @@ import (
 const address = "127.0.0.1:4173"
 
 type fixture struct {
-	renderer    *render.Renderer
-	mu          sync.Mutex
-	polls       map[uint64]int
-	childLoads  map[uint64]int
-	waveLoads   map[string]int
-	starred     map[uint64]bool
-	folders     map[uint64]*uint64
-	folderNames map[uint64]string
-	schedules   map[uint64]schedulesfeature.Schedule
-	authProfile fincloudauth.Profile
-	sourceBound bool
+	renderer       *render.Renderer
+	mu             sync.Mutex
+	polls          map[uint64]int
+	childLoads     map[uint64]int
+	waveLoads      map[string]int
+	starred        map[uint64]bool
+	folders        map[uint64]*uint64
+	folderNames    map[uint64]string
+	schedules      map[uint64]schedulesfeature.Schedule
+	authProfile    fincloudauth.Profile
+	sourceBound    bool
+	customDataset  *customdataset.Dataset
+	customColumns  []customdataset.Column
+	customImports  []customdataset.Import
+	customUploadID uint64
 }
 
 func main() {
@@ -55,6 +62,7 @@ func main() {
 	fixture.resetReports()
 	fixture.resetSchedules()
 	fixture.resetFincloudAuth()
+	fixture.resetCustomDataset("failed")
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.FileServer(http.FS(webfiles.Files)))
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
@@ -75,6 +83,8 @@ func main() {
 	mux.HandleFunc("/reports/", fixture.reportMutation)
 	mux.HandleFunc("/exports", fixture.exportsPage)
 	mux.HandleFunc("/exports/", fixture.exportObject)
+	mux.HandleFunc("/custom-datasets", fixture.customDatasetsPage)
+	mux.HandleFunc("/custom-datasets/", fixture.customDatasetObject)
 	log.Printf("Run Details browser fixture listening on %s", address)
 	log.Fatal(http.ListenAndServe(address, mux))
 }
@@ -135,7 +145,7 @@ func fixtureNavigation(operational bool, path string) []navigation.GroupView {
 	if operational {
 		groups = append(groups,
 			navigation.GroupView{Key: "general", Label: "General", Items: []navigation.ItemView{{Key: "dashboard", Label: "Dashboard", Icon: "layout-dashboard", Path: "/", Depth: 1, Active: path == "/"}}},
-			navigation.GroupView{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.ItemView{{Key: "ingestion-overview", Label: "Overview", Icon: "activity", Path: "/ingestion", Depth: 1, Active: path == "/ingestion"}, {Key: "ingestion-runs", Label: "Runs", Icon: "history", Path: "/runs", Depth: 1}, {Key: "schedules", Label: "Schedules", Icon: "calendar-clock", Path: "/schedules", Depth: 1, Active: path == "/schedules"}}},
+			navigation.GroupView{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.ItemView{{Key: "ingestion-overview", Label: "Overview", Icon: "activity", Path: "/ingestion", Depth: 1, Active: path == "/ingestion"}, {Key: "custom-datasets", Label: "Custom Datasets", Icon: "table", Path: "/custom-datasets", Depth: 1, Active: path == "/custom-datasets"}, {Key: "ingestion-runs", Label: "Runs", Icon: "history", Path: "/runs", Depth: 1}, {Key: "schedules", Label: "Schedules", Icon: "calendar-clock", Path: "/schedules", Depth: 1, Active: path == "/schedules"}}},
 		)
 	}
 	groups = append(groups, navigation.GroupView{Key: "reporting", Label: "Reporting", Items: []navigation.ItemView{{Key: "reports", Label: "Reports", Icon: "file-chart-column", Path: "/reports", Depth: 1, Active: path == "/reports"}, {Key: "report-exports", Label: "Exports", Icon: "file-down", Path: "/exports", Depth: 1, Active: path == "/exports"}}})
@@ -398,6 +408,15 @@ func (fixture *fixture) schedulerWave(writer http.ResponseWriter, request *http.
 }
 
 func (fixture *fixture) page(writer http.ResponseWriter, request *http.Request) {
+	if strings.HasPrefix(request.URL.Path, "/case/custom-datasets-") {
+		fixture.resetCustomDataset(strings.TrimPrefix(request.URL.Path, "/case/custom-datasets-"))
+		target := "/custom-datasets"
+		if fixture.customDataset != nil {
+			target = "/custom-datasets/1"
+		}
+		http.Redirect(writer, request, target, http.StatusSeeOther)
+		return
+	}
 	if request.URL.Path == "/case/fincloud-auth" {
 		fixture.resetFincloudAuth()
 		http.Redirect(writer, request, "/fincloud-auth-profiles", http.StatusSeeOther)
@@ -436,6 +455,202 @@ func (fixture *fixture) page(writer http.ResponseWriter, request *http.Request) 
 	}
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(writer, `<!doctype html><html lang="en"><head><meta charset="utf-8"><script defer src="/static/js/app.js"></script></head><body><main>%s</main></body></html>`, body)
+}
+
+func (fixture *fixture) resetCustomDataset(state string) {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	fixture.customUploadID = 1
+	fixture.customColumns = []customdataset.Column{
+		{DatasetID: 1, Ordinal: 1, DisplayName: "Name", QueryName: "name", PhysicalName: "c001", LogicalType: customdataset.TypeText},
+		{DatasetID: 1, Ordinal: 2, DisplayName: "Amount", QueryName: "amount", PhysicalName: "c002", LogicalType: customdataset.TypeInteger},
+	}
+	fixture.customImports = nil
+	if state == "new" {
+		fixture.customDataset = nil
+		return
+	}
+	now := time.Date(2026, 9, 5, 4, 0, 0, 0, time.UTC)
+	dataset := customdataset.Dataset{ID: 1, Name: "Branch ledger", Description: "Uploaded CSV", Status: customdataset.DatasetProvisioning, Revision: 1, SchemaRevision: 1, CreatedAt: now, UpdatedAt: now}
+	failure := "CSV validation failed at record 3."
+	fixture.customImports = []customdataset.Import{{ID: 1, DatasetID: 1, UploadID: 1, Mode: customdataset.ModeReplace, Status: customdataset.ImportFailed, Phase: "complete", Attempt: 1, FailureMessage: &failure, CreatedAt: now, UpdatedAt: now}}
+	if state == "active" {
+		generation, attempt := uint64(2), uint32(1)
+		dataset.Status, dataset.Revision, dataset.RowCount, dataset.CurrentGenerationID = customdataset.DatasetActive, 2, 2, &generation
+		fixture.customImports = []customdataset.Import{{ID: 2, DatasetID: 1, UploadID: 2, Mode: customdataset.ModeReplace, Status: customdataset.ImportSucceeded, Phase: "complete", Attempt: attempt, PublishedAttempt: &attempt, StagedRows: 2, CreatedAt: now, UpdatedAt: now}}
+	}
+	fixture.customDataset = &dataset
+}
+
+func (fixture *fixture) customDatasetsPage(writer http.ResponseWriter, request *http.Request) {
+	fixture.mu.Lock()
+	var rows []customdataset.Dataset
+	if fixture.customDataset != nil {
+		rows = append(rows, *fixture.customDataset)
+	}
+	fixture.mu.Unlock()
+	data := customdatasetsfeature.ListData{Rows: rows, CanManage: request.URL.Query().Get("persona") != "view"}
+	pageData := adminshell.PageData{Title: "Custom datasets", AppName: "Browser fixture", CurrentPath: "/custom-datasets", Navigation: fixtureNavigation(true, "/custom-datasets"), Data: data}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/customdatasets/index", "admin", pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (fixture *fixture) customDatasetObject(writer http.ResponseWriter, request *http.Request) {
+	trimmed := strings.TrimPrefix(request.URL.Path, "/custom-datasets/")
+	if trimmed == "new" {
+		fixture.renderCustomUpload(writer, request, nil, customdataset.ModeReplace)
+		return
+	}
+	if trimmed == "uploads" && request.Method == http.MethodPost {
+		fixture.acceptCustomUpload(writer, request)
+		return
+	}
+	if strings.HasPrefix(trimmed, "uploads/") && strings.HasSuffix(trimmed, "/configure") {
+		fixture.renderCustomConfigure(writer, request)
+		return
+	}
+	if trimmed == "imports" && request.Method == http.MethodPost {
+		fixture.acceptCustomImport(writer, request)
+		return
+	}
+	fixture.mu.Lock()
+	dataset := fixture.customDataset
+	fixture.mu.Unlock()
+	if dataset == nil {
+		http.NotFound(writer, request)
+		return
+	}
+	switch {
+	case trimmed == "1" && request.Method == http.MethodGet:
+		fixture.renderCustomDetail(writer, request, "admin")
+	case trimmed == "1/status" && request.Method == http.MethodGet:
+		fixture.renderCustomDetail(writer, request, "custom-dataset-status")
+	case trimmed == "1/imports/new" && request.Method == http.MethodGet:
+		mode := customdataset.ImportMode(request.URL.Query().Get("mode"))
+		if mode != customdataset.ModeAppend {
+			mode = customdataset.ModeReplace
+		}
+		fixture.renderCustomUpload(writer, request, dataset, mode)
+	case trimmed == "1/metadata" && request.Method == http.MethodPost:
+		_ = request.ParseForm()
+		fixture.mu.Lock()
+		fixture.customDataset.Name = request.PostFormValue("name")
+		fixture.customDataset.Description = request.PostFormValue("description")
+		fixture.customDataset.Revision++
+		fixture.mu.Unlock()
+		http.Redirect(writer, request, "/custom-datasets/1", http.StatusSeeOther)
+	case trimmed == "1/archive" && request.Method == http.MethodPost:
+		fixture.mu.Lock()
+		fixture.customDataset.Status = customdataset.DatasetArchived
+		fixture.customDataset.Revision++
+		fixture.mu.Unlock()
+		http.Redirect(writer, request, "/custom-datasets/1", http.StatusSeeOther)
+	default:
+		http.NotFound(writer, request)
+	}
+}
+
+func (fixture *fixture) renderCustomUpload(writer http.ResponseWriter, request *http.Request, dataset *customdataset.Dataset, mode customdataset.ImportMode) {
+	data := customdatasetsfeature.UploadData{Dataset: dataset, Mode: mode}
+	pageData := adminshell.PageData{Title: "Upload CSV", AppName: "Browser fixture", CurrentPath: "/custom-datasets", Navigation: fixtureNavigation(true, "/custom-datasets"), Data: data}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/customdatasets/upload", "admin", pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (fixture *fixture) acceptCustomUpload(writer http.ResponseWriter, request *http.Request) {
+	if err := request.ParseMultipartForm(1 << 20); err != nil {
+		http.Error(writer, "invalid CSV", http.StatusUnprocessableEntity)
+		return
+	}
+	file, header, err := request.FormFile("file")
+	if err != nil || !strings.EqualFold(path.Ext(header.Filename), ".csv") {
+		http.Error(writer, "Choose a CSV file.", http.StatusUnprocessableEntity)
+		return
+	}
+	_ = file.Close()
+	fixture.mu.Lock()
+	fixture.customUploadID++
+	uploadID := fixture.customUploadID
+	fixture.mu.Unlock()
+	location := fmt.Sprintf("/custom-datasets/uploads/%d/configure", uploadID)
+	if datasetID := request.URL.Query().Get("dataset_id"); datasetID != "" {
+		location += "?dataset_id=" + datasetID + "&mode=" + request.URL.Query().Get("mode")
+	}
+	http.Redirect(writer, request, location, http.StatusSeeOther)
+}
+
+func (fixture *fixture) renderCustomConfigure(writer http.ResponseWriter, request *http.Request) {
+	uploadID, _ := strconv.ParseUint(strings.Split(strings.TrimPrefix(request.URL.Path, "/custom-datasets/uploads/"), "/")[0], 10, 64)
+	delimiter := customdataset.Delimiter(request.URL.Query().Get("delimiter"))
+	if delimiter == "" {
+		delimiter = customdataset.DelimiterComma
+	}
+	mode := customdataset.ImportMode(request.URL.Query().Get("mode"))
+	if mode != customdataset.ModeAppend {
+		mode = customdataset.ModeReplace
+	}
+	preview := customdataset.Preview{Header: []string{"Name", "Amount"}, QueryNames: []string{"name", "amount"}, Suggestions: []customdataset.ColumnSuggestion{{Type: customdataset.TypeText}, {Type: customdataset.TypeInteger}}, Rows: [][]string{{"Alpha", "10"}, {"Beta", "20"}}, ScannedRows: 2}
+	data := customdatasetsfeature.ConfigureData{Upload: customdataset.Upload{ID: uploadID, OriginalFilename: "ledger.csv", ByteSize: 33}, Preview: &preview, Delimiter: delimiter, HeaderRecord: 1, Mode: mode}
+	if request.URL.Query().Get("dataset_id") == "1" {
+		fixture.mu.Lock()
+		dataset := *fixture.customDataset
+		columns := append([]customdataset.Column(nil), fixture.customColumns...)
+		fixture.mu.Unlock()
+		data.Dataset = &dataset
+		if dataset.Status == customdataset.DatasetActive {
+			data.FrozenColumns = columns
+		}
+	}
+	pageData := adminshell.PageData{Title: "Configure custom dataset", AppName: "Browser fixture", CurrentPath: "/custom-datasets", Navigation: fixtureNavigation(true, "/custom-datasets"), Data: data}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/customdatasets/configure", "admin", pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (fixture *fixture) acceptCustomImport(writer http.ResponseWriter, request *http.Request) {
+	_ = request.ParseForm()
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	now := time.Now().UTC()
+	if fixture.customDataset == nil {
+		fixture.customDataset = &customdataset.Dataset{ID: 1, Name: request.PostFormValue("name"), Description: request.PostFormValue("description"), Status: customdataset.DatasetActive, Revision: 2, SchemaRevision: 1, RowCount: 2, CreatedAt: now, UpdatedAt: now}
+	}
+	fixture.customDataset.Status = customdataset.DatasetActive
+	fixture.customDataset.Revision++
+	if fixture.customDataset.RowCount == 0 {
+		fixture.customDataset.RowCount = 2
+	} else if request.PostFormValue("mode") == "append" {
+		fixture.customDataset.RowCount += 2
+	} else {
+		fixture.customDataset.RowCount = 2
+	}
+	fixture.customDataset.SchemaRevision++
+	id := uint64(len(fixture.customImports) + 2)
+	generation, attempt := id, uint32(1)
+	fixture.customDataset.CurrentGenerationID = &generation
+	fixture.customImports = append([]customdataset.Import{{ID: id, DatasetID: 1, UploadID: fixture.customUploadID, Mode: customdataset.ImportMode(request.PostFormValue("mode")), Status: customdataset.ImportSucceeded, Phase: "complete", Attempt: attempt, PublishedAttempt: &attempt, StagedRows: 2, CreatedAt: now, UpdatedAt: now}}, fixture.customImports...)
+	http.Redirect(writer, request, "/custom-datasets/1", http.StatusSeeOther)
+}
+
+func (fixture *fixture) renderCustomDetail(writer http.ResponseWriter, request *http.Request, templateName string) {
+	fixture.mu.Lock()
+	dataset := *fixture.customDataset
+	columns := append([]customdataset.Column(nil), fixture.customColumns...)
+	imports := append([]customdataset.Import(nil), fixture.customImports...)
+	fixture.mu.Unlock()
+	data := customdatasetsfeature.DetailData{Dataset: dataset, Columns: columns, Imports: imports, CanManage: request.URL.Query().Get("persona") != "view", SQLName: dataset.ViewName()}
+	if templateName == "custom-dataset-status" {
+		if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/customdatasets/show", templateName, data); err != nil {
+			http.Error(writer, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	pageData := adminshell.PageData{Title: dataset.Name, AppName: "Browser fixture", CurrentPath: "/custom-datasets", Navigation: fixtureNavigation(true, "/custom-datasets"), Data: data}
+	if err := fixture.renderer.RenderPartial(writer, http.StatusOK, "features/customdatasets/show", templateName, pageData); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (fixture *fixture) resetFincloudAuth() {

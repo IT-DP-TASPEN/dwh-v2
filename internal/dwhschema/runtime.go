@@ -25,9 +25,10 @@ var ApplicationVersions = []int64{
 	20260903091000,
 	20260903120000,
 	20260904120000,
+	20260905120000,
 }
 
-const CurrentVersion int64 = 20260904120000
+const CurrentVersion int64 = 20260905120000
 
 type MigrationRecord struct {
 	Version int64 `db:"version_id"`
@@ -140,6 +141,7 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 		{"ingestion_runs", "uq_ingestion_runs_active_job"},
 		{"fixed_report_publications", "PRIMARY"},
 		{"schedule_occurrences", "uq_schedule_occurrences_active"},
+		{"custom_dataset_imports", "uq_custom_dataset_imports_active"},
 	} {
 		var count int
 		if err := db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.STATISTICS
@@ -152,7 +154,8 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 	}
 	for _, table := range []string{"schedules", "schedule_attempts", "fincloud_auth_profiles", "report_datasources", "report_templates", "report_parameters", "report_parameter_options", "report_template_user_access", "report_export_jobs", "report_user_folders", "report_user_preferences",
 		"fincloud_reference_categories", "fincloud_reference_items", "stg_fincloud_reference_categories", "stg_fincloud_reference_items", "fincloud_marketing_master", "stg_fincloud_marketing_master",
-		"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements"} {
+		"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements",
+		"custom_dataset_uploads", "custom_datasets", "custom_dataset_columns", "custom_dataset_imports"} {
 		var count int
 		if err := db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.TABLES
 			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, table); err != nil || count != 1 {
@@ -173,6 +176,11 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 	if err := db.GetContext(ctx, &exportClaimIndex, `SELECT COUNT(*) FROM information_schema.STATISTICS
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='report_export_jobs' AND INDEX_NAME='idx_report_export_jobs_claim'`); err != nil || exportClaimIndex == 0 {
 		return fmt.Errorf("required report export claim index is missing")
+	}
+	var customDatasetPublishIndex int
+	if err := db.GetContext(ctx, &customDatasetPublishIndex, `SELECT COUNT(*) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='custom_dataset_imports' AND INDEX_NAME='idx_custom_dataset_imports_publish'`); err != nil || customDatasetPublishIndex == 0 {
+		return fmt.Errorf("required custom dataset publication index is missing")
 	}
 	for _, index := range []struct {
 		table, name string

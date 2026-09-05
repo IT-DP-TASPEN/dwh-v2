@@ -65,10 +65,12 @@ Start the application only after `GET /ready` returns `200`. `/health` is proces
 Use separate migration and runtime accounts. Canonical migrations require DML plus `CREATE`, `ALTER`, `DROP`, `INDEX`, `REFERENCES`, `CREATE ROUTINE`, `ALTER ROUTINE`, and `EXECUTE` on the application database. The routine privileges support the adoption-aware validation procedure inside the canonical source-settings migration; no routine remains after a successful migration. Runtime requires:
 
 ```text
-SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER
+SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, CREATE VIEW, SHOW VIEW, DROP
 ```
 
-`CREATE` and `ALTER` are mandatory for DynamicAdditive maintenance tables. Runtime does not require `DROP`. Granting and account management remain operator responsibilities.
+`CREATE` and `ALTER` are mandatory for DynamicAdditive maintenance tables and custom dataset physical tables. `CREATE VIEW` and `SHOW VIEW` support the stable custom dataset query contract. `DROP` is used only by the guarded, never-published provisioning reset path; active dataset objects are never altered or dropped. Granting and account management remain operator responsibilities.
+
+Set `CUSTOM_DATASET_DIR` to durable private storage shared by every application instance. Retained uploads are immutable provenance and must be included in backup/restore. Configure MySQL `max_allowed_packet` to at least `256M` as a conservative production baseline. The importer discovers the actual server value and rejects any single-row batch it cannot conservatively prove will fit; the baseline is a recommendation, not a guarantee for every legal near-150MB record.
 
 ## systemd template and shutdown
 

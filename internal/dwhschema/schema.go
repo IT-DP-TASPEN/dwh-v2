@@ -44,6 +44,7 @@ var EmptyBeforeAdoption = []string{
 	"maintenance_csv_ingestions", "run_log_events", "ingestion_row_errors", "ingestion_run_steps",
 	"schedule_attempts", "schedule_occurrences", "schedule_executions", "ingestion_run_items", "ingestion_runs", "schedules",
 	"ingestion_run_errors",
+	"custom_dataset_uploads", "custom_datasets", "custom_dataset_columns", "custom_dataset_imports",
 }
 
 type MigrationGroup struct {
@@ -52,6 +53,7 @@ type MigrationGroup struct {
 }
 
 var AdoptionMigrationGroups = []MigrationGroup{
+	{"create_custom_datasets.sql", []string{"custom_dataset_uploads", "custom_datasets", "custom_dataset_columns", "custom_dataset_imports"}},
 	{"create_saving_account_statements.sql", []string{"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements"}},
 	{"expand_detail_typed_schema.sql", []string{
 		"stg_fincloud_cif_personal_profiles", "stg_fincloud_cif_ktp", "stg_fincloud_cif_addresses",
@@ -96,6 +98,10 @@ var UserReferences = []UserReference{
 	{"schedules", "created_by_user_id", "fk_schedules_created_by_user"},
 	{"fincloud_auth_profiles", "created_by_user_id", "fk_fincloud_auth_profiles_created_by"},
 	{"fincloud_auth_profiles", "updated_by_user_id", "fk_fincloud_auth_profiles_updated_by"},
+	{"custom_dataset_uploads", "created_by_user_id", "fk_custom_dataset_uploads_created_by"},
+	{"custom_datasets", "created_by_user_id", "fk_custom_datasets_created_by"},
+	{"custom_datasets", "updated_by_user_id", "fk_custom_datasets_updated_by"},
+	{"custom_dataset_imports", "submitted_by_user_id", "fk_custom_dataset_imports_submitted_by"},
 }
 
 func CanonicalSourceKeys() ([]string, error) {

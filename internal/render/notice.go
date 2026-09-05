@@ -37,6 +37,7 @@ var notices = map[string]Notice{
 	"report-datasource-test-ok":         {Severity: "success", Title: "Connection succeeded", Message: "The reporting datasource accepted a verified connection."},
 	"report-datasource-test-failed":     {Severity: "warning", Title: "Connection failed", Message: "The datasource could not be reached with the saved settings."},
 	"report-export-submitted":           {Severity: "success", Title: "Export queued", Message: "The full report will be generated in the background."},
+	"custom-dataset-import-submitted":   {Severity: "success", Title: "Import queued", Message: "The retained CSV will be validated and published in the background."},
 }
 
 func NoticeFromID(id string) *Notice {

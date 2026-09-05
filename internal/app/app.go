@@ -17,6 +17,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/browserauth"
 	"github.com/ibldzn/go-admin/internal/config"
 	"github.com/ibldzn/go-admin/internal/coordinator"
+	"github.com/ibldzn/go-admin/internal/customdataset"
 	"github.com/ibldzn/go-admin/internal/database"
 	"github.com/ibldzn/go-admin/internal/dwhschema"
 	"github.com/ibldzn/go-admin/internal/fincloud"
@@ -144,6 +145,22 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize report export worker: %w", err)
 	}
+	customDatasetRepository, err := customdataset.NewRepository(databaseConnection)
+	if err != nil {
+		return fmt.Errorf("initialize custom dataset repository: %w", err)
+	}
+	customDatasetDDL, err := customdataset.NewDDL(databaseConnection)
+	if err != nil {
+		return fmt.Errorf("initialize custom dataset DDL: %w", err)
+	}
+	customDatasetStorage, err := customdataset.NewStorage(applicationConfig.CustomDataset.Directory)
+	if err != nil {
+		return fmt.Errorf("initialize custom dataset storage: %w", err)
+	}
+	customDatasetWorker, err := customdataset.NewWorker(customDatasetRepository, customDatasetDDL, customDatasetStorage, customdataset.WorkerConfig{Concurrency: applicationConfig.CustomDataset.Concurrency, HeartbeatInterval: 2 * time.Second, StaleAfter: 30 * time.Second, CleanupInterval: time.Hour, CleanupGrace: time.Hour}, logger)
+	if err != nil {
+		return fmt.Errorf("initialize custom dataset worker: %w", err)
+	}
 
 	userRepository := user.NewRepository(databaseConnection)
 	accessRepository := access.NewRepository(databaseConnection)
@@ -209,6 +226,7 @@ func Run(ctx context.Context) error {
 				fincloudAuthProfiles: authProfiles, fincloudSessions: fincloudSessions, fincloudListValues: fincloudListValues,
 				reportingRepository: reportingRepository, reportingService: reportingService, reportingPools: reportingPools,
 				exportRepository: exportRepository, exportStorage: exportStorage, downloadTimeout: applicationConfig.Reporting.DownloadTimeout,
+				customDatasetRepository: customDatasetRepository, customDatasetStorage: customDatasetStorage,
 			})
 		},
 		Ready: func(ctx context.Context) error {
@@ -237,6 +255,10 @@ func Run(ctx context.Context) error {
 	exportDone := make(chan struct{})
 	go func() { defer close(exportDone); exportWorker.Run(exportContext) }()
 	logger.Info("report export worker initialized", "owner_id", exportWorker.OwnerID())
+	customDatasetContext, stopCustomDataset := context.WithCancel(runtimeContext)
+	customDatasetDone := make(chan struct{})
+	go func() { defer close(customDatasetDone); customDatasetWorker.Run(customDatasetContext) }()
+	logger.Info("custom dataset worker initialized", "owner_id", customDatasetWorker.OwnerID())
 	cleanupContext, stopCleanup := context.WithCancel(runtimeContext)
 	cleanupDone := make(chan struct{})
 	go func() {
@@ -260,6 +282,7 @@ func Run(ctx context.Context) error {
 	go func() { httpShutdownDone <- httpServer.Shutdown(shutdownContext) }()
 	stopCoordinator()
 	stopExport()
+	stopCustomDataset()
 	stopCleanup()
 
 	componentsDone := make(chan struct{})
@@ -268,6 +291,7 @@ func Run(ctx context.Context) error {
 		<-coordinatorDone
 		<-cleanupDone
 		<-exportDone
+		<-customDatasetDone
 		close(componentsDone)
 	}()
 	select {

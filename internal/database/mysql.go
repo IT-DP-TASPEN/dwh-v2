@@ -32,6 +32,7 @@ func open(ctx context.Context, databaseConfig config.DatabaseConfig, migrations 
 	driverConfig.Loc = time.UTC
 	driverConfig.Params = map[string]string{"time_zone": "'+00:00'"}
 	driverConfig.MultiStatements = migrations
+	driverConfig.MaxAllowedPacket = 0
 
 	database, err := sqlx.Open("mysql", driverConfig.FormatDSN())
 	if err != nil {
