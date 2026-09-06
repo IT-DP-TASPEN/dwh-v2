@@ -298,7 +298,17 @@ func (c *Client) FetchSavingAccountStatement(ctx context.Context, accountNo stri
 		return nil, malformedStatement(operation, "data was malformed", diagnostic, "statement_data")
 	}
 	result := bytes.TrimSpace(dataPayload.Result)
-	if len(result) == 0 || bytes.Equal(result, []byte("null")) || result[0] != '{' {
+	if len(result) == 0 || bytes.Equal(result, []byte("null")) {
+		return nil, malformedStatement(operation, "result must be a present object", diagnostic, "statement_result")
+	}
+	if result[0] == '[' {
+		var items []json.RawMessage
+		if err := json.Unmarshal(result, &items); err != nil || len(items) != 0 {
+			return nil, malformedStatement(operation, "result must be a present object", diagnostic, "statement_result")
+		}
+		return &SavingAccountStatement{Mutations: []SavingAccountStatementItem{}}, nil
+	}
+	if result[0] != '{' {
 		return nil, malformedStatement(operation, "result must be a present object", diagnostic, "statement_result")
 	}
 	var resultPayload struct {

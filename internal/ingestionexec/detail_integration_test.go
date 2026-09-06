@@ -90,3 +90,50 @@ func TestLoanDetailExplicitNullEnumerationSucceedsWithoutTerminalDiagnostic(t *t
 		}
 	}
 }
+
+func TestSavingDetailStatementWireShapesDriveExactSetPublication(t *testing.T) {
+	tests := []struct {
+		name, statement string
+		wantStatus      ingestionrun.Status
+		wantRows        int
+	}{
+		{name: "object empty", statement: `{"status":"ok","data":{"result":{"mutasi":[]}}}`, wantStatus: ingestionrun.StatusSucceeded},
+		{name: "array empty", statement: "{\"status\":\"ok\",\"data\":{\"result\":[ \n ]}}", wantStatus: ingestionrun.StatusSucceeded},
+		{name: "non-empty array", statement: `{"status":"ok","data":{"result":[{}]}}`, wantStatus: ingestionrun.StatusFailed, wantRows: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := integrationdb.Open(t)
+			clearSavingDetail(t, db)
+			t.Cleanup(func() { clearSavingDetail(t, db) })
+			if _, err := db.Exec(`INSERT INTO fincloud_saving_details
+				(account_no,cif_no,beginning_balance,balance,raw_payload,raw_checksum,last_fetched_at)
+				VALUES ('S-1','C-1',1,2,JSON_OBJECT(),REPEAT('0',64),UTC_TIMESTAMP(6))`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO fincloud_saving_account_statements
+				(account_no,item_index,raw_item_payload,raw_item_checksum,last_fetched_at)
+				VALUES ('S-1',0,JSON_OBJECT('seeded',TRUE),REPEAT('0',64),UTC_TIMESTAMP(6))`); err != nil {
+				t.Fatal(err)
+			}
+			server := savingDetailServer(t, func(response http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(response, test.statement)
+			})
+			defer server.Close()
+			executor, runs, _, _ := integrationExecutor(t, db, server.URL, "statement-wire-shape")
+			run := claimedExecution(t, db, runs, "saving_detail")
+
+			result := executor.Execute(context.Background(), run, run.OwnerID)
+			wantSucceeded := test.wantStatus == ingestionrun.StatusSucceeded
+			if result.Status != test.wantStatus || result.BusinessComplete != wantSucceeded || (result.Cause == nil) != wantSucceeded {
+				t.Fatalf("result=%+v want status=%s", result, test.wantStatus)
+			}
+			var rows, seeded int
+			err := db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(raw_item_checksum=REPEAT('0',64)),0)
+				FROM fincloud_saving_account_statements WHERE account_no='S-1'`).Scan(&rows, &seeded)
+			if err != nil || rows != test.wantRows || seeded != test.wantRows {
+				t.Fatalf("published statement rows=%d seeded=%d want=%d error=%v", rows, seeded, test.wantRows, err)
+			}
+		})
+	}
+}
