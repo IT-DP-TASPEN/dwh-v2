@@ -87,6 +87,41 @@ Alpine.data("adminShell", () => ({
   },
 }));
 
+Alpine.data("csvUpload", () => ({
+  file: null,
+  error: "",
+  dragging: false,
+  select(files, dropped = false) {
+    if (!files.length) return;
+    if (files.length !== 1) return this.reject("Choose one CSV file.", !dropped);
+    const file = files[0];
+    if (!file.name.toLowerCase().endsWith(".csv")) return this.reject("Choose a CSV file.", !dropped);
+    if (file.size > 150_000_000) return this.reject("CSV file must be 150 MB or smaller.", !dropped);
+    if (dropped) {
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      this.$refs.file.files = transfer.files;
+    }
+    this.file = file;
+    this.error = "";
+  },
+  reject(message, clear) {
+    if (clear) this.remove();
+    this.error = message;
+  },
+  remove() {
+    this.$refs.file.value = "";
+    this.file = null;
+    this.error = "";
+  },
+  size(bytes) {
+    if (bytes < 1024) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
+    const unit = bytes < 1024 * 1024 ? "KB" : "MB";
+    const divisor = unit === "KB" ? 1024 : 1024 * 1024;
+    return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(bytes / divisor)} ${unit}`;
+  },
+}));
+
 Alpine.data("navigationDisclosure", () => ({
   key: "",
   active: false,

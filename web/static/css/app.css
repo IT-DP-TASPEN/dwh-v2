@@ -482,6 +482,10 @@
     width: calc(var(--spacing) * 8);
     height: calc(var(--spacing) * 8);
   }
+  .size-9 {
+    width: calc(var(--spacing) * 9);
+    height: calc(var(--spacing) * 9);
+  }
   .size-10 {
     width: calc(var(--spacing) * 10);
     height: calc(var(--spacing) * 10);
@@ -756,6 +760,10 @@
     border-style: var(--tw-border-style);
     border-width: 1px;
   }
+  .border-2 {
+    border-style: var(--tw-border-style);
+    border-width: 2px;
+  }
   .border-t {
     border-top-style: var(--tw-border-style);
     border-top-width: 1px;
@@ -780,6 +788,9 @@
   }
   .border-emerald-200 {
     border-color: var(--color-emerald-200);
+  }
+  .border-emerald-500 {
+    border-color: var(--color-emerald-500);
   }
   .border-orange-200 {
     border-color: var(--color-orange-200);
@@ -1303,6 +1314,9 @@
     .hover\:border-emerald-400:hover {
       border-color: var(--color-emerald-400);
     }
+    .hover\:border-emerald-500:hover {
+      border-color: var(--color-emerald-500);
+    }
     .hover\:bg-amber-50:hover {
       background-color: var(--color-amber-50);
     }
@@ -1311,6 +1325,14 @@
     }
     .hover\:bg-amber-800:hover {
       background-color: var(--color-amber-800);
+    }
+    .hover\:bg-emerald-50\/50:hover {
+      background-color: color-mix(in srgb, oklch(97.9% 0.021 166.113) 50%, transparent);
+    }
+    @supports (color: color-mix(in lab, red, red)) {
+      .hover\:bg-emerald-50\/50:hover {
+        background-color: color-mix(in oklab, var(--color-emerald-50) 50%, transparent);
+      }
     }
     .hover\:bg-emerald-400:hover {
       background-color: var(--color-emerald-400);
@@ -1408,6 +1430,22 @@
   .focus\:outline-none:focus {
     --tw-outline-style: none;
     outline-style: none;
+  }
+  .focus-visible\:border-emerald-500:focus-visible {
+    border-color: var(--color-emerald-500);
+  }
+  .focus-visible\:ring-2:focus-visible {
+    --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
+    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+  }
+  .focus-visible\:ring-emerald-500\/30:focus-visible {
+    --tw-ring-color: color-mix(in srgb, oklch(69.6% 0.17 162.48) 30%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      --tw-ring-color: color-mix(in oklab, var(--color-emerald-500) 30%, transparent);
+    }
+  }
+  .disabled\:cursor-not-allowed:disabled {
+    cursor: not-allowed;
   }
   .disabled\:opacity-40:disabled {
     opacity: 40%;
@@ -1567,6 +1605,12 @@
   }
   .dark\:bg-emerald-950:where(.dark, .dark *) {
     background-color: var(--color-emerald-950);
+  }
+  .dark\:bg-emerald-950\/20:where(.dark, .dark *) {
+    background-color: color-mix(in srgb, oklch(26.2% 0.051 172.552) 20%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-emerald-950) 20%, transparent);
+    }
   }
   .dark\:bg-emerald-950\/40:where(.dark, .dark *) {
     background-color: color-mix(in srgb, oklch(26.2% 0.051 172.552) 40%, transparent);
@@ -1749,6 +1793,14 @@
     @supports (color: color-mix(in lab, red, red)) {
       .dark\:hover\:bg-amber-950\/40:where(.dark, .dark *):hover {
         background-color: color-mix(in oklab, var(--color-amber-950) 40%, transparent);
+      }
+    }
+    .dark\:hover\:bg-emerald-950\/20:where(.dark, .dark *):hover {
+      background-color: color-mix(in srgb, oklch(26.2% 0.051 172.552) 20%, transparent);
+    }
+    @supports (color: color-mix(in lab, red, red)) {
+      .dark\:hover\:bg-emerald-950\/20:where(.dark, .dark *):hover {
+        background-color: color-mix(in oklab, var(--color-emerald-950) 20%, transparent);
       }
     }
     .dark\:hover\:bg-orange-950\/40:where(.dark, .dark *):hover {
