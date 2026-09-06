@@ -44,6 +44,9 @@ func (scalar Scalar) String() string { return string(scalar) }
 
 func (scalar Scalar) Decimal() (decimal.Decimal, error) {
 	text := strings.TrimSpace(string(scalar))
+	if len(text) >= 2 && text[0] == '<' && text[len(text)-1] == '>' {
+		text = "-" + text[1:len(text)-1]
+	}
 	if value, err := decimal.NewFromString(text); err == nil {
 		return value, nil
 	}

@@ -47,7 +47,7 @@ func TestFetchSavingAccountStatementContract(t *testing.T) {
 	if err != nil || empty == nil || empty.Mutations == nil || len(empty.Mutations) != 0 {
 		t.Fatalf("array empty=%+v error=%v", empty, err)
 	}
-	body.Store(`{"status":"ok","data":{"result":{"mutasi":[{"tgltransaksi":"2026-08-31","jam":"01:34:35","saldoawal":"9,057,279.49","debit":"3,000.00","kredit":null,"saldoakhir":"9,054,279.49","saldoakhir_equivalent":"9,054,279.49","jenistransaksi":"fee","keterangan":"  exact text  ","referensi":"ref","lokasi":"HQ","nojurnal":"journal","rec_dibuat_oleh":"system","trx_rate":1,"mid_rate_dc":"1.00","future":"kept"}]}}}`)
+	body.Store(`{"status":"ok","data":{"result":{"mutasi":[{"tgltransaksi":"2026-08-31","jam":"01:34:35","saldoawal":"<9,057,279.49>","debit":"3,000.00","kredit":null,"saldoakhir":"<9,054,279.49>","saldoakhir_equivalent":"<9,054,279.49>","jenistransaksi":"fee","keterangan":"  exact text  ","referensi":"ref","lokasi":"HQ","nojurnal":"journal","rec_dibuat_oleh":"system","trx_rate":1,"mid_rate_dc":"1.00","future":"kept"}]}}}`)
 	statement, err := client.FetchSavingAccountStatement(context.Background(), "S-1")
 	if err != nil || len(statement.Mutations) != 1 {
 		t.Fatalf("statement=%+v error=%v", statement, err)
