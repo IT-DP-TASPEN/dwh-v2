@@ -57,6 +57,16 @@ test("new CSV preview detects delimiter, header, inferred types, and SQL names",
   await page.getByRole("button", { name: "Upload and preview" }).click();
   await expect(page.getByLabel("Delimiter")).toHaveValue("comma");
   await expect(page.getByLabel("Header record")).toHaveValue("1");
+  const configureControls = [page.getByLabel("Delimiter"), page.getByLabel("Header record"), page.getByRole("button", { name: "Refresh preview" })];
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((value) => window.Alpine.store("theme").set(value), theme);
+    const boxes = await Promise.all(configureControls.map((control) => control.boundingBox()));
+    const heights = boxes.map((box) => box.height);
+    const bottoms = boxes.map((box) => box.y + box.height);
+    expect(heights).toEqual(heights.map(() => heights[0]));
+    expect(bottoms).toEqual(bottoms.map(() => bottoms[0]));
+  }
+  for (const control of configureControls) await expect(control).toHaveClass(/py-2\.5/);
   await expect(page.getByText("amount", { exact: true })).toBeVisible();
   const amountType = page.locator('select[name="type_1"]');
   const amountDateFormat = page.locator('select[name="date_format_1"]');
@@ -69,7 +79,7 @@ test("new CSV preview detects delimiter, header, inferred types, and SQL names",
   await amountType.selectOption("integer");
   await expect(amountDateFormat).toBeHidden();
   await expect(amountDateFormat).toBeDisabled();
-  for (const control of [page.getByLabel("Delimiter"), page.getByLabel("Header record"), page.getByLabel("Dataset name"), amountType]) {
+  for (const control of [...configureControls, page.getByLabel("Dataset name"), amountType]) {
     await expect(control).toHaveClass(/border-slate-300/);
     await expect(control).toHaveClass(/dark:border-slate-700/);
   }
