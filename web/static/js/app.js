@@ -7349,6 +7349,18 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     ["path", { d: "M20 21a8 8 0 0 0-16 0" }]
   ];
 
+  // node_modules/lucide/dist/esm/icons/user-shield.mjs
+  var UserShield = [
+    ["path", { d: "M10 15H6a4 4 0 0 0-4 4v2" }],
+    [
+      "path",
+      {
+        d: "M22 17.5c0 2.499-1.75 3.749-3.83 4.474a.5.5 0 0 1-.335-.005c-2.085-.72-3.835-1.97-3.835-4.47V14a.5.5 0 0 1 .5-.499c1 0 2.25-.6 3.12-1.36a.6.6 0 0 1 .76-.001c.875.765 2.12 1.36 3.12 1.36a.5.5 0 0 1 .5.5z"
+      }
+    ],
+    ["circle", { cx: "9", cy: "7", r: "4" }]
+  ];
+
   // node_modules/lucide/dist/esm/icons/users.mjs
   var Users = [
     ["path", { d: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" }],
@@ -7935,7 +7947,7 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     window.dispatchEvent(new CustomEvent("confirm-submit", { detail: { form, trigger: event.submitter } }));
   });
   var initializeIcons = () => createIcons({
-    icons: { Activity, CalendarClock, ChevronDown, CircleCheckBig, Database, FileCode, FileDown, History: RotateCcwClock, Key, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Server, Settings, Shield, ShieldCheck, Table2, UserRound, Users, X }
+    icons: { Activity, CalendarClock, ChevronDown, CircleCheckBig, Database, FileCode, FileDown, History: RotateCcwClock, Key, LayoutDashboard, LogOut, Menu, PanelLeftClose, ScrollText, Server, Settings, Shield, ShieldCheck, Table2, UserRound, UserShield, Users, X }
   });
   document.addEventListener("DOMContentLoaded", initializeIcons);
   document.body.addEventListener("htmx:afterSwap", initializeIcons);
@@ -7970,6 +7982,7 @@ lucide/dist/esm/icons/shield-check.mjs:
 lucide/dist/esm/icons/shield.mjs:
 lucide/dist/esm/icons/table-2.mjs:
 lucide/dist/esm/icons/user-round.mjs:
+lucide/dist/esm/icons/user-shield.mjs:
 lucide/dist/esm/icons/users.mjs:
 lucide/dist/esm/icons/x.mjs:
 lucide/dist/esm/lucide.mjs:
