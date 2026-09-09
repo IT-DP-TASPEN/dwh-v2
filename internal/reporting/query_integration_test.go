@@ -120,6 +120,48 @@ func TestDynamicOptionMySQLContractAndBoundedAbort(t *testing.T) {
 	}
 }
 
+func TestOptionalBlockValidationUsesSessionSQLModeAndPreparesShapes(t *testing.T) {
+	database := reportDatabase(t)
+	database.SetMaxOpenConns(1)
+	if _, err := database.Exec(`SET SESSION sql_mode='ANSI_QUOTES,NO_BACKSLASH_ESCAPES'`); err != nil {
+		t.Fatal(err)
+	}
+	engine := reporting.QueryEngine{}
+	parameters := []reporting.Parameter{{Key: "optional", Label: "Optional", Type: reporting.ParameterInteger}}
+	statement := "SELECT 'backslash\\' AS \"value[[ :fake_double ]]\", 1 AS `tick[[ :fake_tick ]]`\n" +
+		"-- [[ :fake_dash ]]\n# [[ :fake_hash ]]\n/* [[ :fake_block ]] */\n" +
+		"WHERE 1=1 [[ AND :optional=0 ]]"
+	if err := engine.ValidateTemplate(context.Background(), database, statement, parameters); err != nil {
+		t.Fatal(err)
+	}
+	for name, input := range map[string]map[string]reporting.InputValue{
+		"omitted":  {"optional": {Present: true}},
+		"zero":     {"optional": {Present: true, Values: []string{"0"}}},
+		"non-zero": {"optional": {Present: true, Values: []string{"1"}}},
+	} {
+		sink := &collectingSink{}
+		if err := engine.Stream(context.Background(), database, statement, parameters, input, sink); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		wantRows := 1
+		if name == "non-zero" {
+			wantRows = 0
+		}
+		if len(sink.rows) != wantRows {
+			t.Fatalf("%s rows=%d", name, len(sink.rows))
+		}
+	}
+
+	for _, invalid := range []string{
+		`SELECT 1 WHERE [[ :optional=1 ]]`,
+		`SELECT 1 [[ BROKEN :optional ]]`,
+	} {
+		if err := engine.ValidateTemplate(context.Background(), database, invalid, parameters); !errors.Is(err, reporting.ErrInvalid) {
+			t.Fatalf("invalid shape accepted: %q error=%v", invalid, err)
+		}
+	}
+}
+
 func reportDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 	config := integrationdb.Config(t)

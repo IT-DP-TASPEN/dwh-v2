@@ -19,6 +19,8 @@ var (
 	datetimePattern = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2})[T ]([0-9]{2}:[0-9]{2})(?::([0-9]{2})(\.[0-9]{1,6})?)?$`)
 )
 
+func (value NormalizedValue) Provided() bool { return value.Scalar != nil || len(value.Multi) != 0 }
+
 func ValidateParameters(parameters []Parameter) error {
 	keys := make(map[string]struct{}, len(parameters))
 	orders := make(map[uint16]struct{}, len(parameters))
@@ -116,7 +118,7 @@ func NormalizeParameters(parameters []Parameter, input map[string]InputValue) (m
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err)
 		}
-		if parameter.Required && normalized.Scalar == nil && len(normalized.Multi) == 0 {
+		if parameter.Required && !normalized.Provided() {
 			return nil, fmt.Errorf("%w: %s is required", ErrInvalid, parameter.Label)
 		}
 		result[parameter.Key] = normalized
@@ -156,7 +158,7 @@ func NormalizeSnapshotParameters(parameters []Parameter, input map[string]InputV
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err)
 		}
-		if parameter.Required && normalized.Scalar == nil && len(normalized.Multi) == 0 {
+		if parameter.Required && !normalized.Provided() {
 			return nil, fmt.Errorf("%w: %s is required", ErrInvalid, parameter.Label)
 		}
 		result[parameter.Key] = normalized
@@ -363,12 +365,200 @@ func DefaultInput(parameter Parameter) InputValue {
 	return InputValue{Values: values}
 }
 
+type validatedOptionalBlock struct {
+	optionalBlock
+	OptionalKeys []string
+}
+
+func scanAndValidateStatement(statement string, parameters []Parameter, mode SQLMode) (statementScan, []validatedOptionalBlock, error) {
+	scan, err := scanStatement(statement, mode)
+	if err != nil {
+		return statementScan{}, nil, err
+	}
+	if len(scan.OptionalBlocks) == 0 {
+		if err := validateReferences(scan.Placeholders, parameters); err != nil {
+			return statementScan{}, nil, err
+		}
+		return scan, nil, nil
+	}
+
+	definitions := make(map[string]Parameter, len(parameters))
+	for _, parameter := range parameters {
+		definitions[parameter.Key] = parameter
+	}
+	inside := make(map[int]struct{})
+	blocks := make([]validatedOptionalBlock, 0, len(scan.OptionalBlocks))
+	for _, block := range scan.OptionalBlocks {
+		keys := make([]string, 0)
+		seen := make(map[string]struct{})
+		for _, placeholder := range block.Placeholders {
+			inside[placeholder.Start] = struct{}{}
+			key, count := splitPlaceholderKey(placeholder.Key)
+			parameter, found := definitions[key]
+			if !found {
+				return statementScan{}, nil, fmt.Errorf("%w: optional SQL block references unknown parameter :%s", ErrInvalid, placeholder.Key)
+			}
+			if count && parameter.Type != ParameterMultipleOption {
+				return statementScan{}, nil, fmt.Errorf("%w: %q count is only valid for multiple options", ErrInvalid, key)
+			}
+			if parameter.Required {
+				continue
+			}
+			if _, found := seen[key]; !found {
+				seen[key] = struct{}{}
+				keys = append(keys, key)
+			}
+		}
+		if len(keys) == 0 {
+			return statementScan{}, nil, fmt.Errorf("%w: optional SQL block must reference at least one optional parameter", ErrInvalid)
+		}
+		blocks = append(blocks, validatedOptionalBlock{optionalBlock: block, OptionalKeys: keys})
+	}
+	for _, placeholder := range scan.Placeholders {
+		if _, found := inside[placeholder.Start]; found {
+			continue
+		}
+		key, count := splitPlaceholderKey(placeholder.Key)
+		parameter, found := definitions[key]
+		if !found {
+			return statementScan{}, nil, fmt.Errorf("%w: SQL references unknown parameter %q", ErrInvalid, placeholder.Key)
+		}
+		if count && parameter.Type != ParameterMultipleOption {
+			return statementScan{}, nil, fmt.Errorf("%w: %q count is only valid for multiple options", ErrInvalid, key)
+		}
+		if !parameter.Required {
+			return statementScan{}, nil, fmt.Errorf("%w: optional parameter :%s is referenced outside an optional SQL block", ErrInvalid, key)
+		}
+	}
+	return scan, blocks, nil
+}
+
+func resolveOptionalBlocks(statement string, blocks []validatedOptionalBlock, values map[string]NormalizedValue) (string, error) {
+	if len(blocks) == 0 {
+		return statement, nil
+	}
+	var result strings.Builder
+	result.Grow(len(statement))
+	position := 0
+	for _, block := range blocks {
+		result.WriteString(statement[position:block.Start])
+		include := true
+		for _, key := range block.OptionalKeys {
+			value, found := values[key]
+			if !found {
+				return "", fmt.Errorf("%w: parameter %q is not normalized", ErrInvalid, key)
+			}
+			include = include && value.Provided()
+		}
+		if include {
+			result.WriteString(statement[block.ContentStart:block.ContentEnd])
+		} else {
+			result.WriteByte(' ')
+		}
+		position = block.End
+	}
+	result.WriteString(statement[position:])
+	return result.String(), nil
+}
+
+func templateValidationQueries(statement string, parameters []Parameter, mode SQLMode, limit int) ([]string, error) {
+	_, blocks, err := scanAndValidateStatement(statement, parameters, mode)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	optionalKeys := make([]string, 0)
+	for _, parameter := range parameters {
+		if !parameter.Required {
+			optionalKeys = append(optionalKeys, parameter.Key)
+		}
+	}
+	type presenceState map[string]bool
+	states := make([]presenceState, 0, min(limit, 2+len(blocks)+len(optionalKeys)))
+	seenStates := make(map[string]struct{})
+	addState := func(state presenceState) {
+		if len(states) >= limit {
+			return
+		}
+		fingerprint := make([]byte, len(optionalKeys))
+		for index, key := range optionalKeys {
+			if state[key] {
+				fingerprint[index] = 1
+			}
+		}
+		key := string(fingerprint)
+		if _, found := seenStates[key]; found {
+			return
+		}
+		seenStates[key] = struct{}{}
+		states = append(states, state)
+	}
+	allPresent := make(presenceState, len(optionalKeys))
+	for _, key := range optionalKeys {
+		allPresent[key] = true
+	}
+	if len(blocks) == 0 {
+		addState(allPresent)
+	} else {
+		addState(nil)
+		addState(allPresent)
+		for _, block := range blocks {
+			state := make(presenceState, len(block.OptionalKeys))
+			for _, key := range block.OptionalKeys {
+				state[key] = true
+			}
+			addState(state)
+		}
+		for _, omitted := range optionalKeys {
+			state := make(presenceState, len(optionalKeys)-1)
+			for _, key := range optionalKeys {
+				if key != omitted {
+					state[key] = true
+				}
+			}
+			addState(state)
+		}
+	}
+
+	queries := make([]string, 0, len(states))
+	seenQueries := make(map[string]struct{})
+	for _, state := range states {
+		values := make(map[string]NormalizedValue, len(parameters))
+		for _, parameter := range parameters {
+			if !parameter.Required && !state[parameter.Key] {
+				values[parameter.Key] = NormalizedValue{}
+			} else if parameter.Type == ParameterMultipleOption {
+				values[parameter.Key] = NormalizedValue{Multi: []any{"optional-block-validation"}}
+			} else {
+				values[parameter.Key] = NormalizedValue{Scalar: "optional-block-validation"}
+			}
+		}
+		query, _, err := Bind(statement, parameters, values, mode)
+		if err != nil {
+			return nil, err
+		}
+		if _, found := seenQueries[query]; found {
+			continue
+		}
+		seenQueries[query] = struct{}{}
+		queries = append(queries, query)
+	}
+	return queries, nil
+}
+
 func Bind(statement string, parameters []Parameter, values map[string]NormalizedValue, mode SQLMode) (string, []any, error) {
-	placeholders, err := ScanPlaceholders(statement, mode)
+	_, blocks, err := scanAndValidateStatement(statement, parameters, mode)
 	if err != nil {
 		return "", nil, err
 	}
-	if err := validateReferences(placeholders, parameters); err != nil {
+	statement, err = resolveOptionalBlocks(statement, blocks, values)
+	if err != nil {
+		return "", nil, err
+	}
+	placeholders, err := ScanPlaceholders(statement, mode)
+	if err != nil {
 		return "", nil, err
 	}
 	definitions := make(map[string]Parameter, len(parameters))
@@ -380,10 +570,7 @@ func Bind(statement string, parameters []Parameter, values map[string]Normalized
 	position := 0
 	for _, placeholder := range placeholders {
 		query.WriteString(statement[position:placeholder.Start])
-		key, count := placeholder.Key, false
-		if strings.HasSuffix(key, "__count") {
-			key, count = strings.TrimSuffix(key, "__count"), true
-		}
+		key, count := splitPlaceholderKey(placeholder.Key)
 		parameter := definitions[key]
 		value, found := values[key]
 		if !found {
@@ -428,11 +615,15 @@ func ValidateBinding(statement string, parameters []Parameter, mode SQLMode) err
 	if err := validateDefaults(parameters); err != nil {
 		return err
 	}
-	placeholders, err := ScanPlaceholders(statement, mode)
-	if err != nil {
-		return err
+	_, _, err := scanAndValidateStatement(statement, parameters, mode)
+	return err
+}
+
+func splitPlaceholderKey(key string) (string, bool) {
+	if strings.HasSuffix(key, "__count") {
+		return strings.TrimSuffix(key, "__count"), true
 	}
-	return validateReferences(placeholders, parameters)
+	return key, false
 }
 
 func validateReferences(placeholders []Placeholder, parameters []Parameter) error {
@@ -441,10 +632,7 @@ func validateReferences(placeholders []Placeholder, parameters []Parameter) erro
 		definitions[parameter.Key] = parameter
 	}
 	for _, placeholder := range placeholders {
-		key, count := placeholder.Key, false
-		if strings.HasSuffix(key, "__count") {
-			key, count = strings.TrimSuffix(key, "__count"), true
-		}
+		key, count := splitPlaceholderKey(placeholder.Key)
 		parameter, found := definitions[key]
 		if !found {
 			return fmt.Errorf("%w: SQL references unknown parameter %q", ErrInvalid, placeholder.Key)
@@ -457,17 +645,15 @@ func validateReferences(placeholders []Placeholder, parameters []Parameter) erro
 }
 
 func ReferencedParameters(statement string, parameters []Parameter, mode SQLMode) ([]string, error) {
-	placeholders, err := ScanPlaceholders(statement, mode)
+	scan, _, err := scanAndValidateStatement(statement, parameters, mode)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateReferences(placeholders, parameters); err != nil {
-		return nil, err
-	}
+	placeholders := scan.Placeholders
 	seen := make(map[string]struct{}, len(placeholders))
 	result := make([]string, 0, len(placeholders))
 	for _, placeholder := range placeholders {
-		key := strings.TrimSuffix(placeholder.Key, "__count")
+		key, _ := splitPlaceholderKey(placeholder.Key)
 		if _, found := seen[key]; found {
 			continue
 		}

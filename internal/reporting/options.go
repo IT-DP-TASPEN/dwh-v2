@@ -192,7 +192,7 @@ func (service *Service) resolveAll(ctx context.Context, database *sql.DB, parame
 				return normalized, withFailureStage(failureStageParameterValidation, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err))
 			}
 		}
-		if parameter.Required && value.Scalar == nil && len(value.Multi) == 0 {
+		if parameter.Required && !value.Provided() {
 			return normalized, withFailureStage(failureStageParameterValidation, fmt.Errorf("%w: %s is required", ErrInvalid, parameter.Label))
 		}
 		normalized[parameter.Key] = value
@@ -338,7 +338,7 @@ func (service *Service) loadTargetOptionsWithAudit(ctx context.Context, database
 		if err != nil {
 			return OptionLoad{}, normalized, withFailureStage(failureStageParameterValidation, fmt.Errorf("%w: %s: %v", ErrInvalid, parameter.Label, err))
 		}
-		if parameter.Required && value.Scalar == nil && len(value.Multi) == 0 {
+		if parameter.Required && !value.Provided() {
 			return OptionLoad{State: "waiting", Dependencies: direct, WaitingFor: parameter.Key}, normalized, nil
 		}
 		normalized[parameter.Key] = value

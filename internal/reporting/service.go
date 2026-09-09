@@ -180,14 +180,13 @@ func (service *Service) TestQuery(ctx context.Context, requester securityctx.Req
 	}
 	runContext, cancel := context.WithTimeout(ctx, service.config.InteractiveTimeout)
 	defer cancel()
-	mode, err := service.engine.SQLMode(runContext, database)
-	if err == nil {
-		err = ValidateTemplateBinding(draft.SQLText, draft.Parameters, mode)
-		if err != nil {
+	mode, err := service.engine.validateTemplate(runContext, database, draft.SQLText, draft.Parameters)
+	if err != nil {
+		if errors.Is(err, ErrInvalid) {
 			err = withFailureStage(failureStageParameterValidation, err)
+		} else {
+			err = withFailureStage(failureStageQueryExecution, err)
 		}
-	} else {
-		err = withFailureStage(failureStageQueryExecution, err)
 	}
 	if err == nil {
 		normalized, err = service.resolveAll(runContext, database, draft.Parameters, input, mode)

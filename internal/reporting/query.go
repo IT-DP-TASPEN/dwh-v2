@@ -20,6 +20,9 @@ type RowSink interface {
 
 type QueryEngine struct{}
 
+// Prepared variants are a bounded safety net; lexical validation remains exhaustive.
+const maxPreparedTemplateVariants = 64
+
 func (QueryEngine) Validate(ctx context.Context, database *sql.DB, statement string, parameters []Parameter) error {
 	mode, err := (QueryEngine{}).SQLMode(ctx, database)
 	if err != nil {
@@ -29,11 +32,53 @@ func (QueryEngine) Validate(ctx context.Context, database *sql.DB, statement str
 }
 
 func (QueryEngine) ValidateTemplate(ctx context.Context, database *sql.DB, statement string, parameters []Parameter) error {
-	mode, err := (QueryEngine{}).SQLMode(ctx, database)
-	if err != nil {
-		return err
+	_, err := (QueryEngine{}).validateTemplate(ctx, database, statement, parameters)
+	return err
+}
+
+func (QueryEngine) validateTemplate(ctx context.Context, database *sql.DB, statement string, parameters []Parameter) (SQLMode, error) {
+	if database == nil {
+		return SQLMode{}, fmt.Errorf("report database is required")
 	}
-	return ValidateTemplateBinding(statement, parameters, mode)
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		return SQLMode{}, fmt.Errorf("acquire report connection: %w", err)
+	}
+	defer connection.Close()
+	mode, err := sqlMode(ctx, connection)
+	if err != nil {
+		return SQLMode{}, err
+	}
+	if err := ValidateTemplateBinding(statement, parameters, mode); err != nil {
+		return mode, err
+	}
+	type validationStatement struct{ label, sql string }
+	statements := []validationStatement{{label: "report SQL", sql: statement}}
+	for _, parameter := range parameters {
+		if effectiveOptionSource(parameter) == OptionSourceDynamic {
+			statements = append(statements, validationStatement{label: fmt.Sprintf("dynamic option SQL for %q", parameter.Key), sql: parameter.DynamicOptionSQL})
+		}
+	}
+	seen := make(map[string]struct{})
+	for _, candidate := range statements {
+		queries, err := templateValidationQueries(candidate.sql, parameters, mode, maxPreparedTemplateVariants-len(seen))
+		if err != nil {
+			return mode, err
+		}
+		for _, query := range queries {
+			if _, found := seen[query]; found {
+				continue
+			}
+			if len(seen) == maxPreparedTemplateVariants {
+				return mode, nil
+			}
+			if err := prepareRaw(ctx, connection, query); err != nil {
+				return mode, fmt.Errorf("%w: %s shape validation failed: %v", ErrInvalid, candidate.label, err)
+			}
+			seen[query] = struct{}{}
+		}
+	}
+	return mode, nil
 }
 
 func (QueryEngine) SQLMode(ctx context.Context, database *sql.DB) (SQLMode, error) {
@@ -45,11 +90,15 @@ func (QueryEngine) SQLMode(ctx context.Context, database *sql.DB) (SQLMode, erro
 		return SQLMode{}, fmt.Errorf("acquire report connection: %w", err)
 	}
 	defer connection.Close()
-	var sqlMode string
-	if err := connection.QueryRowContext(ctx, `SELECT @@SESSION.sql_mode`).Scan(&sqlMode); err != nil {
+	return sqlMode(ctx, connection)
+}
+
+func sqlMode(ctx context.Context, connection *sql.Conn) (SQLMode, error) {
+	var value string
+	if err := connection.QueryRowContext(ctx, `SELECT @@SESSION.sql_mode`).Scan(&value); err != nil {
 		return SQLMode{}, fmt.Errorf("inspect report SQL mode: %w", err)
 	}
-	return ParseSQLMode(sqlMode), nil
+	return ParseSQLMode(value), nil
 }
 
 func (QueryEngine) Stream(ctx context.Context, database *sql.DB, statement string, parameters []Parameter, input map[string]InputValue, sink RowSink) error {
@@ -72,11 +121,11 @@ func (QueryEngine) StreamNormalized(ctx context.Context, database *sql.DB, state
 		return fmt.Errorf("acquire report connection: %w", err)
 	}
 	defer connection.Close()
-	var sqlMode string
-	if err := connection.QueryRowContext(ctx, `SELECT @@SESSION.sql_mode`).Scan(&sqlMode); err != nil {
-		return fmt.Errorf("inspect report SQL mode: %w", err)
+	mode, err := sqlMode(ctx, connection)
+	if err != nil {
+		return err
 	}
-	query, arguments, err := Bind(statement, parameters, normalized, ParseSQLMode(sqlMode))
+	query, arguments, err := Bind(statement, parameters, normalized, mode)
 	if err != nil {
 		return err
 	}
@@ -85,6 +134,28 @@ func (QueryEngine) StreamNormalized(ctx context.Context, database *sql.DB, state
 		return err
 	}
 	return streamRaw(ctx, connection, query, named, sink)
+}
+
+func prepareRaw(ctx context.Context, connection *sql.Conn, query string) error {
+	var operationErr error
+	rawErr := connection.Raw(func(raw any) error {
+		preparer, ok := raw.(driver.ConnPrepareContext)
+		if !ok {
+			operationErr = fmt.Errorf("report driver does not support context-aware prepare")
+			return operationErr
+		}
+		statement, err := preparer.PrepareContext(ctx, query)
+		if err != nil {
+			operationErr = err
+			return err
+		}
+		operationErr = statement.Close()
+		return operationErr
+	})
+	if operationErr != nil {
+		return operationErr
+	}
+	return rawErr
 }
 
 func streamRaw(ctx context.Context, connection *sql.Conn, query string, arguments []driver.NamedValue, sink RowSink) error {

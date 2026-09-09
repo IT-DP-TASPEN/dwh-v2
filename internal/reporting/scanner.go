@@ -31,7 +31,22 @@ type Placeholder struct {
 	Start, End int
 }
 
+type optionalBlock struct {
+	Start, ContentStart, ContentEnd, End int
+	Placeholders                         []Placeholder
+}
+
+type statementScan struct {
+	Placeholders   []Placeholder
+	OptionalBlocks []optionalBlock
+}
+
 func ScanPlaceholders(statement string, mode SQLMode) ([]Placeholder, error) {
+	scan, err := scanStatement(statement, mode)
+	return scan.Placeholders, err
+}
+
+func scanStatement(statement string, mode SQLMode) (statementScan, error) {
 	const (
 		normal = iota
 		singleString
@@ -42,15 +57,47 @@ func ScanPlaceholders(statement string, mode SQLMode) ([]Placeholder, error) {
 		blockComment
 	)
 	state := normal
-	placeholders := make([]Placeholder, 0)
+	scan := statementScan{Placeholders: make([]Placeholder, 0), OptionalBlocks: make([]optionalBlock, 0)}
+	var openBlock *optionalBlock
+	blockHasSQL := false
 	for index := 0; index < len(statement); {
 		character := statement[index]
 		switch state {
 		case normal:
+			if index+1 < len(statement) {
+				switch statement[index : index+2] {
+				case "[[":
+					if openBlock != nil {
+						return statementScan{}, fmt.Errorf("%w: nested optional SQL blocks are not supported", ErrInvalid)
+					}
+					openBlock = &optionalBlock{Start: index, ContentStart: index + 2, Placeholders: make([]Placeholder, 0)}
+					blockHasSQL = false
+					index += 2
+					continue
+				case "]]":
+					if openBlock == nil {
+						return statementScan{}, fmt.Errorf("%w: unmatched optional SQL block close", ErrInvalid)
+					}
+					if !blockHasSQL {
+						return statementScan{}, fmt.Errorf("%w: optional SQL block must contain SQL", ErrInvalid)
+					}
+					openBlock.ContentEnd, openBlock.End = index, index+2
+					scan.OptionalBlocks = append(scan.OptionalBlocks, *openBlock)
+					openBlock = nil
+					index += 2
+					continue
+				}
+			}
 			switch character {
 			case '\'':
+				if openBlock != nil {
+					blockHasSQL = true
+				}
 				state, index = singleString, index+1
 			case '"':
+				if openBlock != nil {
+					blockHasSQL = true
+				}
 				if mode.ANSIQuotes {
 					state = doubleIdentifier
 				} else {
@@ -58,6 +105,9 @@ func ScanPlaceholders(statement string, mode SQLMode) ([]Placeholder, error) {
 				}
 				index++
 			case '`':
+				if openBlock != nil {
+					blockHasSQL = true
+				}
 				state, index = backtickIdentifier, index+1
 			case '#':
 				state, index = lineComment, index+1
@@ -65,12 +115,18 @@ func ScanPlaceholders(statement string, mode SQLMode) ([]Placeholder, error) {
 				if index+2 < len(statement) && statement[index+1] == '-' && isCommentWhitespace(statement[index+2]) {
 					state, index = lineComment, index+3
 				} else {
+					if openBlock != nil {
+						blockHasSQL = true
+					}
 					index++
 				}
 			case '/':
 				if index+1 < len(statement) && statement[index+1] == '*' {
 					state, index = blockComment, index+2
 				} else {
+					if openBlock != nil {
+						blockHasSQL = true
+					}
 					index++
 				}
 			case ':':
@@ -84,11 +140,19 @@ func ScanPlaceholders(statement string, mode SQLMode) ([]Placeholder, error) {
 				}
 				key := statement[index+1 : end]
 				if !parameterKeyPattern.MatchString(key) {
-					return nil, fmt.Errorf("%w: invalid placeholder :%s", ErrInvalid, key)
+					return statementScan{}, fmt.Errorf("%w: invalid placeholder :%s", ErrInvalid, key)
 				}
-				placeholders = append(placeholders, Placeholder{Key: key, Start: index, End: end})
+				placeholder := Placeholder{Key: key, Start: index, End: end}
+				scan.Placeholders = append(scan.Placeholders, placeholder)
+				if openBlock != nil {
+					openBlock.Placeholders = append(openBlock.Placeholders, placeholder)
+					blockHasSQL = true
+				}
 				index = end
 			default:
+				if openBlock != nil && !isCommentWhitespace(character) {
+					blockHasSQL = true
+				}
 				index++
 			}
 		case singleString, doubleString:
@@ -135,9 +199,12 @@ func ScanPlaceholders(statement string, mode SQLMode) ([]Placeholder, error) {
 		}
 	}
 	if state != normal && state != lineComment {
-		return nil, fmt.Errorf("%w: unterminated SQL lexical context", ErrInvalid)
+		return statementScan{}, fmt.Errorf("%w: unterminated SQL lexical context", ErrInvalid)
 	}
-	return placeholders, nil
+	if openBlock != nil {
+		return statementScan{}, fmt.Errorf("%w: unclosed optional SQL block", ErrInvalid)
+	}
+	return scan, nil
 }
 
 func isIdentifierByte(value byte) bool {
