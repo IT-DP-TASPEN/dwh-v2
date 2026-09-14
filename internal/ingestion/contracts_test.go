@@ -505,9 +505,36 @@ func TestMaintenanceDefinitionsMatchersSchemaAndNormalization(t *testing.T) {
 	if len(definitions) != 24 {
 		t.Fatalf("definitions = %d", len(definitions))
 	}
+	var indexed MaintenanceDefinition
 	for _, definition := range definitions {
 		if definition.SchemaMode != DynamicAdditive {
 			t.Fatalf("%s schema mode = %s", definition.Key, definition.SchemaMode)
+		}
+		if definition.Key == "eod_detail_outstanding_rekening_pinjaman" {
+			indexed = definition
+		} else if len(definition.SecondaryIndexes) != 0 {
+			t.Fatalf("%s has unexpected secondary indexes: %+v", definition.Key, definition.SecondaryIndexes)
+		}
+	}
+	wantIndex := []SecondaryIndex{{Name: "idx_eod_outstanding_no_rekening_as_of_date", Columns: []SecondaryIndexColumn{{Name: "no_rekening", PrefixLength: 64}, {Name: "as_of_date"}}}}
+	if !reflect.DeepEqual(indexed.SecondaryIndexes, wantIndex) {
+		t.Fatalf("secondary indexes = %+v", indexed.SecondaryIndexes)
+	}
+	if sqlType, err := MaintenanceColumnSQLType(indexed, "no_rekening"); err != nil || sqlType != "TEXT NULL" {
+		t.Fatalf("no_rekening type=%q error=%v", sqlType, err)
+	}
+	for _, test := range []struct {
+		name  string
+		index SecondaryIndex
+	}{
+		{"date prefix", SecondaryIndex{Name: "idx_test", Columns: []SecondaryIndexColumn{{Name: "as_of_date", PrefixLength: 10}}}},
+		{"unresolved metadata", SecondaryIndex{Name: "idx_test", Columns: []SecondaryIndexColumn{{Name: "ingestion_run_id"}}}},
+		{"unsafe name", SecondaryIndex{Name: "Bad", Columns: []SecondaryIndexColumn{{Name: "no_rekening"}}}},
+	} {
+		invalid := indexed
+		invalid.SecondaryIndexes = []SecondaryIndex{test.index}
+		if err := ValidateMaintenanceDefinition(invalid); err == nil {
+			t.Fatalf("%s secondary index accepted", test.name)
 		}
 	}
 	disposition, definition := ClassifyMaintenanceFile(MaintenanceCBR, "/tmp/CBRLOAN.CSV")

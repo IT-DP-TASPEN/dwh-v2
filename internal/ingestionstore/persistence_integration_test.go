@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1096,6 +1097,179 @@ func TestMaintenanceDynamicAdditiveRetry(t *testing.T) {
 	var rows int
 	if err := db.Get(&rows, "SELECT COUNT(*) FROM `"+definition.TableName+"` WHERE as_of_date=?", date.String()); err != nil || rows != 0 {
 		t.Fatalf("empty maintenance publication rows=%d error=%v", rows, err)
+	}
+}
+
+func TestMaintenanceManagedSecondaryIndexes(t *testing.T) {
+	db := integrationdb.Open(t)
+	target := findMaintenance(t, "eod_detail_outstanding_rekening_pinjaman")
+	unrelated := findMaintenance(t, "cbr_customer")
+	for _, definition := range []ingestion.MaintenanceDefinition{target, unrelated} {
+		_, _ = db.Exec("DROP TABLE IF EXISTS `" + definition.TableName + "`")
+		_, _ = db.Exec(`DELETE FROM dynamic_csv_source_columns WHERE source_id=?`, definition.Key)
+		_, _ = db.Exec(`DELETE FROM dynamic_csv_sources WHERE source_id=?`, definition.Key)
+	}
+	t.Cleanup(func() {
+		for _, definition := range []ingestion.MaintenanceDefinition{target, unrelated} {
+			_, _ = db.Exec("DROP TABLE IF EXISTS `" + definition.TableName + "`")
+			_, _ = db.Exec(`DELETE FROM dynamic_csv_source_columns WHERE source_id=?`, definition.Key)
+			_, _ = db.Exec(`DELETE FROM dynamic_csv_sources WHERE source_id=?`, definition.Key)
+		}
+	})
+
+	date, _ := ingestion.ParseCalendarDate("2026-08-12")
+	repository := NewMaintenanceRepository(db)
+	save := func(definition ingestion.MaintenanceDefinition, fileName, content string) error {
+		parsed, err := ingestion.ParseMaintenanceCSV(context.Background(), definition, date, content)
+		if err != nil {
+			return err
+		}
+		return repository.saveSnapshotWithoutRunFence(context.Background(), MaintenanceSnapshot{RequestedDate: date, FileName: fileName, Parsed: parsed})
+	}
+	indexName := target.SecondaryIndexes[0].Name
+	if err := save(target, "DetailOutstandingRekeningPinjaman.csv", "No Rekening|Value\nLN-1|one\n"); err != nil {
+		t.Fatal(err)
+	}
+	assertManagedIndex(t, informationSchemaIndex(t, db, target.TableName, indexName), []int64{64, 0}, "no_rekening", "as_of_date")
+	assertManagedIndex(t, showIndex(t, db, target.TableName, indexName), []int64{64, 0}, "no_rekening", "as_of_date")
+	var columnType string
+	if err := db.Get(&columnType, `SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME='no_rekening'`, target.TableName); err != nil || columnType != "text" {
+		t.Fatalf("no_rekening type=%q error=%v", columnType, err)
+	}
+
+	if _, err := db.Exec("ALTER TABLE `" + target.TableName + "` ADD KEY `idx_unmanaged_probe` (`as_of_date`)"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := save(target, "DetailOutstandingRekeningPinjaman.csv", "No Rekening|Value\nLN-1|one\n"); err != nil {
+			t.Fatalf("idempotent ensure with unmanaged index: %v", err)
+		}
+	}
+	var unmanaged int
+	if err := db.Get(&unmanaged, `SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME='idx_unmanaged_probe'`, target.TableName); err != nil || unmanaged != 1 {
+		t.Fatalf("unmanaged index rows=%d error=%v", unmanaged, err)
+	}
+
+	if _, err := db.Exec("ALTER TABLE `" + target.TableName + "` DROP INDEX `" + indexName + "`"); err != nil {
+		t.Fatal(err)
+	}
+	if err := save(target, "DetailOutstandingRekeningPinjaman.csv", "No Rekening|Value\nLN-1|one\n"); err != nil {
+		t.Fatalf("add missing managed index: %v", err)
+	}
+	assertManagedIndex(t, informationSchemaIndex(t, db, target.TableName, indexName), []int64{64, 0}, "no_rekening", "as_of_date")
+
+	if _, err := db.Exec("ALTER TABLE `" + target.TableName + "` DROP INDEX `" + indexName + "`, ADD KEY `" + indexName + "` (`no_rekening`(32), `as_of_date`)"); err != nil {
+		t.Fatal(err)
+	}
+	err := save(target, "DetailOutstandingRekeningPinjaman.csv", "No Rekening|Value\nLN-1|one\n")
+	if err == nil || !strings.Contains(err.Error(), "schema mismatch") {
+		t.Fatalf("wrong prefix error=%v", err)
+	}
+	assertManagedIndex(t, informationSchemaIndex(t, db, target.TableName, indexName), []int64{32, 0}, "no_rekening", "as_of_date")
+
+	if _, err := db.Exec("ALTER TABLE `" + target.TableName + "` DROP INDEX `" + indexName + "`, ADD KEY `" + indexName + "` (`as_of_date`, `no_rekening`(64))"); err != nil {
+		t.Fatal(err)
+	}
+	err = save(target, "DetailOutstandingRekeningPinjaman.csv", "No Rekening|Value\nLN-1|one\n")
+	if err == nil || !strings.Contains(err.Error(), "schema mismatch") {
+		t.Fatalf("wrong order error=%v", err)
+	}
+	assertManagedIndex(t, informationSchemaIndex(t, db, target.TableName, indexName), []int64{0, 64}, "as_of_date", "no_rekening")
+
+	if err := save(unrelated, "cbrcustomer.csv", "One\nvalue\n"); err != nil {
+		t.Fatal(err)
+	}
+	var unrelatedIndex int
+	if err := db.Get(&unrelatedIndex, `SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=?`, unrelated.TableName, indexName); err != nil || unrelatedIndex != 0 {
+		t.Fatalf("unrelated managed index rows=%d error=%v", unrelatedIndex, err)
+	}
+}
+
+func informationSchemaIndex(t *testing.T, db *sqlx.DB, table, name string) []physicalSecondaryIndexColumn {
+	t.Helper()
+	rows, err := db.Query(`SELECT COLUMN_NAME,SUB_PART,NON_UNIQUE,SEQ_IN_INDEX FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=? ORDER BY SEQ_IN_INDEX`, table, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var columns []physicalSecondaryIndexColumn
+	for rows.Next() {
+		var column physicalSecondaryIndexColumn
+		if err := rows.Scan(&column.Column, &column.PrefixLength, &column.NonUnique, &column.Sequence); err != nil {
+			t.Fatal(err)
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return columns
+}
+
+func showIndex(t *testing.T, db *sqlx.DB, table, name string) []physicalSecondaryIndexColumn {
+	t.Helper()
+	rows, err := db.Queryx("SHOW INDEX FROM `" + table + "`")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var columns []physicalSecondaryIndexColumn
+	for rows.Next() {
+		values := map[string]any{}
+		if err := rows.MapScan(values); err != nil {
+			t.Fatal(err)
+		}
+		if mysqlString(values["Key_name"]) != name {
+			continue
+		}
+		columns = append(columns, physicalSecondaryIndexColumn{
+			Column:       sql.NullString{String: mysqlString(values["Column_name"]), Valid: values["Column_name"] != nil},
+			PrefixLength: mysqlNullInt64(t, values["Sub_part"]),
+			NonUnique:    mysqlInt64(t, values["Non_unique"]),
+			Sequence:     mysqlInt64(t, values["Seq_in_index"]),
+		})
+	}
+	return columns
+}
+
+func mysqlString(value any) string {
+	if bytes, ok := value.([]byte); ok {
+		return string(bytes)
+	}
+	return fmt.Sprint(value)
+}
+
+func mysqlInt64(t *testing.T, value any) int64 {
+	t.Helper()
+	parsed, err := strconv.ParseInt(mysqlString(value), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
+}
+
+func mysqlNullInt64(t *testing.T, value any) sql.NullInt64 {
+	t.Helper()
+	if value == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: mysqlInt64(t, value), Valid: true}
+}
+
+func assertManagedIndex(t *testing.T, columns []physicalSecondaryIndexColumn, prefixes []int64, names ...string) {
+	t.Helper()
+	if len(columns) != len(names) {
+		t.Fatalf("index columns=%+v want=%v", columns, names)
+	}
+	for position, name := range names {
+		if !columns[position].Column.Valid || columns[position].Column.String != name || columns[position].NonUnique != 1 || columns[position].Sequence != int64(position+1) {
+			t.Fatalf("index columns=%+v want=%v", columns, names)
+		}
+		wantPrefix := prefixes[position]
+		if columns[position].PrefixLength.Valid != (wantPrefix > 0) || columns[position].PrefixLength.Int64 != wantPrefix {
+			t.Fatalf("index columns=%+v want prefixes=%v", columns, prefixes)
+		}
 	}
 }
 

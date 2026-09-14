@@ -22,6 +22,17 @@ type MaintenanceIdentity string
 type SchemaMode string
 type MaintenanceDisposition string
 
+type SecondaryIndexColumn struct {
+	Name         string
+	PrefixLength int
+}
+
+type SecondaryIndex struct {
+	Name    string
+	Unique  bool
+	Columns []SecondaryIndexColumn
+}
+
 const (
 	MaintenanceEOD MaintenanceKind = "eod"
 	MaintenanceCBR MaintenanceKind = "cbr"
@@ -62,7 +73,32 @@ type MaintenanceDefinition struct {
 	Identity           MaintenanceIdentity
 	BusinessKeyColumns []string
 	SchemaMode         SchemaMode
+	SecondaryIndexes   []SecondaryIndex
 	FixtureGapAccepted bool
+}
+
+var maintenanceMetadataColumnTypes = map[string]string{
+	"requested_date":      "DATE",
+	"as_of_date":          "DATE",
+	"source_file_name":    "VARCHAR(255)",
+	"source_row_number":   "BIGINT UNSIGNED",
+	"source_row_checksum": "CHAR(64)",
+	"business_key_hash":   "CHAR(64)",
+	"created_at":          "DATETIME(6)",
+	"updated_at":          "DATETIME(6)",
+}
+
+func MaintenanceColumnSQLType(definition MaintenanceDefinition, column string) (string, error) {
+	if sqlType, found := maintenanceMetadataColumnTypes[column]; found {
+		return sqlType, nil
+	}
+	if _, reserved := reservedMaintenanceColumns[column]; reserved {
+		return "", fmt.Errorf("maintenance column %q has no generated SQL type", column)
+	}
+	if definition.SchemaMode != DynamicAdditive || DynamicAdditivePolicy.AddColumnSQLType == "" {
+		return "", fmt.Errorf("maintenance column %q SQL type cannot be resolved", column)
+	}
+	return DynamicAdditivePolicy.AddColumnSQLType, nil
 }
 
 func validateMaintenanceDefinitions(definitions []MaintenanceDefinition) error {
@@ -98,14 +134,59 @@ func validateMaintenanceDefinitions(definitions []MaintenanceDefinition) error {
 		default:
 			return fmt.Errorf("%s has invalid identity", definition.Key)
 		}
+		seenIndexes := map[string]struct{}{}
+		for _, index := range definition.SecondaryIndexes {
+			if !identifier.MatchString(index.Name) || len(index.Name) > maxMySQLIdentifierLength || len(index.Columns) == 0 {
+				return fmt.Errorf("%s has invalid secondary index %q", definition.Key, index.Name)
+			}
+			if _, duplicate := seenIndexes[index.Name]; duplicate {
+				return fmt.Errorf("%s has duplicate secondary index %q", definition.Key, index.Name)
+			}
+			seenIndexes[index.Name] = struct{}{}
+			seenColumns := map[string]struct{}{}
+			for _, column := range index.Columns {
+				if !identifier.MatchString(column.Name) || len(column.Name) > maxMySQLIdentifierLength || column.PrefixLength < 0 {
+					return fmt.Errorf("%s secondary index %s has invalid column %q", definition.Key, index.Name, column.Name)
+				}
+				if _, duplicate := seenColumns[column.Name]; duplicate {
+					return fmt.Errorf("%s secondary index %s repeats column %q", definition.Key, index.Name, column.Name)
+				}
+				seenColumns[column.Name] = struct{}{}
+				sqlType, err := MaintenanceColumnSQLType(definition, column.Name)
+				if err != nil {
+					return fmt.Errorf("%s secondary index %s: %w", definition.Key, index.Name, err)
+				}
+				if column.PrefixLength > 0 && !maintenanceIndexPrefixType(sqlType) {
+					return fmt.Errorf("%s secondary index %s column %s type %s does not support prefix length", definition.Key, index.Name, column.Name, sqlType)
+				}
+			}
+		}
 	}
 	return nil
+}
+
+func ValidateMaintenanceDefinition(definition MaintenanceDefinition) error {
+	return validateMaintenanceDefinitions([]MaintenanceDefinition{definition})
+}
+
+func maintenanceIndexPrefixType(sqlType string) bool {
+	typeName := strings.ToUpper(strings.Fields(sqlType)[0])
+	return typeName == "TEXT" || strings.HasPrefix(typeName, "CHAR(") || strings.HasPrefix(typeName, "VARCHAR(")
 }
 
 func MaintenanceDefinitions() []MaintenanceDefinition {
 	return []MaintenanceDefinition{
 		maintenance("eod_cif_opening_report_full", "EOD CIF Opening Report (Full)", MaintenanceEOD, "CIF Opening Report (Full).csv", "fincloud_eod_cif_opening_report_full", BusinessKeyIdentity, "cif_no"),
-		maintenance("eod_detail_outstanding_rekening_pinjaman", "EOD DetailOutstandingRekeningPinjaman", MaintenanceEOD, "DetailOutstandingRekeningPinjaman.csv", "fincloud_eod_detail_outstanding_rekening_pinjaman", BusinessKeyIdentity, "no_rekening"),
+		withSecondaryIndexes(
+			maintenance("eod_detail_outstanding_rekening_pinjaman", "EOD DetailOutstandingRekeningPinjaman", MaintenanceEOD, "DetailOutstandingRekeningPinjaman.csv", "fincloud_eod_detail_outstanding_rekening_pinjaman", BusinessKeyIdentity, "no_rekening"),
+			SecondaryIndex{
+				Name: "idx_eod_outstanding_no_rekening_as_of_date",
+				Columns: []SecondaryIndexColumn{
+					{Name: "no_rekening", PrefixLength: 64},
+					{Name: "as_of_date"},
+				},
+			},
+		),
 		maintenance("eod_laporan_pelunasan_pinjaman_sebelum_jt", "EOD LaporanPelunasanPinjamanSebelumJT", MaintenanceEOD, "LaporanPelunasanPinjamanSebelumJT.csv", "fincloud_eod_laporan_pelunasan_pinjaman_sebelum_jt", BusinessKeyIdentity, "norekening", "tgl_pelunasan"),
 		maintenance("eod_laporan_pembayaran_angsuran", "EOD LaporanPembayaranAngsuran", MaintenanceEOD, "LaporanPembayaranAngsuran.csv", "fincloud_eod_laporan_pembayaran_angsuran", BusinessKeyIdentity, "norekening", "tglbayar", "bayar_pokok", "bayar_bunga", "bayar_denda"),
 		maintenance("eod_laporan_pencairan_pinjaman", "EOD LaporanPencairanPinjaman", MaintenanceEOD, "LaporanPencairanPinjaman.csv", "fincloud_eod_laporan_pencairan_pinjaman", BusinessKeyIdentity, "norekening"),
@@ -133,6 +214,11 @@ func MaintenanceDefinitions() []MaintenanceDefinition {
 
 func maintenance(key, name string, kind MaintenanceKind, filename, table string, identity MaintenanceIdentity, businessKeys ...string) MaintenanceDefinition {
 	return MaintenanceDefinition{Key: key, Name: name, Kind: kind, FilePattern: regexp.MustCompile(`(?i)^` + regexp.QuoteMeta(filename) + `$`), TableName: table, Identity: identity, BusinessKeyColumns: append([]string(nil), businessKeys...), SchemaMode: DynamicAdditive}
+}
+
+func withSecondaryIndexes(definition MaintenanceDefinition, indexes ...SecondaryIndex) MaintenanceDefinition {
+	definition.SecondaryIndexes = indexes
+	return definition
 }
 
 func fixtureGap(definition MaintenanceDefinition) MaintenanceDefinition {

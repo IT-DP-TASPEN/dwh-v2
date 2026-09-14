@@ -58,6 +58,9 @@ func (repository *MaintenanceRepository) saveSnapshot(ctx context.Context, runID
 	if snapshot.RequestedDate.IsZero() || snapshot.FileName == "" || snapshot.Parsed.AsOfDate != snapshot.RequestedDate || definition.SchemaMode != ingestion.DynamicAdditive || len(snapshot.Parsed.Columns) == 0 {
 		return fmt.Errorf("complete dynamic-additive maintenance snapshot is required")
 	}
+	if err := ingestion.ValidateMaintenanceDefinition(definition); err != nil {
+		return err
+	}
 	if !canonicalMaintenanceDefinition(definition) {
 		return fmt.Errorf("maintenance definition %q is not canonical", definition.Key)
 	}
@@ -188,7 +191,7 @@ func syncMaintenanceSchema(ctx context.Context, connection *sql.Conn, databaseNa
 	for _, column := range snapshot.Parsed.Columns {
 		if _, found := physical[column.PhysicalName]; !found {
 			quoted, _ := quoteIdentifier(column.PhysicalName)
-			missing = append(missing, "ADD COLUMN "+quoted+" TEXT NULL")
+			missing = append(missing, "ADD COLUMN "+quoted+" "+ingestion.DynamicAdditivePolicy.AddColumnSQLType)
 		}
 	}
 	if len(missing) > 0 {
@@ -202,7 +205,7 @@ func syncMaintenanceSchema(ctx context.Context, connection *sql.Conn, databaseNa
 			return fmt.Errorf("add maintenance columns: %w", err)
 		}
 	}
-	return nil
+	return reconcileMaintenanceSecondaryIndexes(ctx, connection, databaseName, snapshot.Parsed.Definition, proveOwnership)
 }
 
 func maintenanceColumns(ctx context.Context, connection *sql.Conn, databaseName, tableName string) (map[string]physicalColumn, error) {
@@ -224,25 +227,30 @@ func maintenanceColumns(ctx context.Context, connection *sql.Conn, databaseName,
 }
 
 func validateMaintenancePhysicalSchema(columns map[string]physicalColumn, definition ingestion.MaintenanceDefinition) error {
-	type expectedColumn struct{ columnType, nullable string }
+	type expectedColumn struct{ nullable string }
 	businessNullable := "YES"
 	if definition.Identity == ingestion.BusinessKeyIdentity {
 		businessNullable = "NO"
 	}
 	required := map[string]expectedColumn{
-		"requested_date": {"date", "NO"}, "as_of_date": {"date", "NO"}, "source_file_name": {"varchar(255)", "NO"},
-		"source_row_number": {"bigint unsigned", "NO"}, "source_row_checksum": {"char(64)", "NO"},
-		"business_key_hash": {"char(64)", businessNullable}, "created_at": {"datetime(6)", "NO"}, "updated_at": {"datetime(6)", "NO"},
+		"requested_date": {"NO"}, "as_of_date": {"NO"}, "source_file_name": {"NO"},
+		"source_row_number": {"NO"}, "source_row_checksum": {"NO"},
+		"business_key_hash": {businessNullable}, "created_at": {"NO"}, "updated_at": {"NO"},
 	}
 	for name, expected := range required {
 		column, found := columns[name]
-		if !found || strings.ToLower(column.ColumnType) != expected.columnType || column.Nullable != expected.nullable {
-			return fmt.Errorf("maintenance metadata column %s must be %s nullable=%s", name, expected.columnType, expected.nullable)
+		sqlType, typeErr := ingestion.MaintenanceColumnSQLType(definition, name)
+		if typeErr != nil {
+			return typeErr
+		}
+		if !found || !strings.EqualFold(column.ColumnType, sqlType) || column.Nullable != expected.nullable {
+			return fmt.Errorf("maintenance metadata column %s must be %s nullable=%s", name, strings.ToLower(sqlType), expected.nullable)
 		}
 	}
+	dynamicType := strings.ToLower(strings.Fields(ingestion.DynamicAdditivePolicy.AddColumnSQLType)[0])
 	for name, column := range columns {
-		if _, metadata := required[name]; !metadata && (strings.ToLower(column.ColumnType) != "text" || column.Nullable != "YES") {
-			return fmt.Errorf("historical maintenance column %s must be TEXT NULL", name)
+		if _, metadata := required[name]; !metadata && (strings.ToLower(column.ColumnType) != dynamicType || column.Nullable != "YES") {
+			return fmt.Errorf("historical maintenance column %s must be %s", name, ingestion.DynamicAdditivePolicy.AddColumnSQLType)
 		}
 	}
 	return nil
@@ -276,6 +284,130 @@ func validateMaintenancePrimaryKey(ctx context.Context, connection *sql.Conn, da
 	return nil
 }
 
+type physicalSecondaryIndexColumn struct {
+	Column       sql.NullString
+	PrefixLength sql.NullInt64
+	NonUnique    int64
+	Sequence     int64
+}
+
+func reconcileMaintenanceSecondaryIndexes(ctx context.Context, connection *sql.Conn, databaseName string, definition ingestion.MaintenanceDefinition, proveOwnership func() error) error {
+	if len(definition.SecondaryIndexes) == 0 {
+		return nil
+	}
+	quotedTable, _ := quoteIdentifier(definition.TableName)
+	for _, index := range definition.SecondaryIndexes {
+		rows, err := connection.QueryContext(ctx, `SELECT COLUMN_NAME, SUB_PART, NON_UNIQUE, SEQ_IN_INDEX
+			FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND INDEX_NAME=? ORDER BY SEQ_IN_INDEX`, databaseName, definition.TableName, index.Name)
+		if err != nil {
+			return fmt.Errorf("inspect maintenance secondary index %s: %w", index.Name, err)
+		}
+		var physical []physicalSecondaryIndexColumn
+		for rows.Next() {
+			var column physicalSecondaryIndexColumn
+			if err := rows.Scan(&column.Column, &column.PrefixLength, &column.NonUnique, &column.Sequence); err != nil {
+				rows.Close()
+				return err
+			}
+			physical = append(physical, column)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if len(physical) == 0 {
+			definitionSQL, err := maintenanceSecondaryIndexSQL(index)
+			if err != nil {
+				return err
+			}
+			if err := proveOwnership(); err != nil {
+				return err
+			}
+			if _, err := connection.ExecContext(ctx, "ALTER TABLE "+quotedTable+" ADD "+definitionSQL); err != nil {
+				return fmt.Errorf("add maintenance secondary index %s: %w", index.Name, err)
+			}
+			continue
+		}
+		if !secondaryIndexMatches(index, physical) {
+			return fmt.Errorf("maintenance table %s secondary index %s schema mismatch: got %s, want %s", definition.TableName, index.Name, formatPhysicalSecondaryIndex(physical), formatSecondaryIndex(index))
+		}
+	}
+	return nil
+}
+
+func secondaryIndexMatches(index ingestion.SecondaryIndex, physical []physicalSecondaryIndexColumn) bool {
+	if len(index.Columns) != len(physical) {
+		return false
+	}
+	wantNonUnique := int64(1)
+	if index.Unique {
+		wantNonUnique = 0
+	}
+	for position, column := range index.Columns {
+		got := physical[position]
+		if got.Sequence != int64(position+1) || got.NonUnique != wantNonUnique || !got.Column.Valid || got.Column.String != column.Name {
+			return false
+		}
+		if column.PrefixLength == 0 {
+			if got.PrefixLength.Valid {
+				return false
+			}
+		} else if !got.PrefixLength.Valid || got.PrefixLength.Int64 != int64(column.PrefixLength) {
+			return false
+		}
+	}
+	return true
+}
+
+func maintenanceSecondaryIndexSQL(index ingestion.SecondaryIndex) (string, error) {
+	name, err := quoteIdentifier(index.Name)
+	if err != nil {
+		return "", err
+	}
+	columns := make([]string, len(index.Columns))
+	for position, column := range index.Columns {
+		quoted, err := quoteIdentifier(column.Name)
+		if err != nil {
+			return "", err
+		}
+		columns[position] = quoted
+		if column.PrefixLength > 0 {
+			columns[position] += fmt.Sprintf("(%d)", column.PrefixLength)
+		}
+	}
+	kind := "KEY "
+	if index.Unique {
+		kind = "UNIQUE KEY "
+	}
+	return kind + name + " (" + strings.Join(columns, ", ") + ")", nil
+}
+
+func formatSecondaryIndex(index ingestion.SecondaryIndex) string {
+	columns := make([]string, len(index.Columns))
+	for position, column := range index.Columns {
+		columns[position] = column.Name
+		if column.PrefixLength > 0 {
+			columns[position] += fmt.Sprintf("(%d)", column.PrefixLength)
+		}
+	}
+	return fmt.Sprintf("unique=%t columns=[%s]", index.Unique, strings.Join(columns, ", "))
+}
+
+func formatPhysicalSecondaryIndex(columns []physicalSecondaryIndexColumn) string {
+	names := make([]string, len(columns))
+	unique := len(columns) > 0 && columns[0].NonUnique == 0
+	for position, column := range columns {
+		if column.Column.Valid {
+			names[position] = column.Column.String
+		} else {
+			names[position] = "<expression>"
+		}
+		if column.PrefixLength.Valid {
+			names[position] += fmt.Sprintf("(%d)", column.PrefixLength.Int64)
+		}
+	}
+	return fmt.Sprintf("unique=%t columns=[%s]", unique, strings.Join(names, ", "))
+}
+
 func canonicalMaintenanceDefinition(definition ingestion.MaintenanceDefinition) bool {
 	if definition.FilePattern == nil {
 		return false
@@ -284,11 +416,17 @@ func canonicalMaintenanceDefinition(definition ingestion.MaintenanceDefinition) 
 		if candidate.Key == definition.Key && candidate.Name == definition.Name && candidate.Kind == definition.Kind &&
 			candidate.TableName == definition.TableName && candidate.Identity == definition.Identity && candidate.SchemaMode == definition.SchemaMode &&
 			candidate.FixtureGapAccepted == definition.FixtureGapAccepted && candidate.FilePattern.String() == definition.FilePattern.String() &&
-			slices.Equal(candidate.BusinessKeyColumns, definition.BusinessKeyColumns) {
+			slices.Equal(candidate.BusinessKeyColumns, definition.BusinessKeyColumns) && secondaryIndexesEqual(candidate.SecondaryIndexes, definition.SecondaryIndexes) {
 			return true
 		}
 	}
 	return false
+}
+
+func secondaryIndexesEqual(left, right []ingestion.SecondaryIndex) bool {
+	return slices.EqualFunc(left, right, func(left, right ingestion.SecondaryIndex) bool {
+		return left.Name == right.Name && left.Unique == right.Unique && slices.Equal(left.Columns, right.Columns)
+	})
 }
 
 func validateMaintenanceSnapshot(snapshot MaintenanceSnapshot) error {
@@ -325,6 +463,9 @@ func validateMaintenanceSnapshot(snapshot MaintenanceSnapshot) error {
 }
 
 func createMaintenanceTableSQL(parsed ingestion.ParsedMaintenanceCSV) (string, error) {
+	if err := ingestion.ValidateMaintenanceDefinition(parsed.Definition); err != nil {
+		return "", err
+	}
 	quotedTable, err := quoteIdentifier(parsed.Definition.TableName)
 	if err != nil {
 		return "", err
@@ -345,12 +486,19 @@ func createMaintenanceTableSQL(parsed ingestion.ParsedMaintenanceCSV) (string, e
 		if err != nil {
 			return "", err
 		}
-		definitions = append(definitions, quoted+" TEXT NULL")
+		definitions = append(definitions, quoted+" "+ingestion.DynamicAdditivePolicy.AddColumnSQLType)
 	}
 	definitions = append(definitions,
 		"`created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
 		"`updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)", primary,
 		"KEY `idx_maintenance_source_file` (`source_file_name`)")
+	for _, index := range parsed.Definition.SecondaryIndexes {
+		definition, err := maintenanceSecondaryIndexSQL(index)
+		if err != nil {
+			return "", err
+		}
+		definitions = append(definitions, definition)
+	}
 	return "CREATE TABLE " + quotedTable + " (" + strings.Join(definitions, ",") + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci", nil
 }
 
