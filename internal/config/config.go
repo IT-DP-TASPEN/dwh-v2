@@ -105,8 +105,10 @@ func (c AppConfig) IsDevelopment() bool {
 }
 
 type DatabaseConfig struct {
+	Network  string
 	Host     string
 	Port     int
+	Socket   string
 	Name     string
 	User     string
 	Password string
@@ -357,9 +359,13 @@ func parse(lookup lookupEnv) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	databasePort, err := parsePort("DB_PORT", value("DB_PORT", strconv.Itoa(defaultDatabasePort)))
-	if err != nil {
-		return Config{}, err
+	databaseNetwork := strings.TrimSpace(value("DB_NETWORK", "tcp"))
+	databasePort := 0
+	if databaseNetwork == "tcp" {
+		databasePort, err = parsePort("DB_PORT", value("DB_PORT", strconv.Itoa(defaultDatabasePort)))
+		if err != nil {
+			return Config{}, err
+		}
 	}
 	allowRegistration, err := parseBool("ALLOW_REGISTRATION", value("ALLOW_REGISTRATION", "false"))
 	if err != nil {
@@ -393,8 +399,10 @@ func parse(lookup lookupEnv) (Config, error) {
 			AllowRegistration: allowRegistration,
 		},
 		Database: DatabaseConfig{
+			Network:  databaseNetwork,
 			Host:     strings.TrimSpace(value("DB_HOST", defaultDatabaseHost)),
 			Port:     databasePort,
+			Socket:   strings.TrimSpace(value("DB_SOCKET", "")),
 			Name:     strings.TrimSpace(value("DB_NAME", "")),
 			User:     strings.TrimSpace(value("DB_USER", "")),
 			Password: value("DB_PASSWORD", ""),
@@ -422,7 +430,6 @@ func validate(config Config) error {
 		{"APP_NAME", config.App.Name},
 		{"APP_ENV", config.App.Environment},
 		{"APP_BIND_HOST", config.App.BindHost},
-		{"DB_HOST", config.Database.Host},
 		{"DB_NAME", config.Database.Name},
 		{"DB_USER", config.Database.User},
 		{"SESSION_COOKIE_NAME", config.Session.CookieName},
@@ -431,6 +438,19 @@ func validate(config Config) error {
 		if field.value == "" {
 			return fmt.Errorf("%s must not be empty", field.key)
 		}
+	}
+
+	switch config.Database.Network {
+	case "tcp":
+		if config.Database.Host == "" {
+			return fmt.Errorf("DB_HOST must not be empty")
+		}
+	case "unix":
+		if config.Database.Socket == "" {
+			return fmt.Errorf("DB_SOCKET must not be empty when DB_NETWORK=unix")
+		}
+	default:
+		return fmt.Errorf("DB_NETWORK must be one of tcp or unix")
 	}
 
 	switch config.App.Environment {
@@ -457,7 +477,7 @@ func validate(config Config) error {
 		if !config.Session.Secure {
 			return fmt.Errorf("SESSION_SECURE must be true in production")
 		}
-		if config.Database.Password == "" {
+		if config.Database.Network == "tcp" && config.Database.Password == "" {
 			return fmt.Errorf("DB_PASSWORD must not be empty in production")
 		}
 	}

@@ -28,6 +28,7 @@ func NewRepository(database *sqlx.DB, cipher *Cipher) (*Repository, error) {
 
 type DatasourceInput struct {
 	Name, Description, Host, DatabaseName, Username, Password string
+	Network, SocketPath                                       string
 	Port                                                      uint16
 	TLSPolicy                                                 TLSPolicy
 }
@@ -52,6 +53,7 @@ func (repository *Repository) FindDatasource(ctx context.Context, id uint64) (Da
 }
 
 func (repository *Repository) CreateDatasource(ctx context.Context, requester securityctx.Requester, input DatasourceInput, now time.Time) (Datasource, error) {
+	input = normalizeDatasourceInput(input)
 	if err := validateDatasourceInput(input, true); err != nil {
 		return Datasource{}, err
 	}
@@ -61,8 +63,8 @@ func (repository *Repository) CreateDatasource(ctx context.Context, requester se
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `INSERT INTO report_datasources
-		(name,description,host,port,database_name,username,password_ciphertext,tls_policy,status,created_by_user_id,updated_by_user_id,created_at,updated_at)
-		VALUES (?,?,?,?,?,?,NULL,?,'disabled',?,?,?,?)`, input.Name, input.Description, input.Host, input.Port,
+		(name,description,network,host,port,socket_path,database_name,username,password_ciphertext,tls_policy,status,created_by_user_id,updated_by_user_id,created_at,updated_at)
+		VALUES (?,?,?,?,?,?,?,?,NULL,?,'disabled',?,?,?,?)`, input.Name, input.Description, input.Network, input.Host, input.Port, input.SocketPath,
 		input.DatabaseName, input.Username, input.TLSPolicy, requester.Effective.UserID, requester.Effective.UserID, now.UTC(), now.UTC())
 	if err != nil {
 		return Datasource{}, fmt.Errorf("insert report datasource: %w", err)
@@ -71,7 +73,7 @@ func (repository *Repository) CreateDatasource(ctx context.Context, requester se
 	if err != nil {
 		return Datasource{}, err
 	}
-	ciphertext, err := repository.cipher.Encrypt(uint64(id), input.Password)
+	ciphertext, err := repository.datasourcePassword(uint64(id), input, Datasource{})
 	if err != nil {
 		return Datasource{}, err
 	}
@@ -88,6 +90,7 @@ func (repository *Repository) CreateDatasource(ctx context.Context, requester se
 }
 
 func (repository *Repository) UpdateDatasource(ctx context.Context, requester securityctx.Requester, id, expectedRevision uint64, input DatasourceInput, now time.Time) (Datasource, error) {
+	input = normalizeDatasourceInput(input)
 	if err := validateDatasourceInput(input, false); err != nil {
 		return Datasource{}, err
 	}
@@ -109,22 +112,19 @@ func (repository *Repository) UpdateDatasource(ctx context.Context, requester se
 	if existing.Status == StatusArchived {
 		return Datasource{}, ErrInactive
 	}
-	ciphertext := existing.PasswordCiphertext
-	if input.Password != "" {
-		ciphertext, err = repository.cipher.Encrypt(id, input.Password)
-		if err != nil {
-			return Datasource{}, err
-		}
+	ciphertext, err := repository.datasourcePassword(id, input, existing)
+	if err != nil {
+		return Datasource{}, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE report_datasources SET name=?,description=?,host=?,port=?,database_name=?,username=?,password_ciphertext=?,tls_policy=?,revision=revision+1,updated_by_user_id=?,updated_at=? WHERE id=? AND revision=?`,
-		input.Name, input.Description, input.Host, input.Port, input.DatabaseName, input.Username, ciphertext, input.TLSPolicy, requester.Effective.UserID, now.UTC(), id, expectedRevision)
+	result, err := tx.ExecContext(ctx, `UPDATE report_datasources SET name=?,description=?,network=?,host=?,port=?,socket_path=?,database_name=?,username=?,password_ciphertext=?,tls_policy=?,revision=revision+1,updated_by_user_id=?,updated_at=? WHERE id=? AND revision=?`,
+		input.Name, input.Description, input.Network, input.Host, input.Port, input.SocketPath, input.DatabaseName, input.Username, ciphertext, input.TLSPolicy, requester.Effective.UserID, now.UTC(), id, expectedRevision)
 	if err != nil {
 		return Datasource{}, fmt.Errorf("update report datasource: %w", err)
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return Datasource{}, ErrConflict
 	}
-	if err := appendAudit(ctx, tx, requester, audit.ActionReportDatasourceUpdated, audit.ResourceReportDatasource, id, audit.DatasourceUpdatedMetadata{CredentialsChanged: input.Password != ""}, now); err != nil {
+	if err := appendAudit(ctx, tx, requester, audit.ActionReportDatasourceUpdated, audit.ResourceReportDatasource, id, datasourceUpdateMetadata(existing, input), now); err != nil {
 		return Datasource{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -167,17 +167,85 @@ func (repository *Repository) SetDatasourceStatus(ctx context.Context, requester
 }
 
 func validateDatasourceInput(input DatasourceInput, passwordRequired bool) error {
-	input.Name, input.Host, input.DatabaseName, input.Username = strings.TrimSpace(input.Name), strings.TrimSpace(input.Host), strings.TrimSpace(input.DatabaseName), strings.TrimSpace(input.Username)
-	if input.Name == "" || input.Host == "" || input.DatabaseName == "" || input.Username == "" || input.Port == 0 {
+	input = normalizeDatasourceInput(input)
+	if input.Name == "" || input.DatabaseName == "" || input.Username == "" {
 		return fmt.Errorf("%w: datasource connection fields are required", ErrInvalid)
 	}
-	if passwordRequired && input.Password == "" {
-		return fmt.Errorf("%w: datasource password is required", ErrInvalid)
+	switch input.Network {
+	case "tcp":
+		if input.Host == "" || input.Port == 0 {
+			return fmt.Errorf("%w: TCP host and port are required", ErrInvalid)
+		}
+		if passwordRequired && input.Password == "" {
+			return fmt.Errorf("%w: datasource password is required", ErrInvalid)
+		}
+	case "unix":
+		if input.SocketPath == "" || len(input.SocketPath) > 1024 || !strings.HasPrefix(input.SocketPath, "/") || strings.ContainsRune(input.SocketPath, 0) {
+			return fmt.Errorf("%w: Unix socket path must be an absolute path of at most 1024 bytes without NUL", ErrInvalid)
+		}
+		if input.Password != "" || input.TLSPolicy != TLSDisabled {
+			return fmt.Errorf("%w: Unix socket connections require no password and disabled TLS", ErrInvalid)
+		}
+	default:
+		return fmt.Errorf("%w: connection must be TCP or Unix socket", ErrInvalid)
 	}
 	if input.TLSPolicy != TLSRequired && input.TLSPolicy != TLSDisabled {
 		return fmt.Errorf("%w: TLS policy must be required or disabled", ErrInvalid)
 	}
 	return nil
+}
+
+func normalizeDatasourceInput(input DatasourceInput) DatasourceInput {
+	input.Name, input.Host, input.DatabaseName, input.Username = strings.TrimSpace(input.Name), strings.TrimSpace(input.Host), strings.TrimSpace(input.DatabaseName), strings.TrimSpace(input.Username)
+	input.Network, input.SocketPath = strings.TrimSpace(input.Network), strings.TrimSpace(input.SocketPath)
+	if input.Network == "" {
+		input.Network = "tcp"
+	}
+	if input.Network == "unix" {
+		input.Host, input.Port = "", 0
+		if input.TLSPolicy == "" {
+			input.TLSPolicy = TLSDisabled
+		}
+	} else if input.Network == "tcp" {
+		input.SocketPath = ""
+	}
+	return input
+}
+
+func (repository *Repository) datasourcePassword(id uint64, input DatasourceInput, existing Datasource) ([]byte, error) {
+	if input.Network == "unix" {
+		return nil, nil
+	}
+	if input.Password != "" {
+		return repository.cipher.Encrypt(id, input.Password)
+	}
+	if existing.Network == "unix" || len(existing.PasswordCiphertext) == 0 {
+		return nil, fmt.Errorf("%w: a new password is required for TCP", ErrInvalid)
+	}
+	return existing.PasswordCiphertext, nil
+}
+
+func datasourceUpdateMetadata(existing Datasource, input DatasourceInput) audit.DatasourceUpdatedMetadata {
+	network := existing.Network
+	if network == "" {
+		network = "tcp"
+	}
+	metadata := audit.DatasourceUpdatedMetadata{CredentialsChanged: input.Password != "" || network != input.Network || existing.Username != input.Username}
+	for _, field := range []struct {
+		name    string
+		changed bool
+	}{
+		{"network", network != input.Network}, {"host", existing.Host != input.Host},
+		{"port", existing.Port != input.Port}, {"socket_path", existing.SocketPath != input.SocketPath},
+		{"database_name", existing.DatabaseName != input.DatabaseName}, {"username", existing.Username != input.Username},
+		{"tls_policy", existing.TLSPolicy != input.TLSPolicy},
+	} {
+		if field.changed {
+			metadata.ChangedFields = append(metadata.ChangedFields, field.name)
+		}
+	}
+	metadata.ConnectionChanged = len(metadata.ChangedFields) != 0
+	return metadata
 }
 
 type TemplateInput struct {

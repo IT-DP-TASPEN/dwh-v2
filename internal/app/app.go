@@ -62,8 +62,10 @@ func Run(ctx context.Context) error {
 		}
 	}()
 	logger.Info("database connection initialized",
+		"network", applicationConfig.Database.Network,
 		"host", applicationConfig.Database.Host,
 		"port", applicationConfig.Database.Port,
+		"socket", applicationConfig.Database.Socket,
 		"database", applicationConfig.Database.Name,
 	)
 	schemaContext, cancel := context.WithTimeout(ctx, 10*time.Second)

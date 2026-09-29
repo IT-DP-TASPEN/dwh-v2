@@ -16,6 +16,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/customdataset"
 	customdatasetsfeature "github.com/ibldzn/go-admin/internal/features/customdatasets"
 	dashboardfeature "github.com/ibldzn/go-admin/internal/features/dashboard"
+	datasourcesfeature "github.com/ibldzn/go-admin/internal/features/datasources"
 	authprofilesfeature "github.com/ibldzn/go-admin/internal/features/fincloudauthprofiles"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	reportsfeature "github.com/ibldzn/go-admin/internal/features/reports"
@@ -85,6 +86,13 @@ func main() {
 	mux.HandleFunc("/exports/", fixture.exportObject)
 	mux.HandleFunc("/custom-datasets", fixture.customDatasetsPage)
 	mux.HandleFunc("/custom-datasets/", fixture.customDatasetObject)
+	mux.HandleFunc("/datasources/new", func(writer http.ResponseWriter, request *http.Request) {
+		data := datasourcesfeature.FormData{Network: "tcp", Port: "3306", TLSPolicy: "required", Errors: map[string]string{}}
+		if request.URL.Query().Get("edit") == "unix" {
+			data.ID, data.Network, data.OriginalNetwork, data.SocketPath, data.TLSPolicy = 7, "unix", "unix", "/tmp/mysql.sock", "disabled"
+		}
+		fixture.renderAdmin(writer, request, "features/datasources/form", "Datasource", "/datasources", data)
+	})
 	log.Printf("Run Details browser fixture listening on %s", address)
 	log.Fatal(http.ListenAndServe(address, mux))
 }

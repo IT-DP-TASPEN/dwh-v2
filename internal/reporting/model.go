@@ -36,8 +36,10 @@ type Datasource struct {
 	ID                 uint64    `db:"id"`
 	Name               string    `db:"name"`
 	Description        string    `db:"description"`
+	Network            string    `db:"network"`
 	Host               string    `db:"host"`
 	Port               uint16    `db:"port"`
+	SocketPath         string    `db:"socket_path"`
 	DatabaseName       string    `db:"database_name"`
 	Username           string    `db:"username"`
 	PasswordCiphertext []byte    `db:"password_ciphertext"`

@@ -4,12 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/ibldzn/go-admin/internal/config"
+	"github.com/ibldzn/go-admin/internal/database"
 )
 
 type PoolConfig struct {
@@ -63,23 +64,9 @@ func (manager *PoolManager) Database(ctx context.Context, datasource Datasource,
 	if entry.database != nil && entry.revision == datasource.Revision {
 		return entry.database, nil
 	}
-	password, err := manager.cipher.Decrypt(datasource.ID, datasource.PasswordCiphertext)
+	config, err := manager.mysqlConfig(datasource)
 	if err != nil {
 		return nil, err
-	}
-	config := mysql.NewConfig()
-	config.Net = "tcp"
-	config.Addr = net.JoinHostPort(datasource.Host, strconv.Itoa(int(datasource.Port)))
-	config.User = datasource.Username
-	config.Passwd = password
-	config.DBName = datasource.DatabaseName
-	config.ParseTime = true
-	config.Loc = time.UTC
-	config.Timeout = manager.config.ConnectTimeout
-	config.MaxAllowedPacket = manager.config.MySQLMaxPacketBytes
-	config.MultiStatements = false
-	if datasource.TLSPolicy == TLSRequired {
-		config.TLSConfig = "true"
 	}
 	database, err := sql.Open("mysql", config.FormatDSN())
 	if err != nil {
@@ -99,6 +86,38 @@ func (manager *PoolManager) Database(ctx context.Context, datasource Datasource,
 		go old.Close()
 	}
 	return database, nil
+}
+
+func (manager *PoolManager) mysqlConfig(datasource Datasource) (*mysql.Config, error) {
+	password := ""
+	switch datasource.Network {
+	case "", "tcp":
+		var err error
+		password, err = manager.cipher.Decrypt(datasource.ID, datasource.PasswordCiphertext)
+		if err != nil {
+			return nil, err
+		}
+	case "unix":
+		if datasource.TLSPolicy != TLSDisabled {
+			return nil, fmt.Errorf("%w: Unix socket connections require disabled TLS", ErrInvalid)
+		}
+	default:
+		return nil, fmt.Errorf("%w: connection must be TCP or Unix socket", ErrInvalid)
+	}
+	driverConfig, err := database.MySQLConfig(config.DatabaseConfig{
+		Network: datasource.Network, Host: datasource.Host, Port: int(datasource.Port), Socket: datasource.SocketPath,
+		Name: datasource.DatabaseName, User: datasource.Username, Password: password,
+	})
+	if err != nil {
+		return nil, err
+	}
+	driverConfig.Timeout = manager.config.ConnectTimeout
+	driverConfig.MaxAllowedPacket = manager.config.MySQLMaxPacketBytes
+	driverConfig.MultiStatements = false
+	if driverConfig.Net == "tcp" && datasource.TLSPolicy == TLSRequired {
+		driverConfig.TLSConfig = "true"
+	}
+	return driverConfig, nil
 }
 
 func (manager *PoolManager) Invalidate(id uint64) {

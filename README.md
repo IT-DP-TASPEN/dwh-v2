@@ -70,7 +70,11 @@ Production starts from a clean application database and applies the canonical mi
 
 `APP_ENV` accepts `development`, `production`, or `test`. `APP_NAME` controls runtime branding and is independent of the Go module name. `APP_BIND_HOST` defaults to `127.0.0.1`; production requires a loopback IP. `APP_SHUTDOWN_TIMEOUT` defaults to 45 seconds.
 
-Production also requires an HTTPS `APP_URL`, `SESSION_SECURE=true`, `ALLOW_REGISTRATION=false`, and a nonempty database password.
+`DB_NETWORK` accepts `tcp` (the default when omitted) or `unix`. TCP uses `DB_HOST` (default `127.0.0.1`) and `DB_PORT` (default `3306`). Unix mode requires `DB_SOCKET` and ignores `DB_HOST`/`DB_PORT`, with no TCP fallback. Both modes require `DB_NAME` and `DB_USER`. This configures the application's own database, including migrations and administrator commands. Report datasources select their connection mode independently in the datasource form.
+
+Production also requires an HTTPS `APP_URL`, `SESSION_SECURE=true`, and `ALLOW_REGISTRATION=false`. TCP requires a nonempty `DB_PASSWORD` in production; Unix mode allows an empty password. For local MySQL `auth_socket`, set `DB_NETWORK=unix`, `DB_SOCKET=/var/run/mysqld/mysqld.sock`, `DB_NAME=dwh`, `DB_USER=dwhadmin`, and `DB_PASSWORD=`, then run the process as Linux user `dwhadmin`. See [Production operation](docs/PRODUCTION.md) for account, systemd, and storage permissions.
+
+Report datasources support TCP with host, port, encrypted password, and the existing TLS policy, or Unix socket with an absolute socket path and no password or TLS. Existing rows migrate to TCP without changing their encrypted passwords. Switching to Unix clears the stored credential; switching back requires a new TCP password. All Unix datasources use the application's single Linux process identity. An `auth_socket` account for a different OS user cannot be impersonated. The datasource Test action uses the same pool and connection builder as report execution.
 
 `ALLOW_REGISTRATION=false` removes both registration routes. When enabled, public registration always creates an active user with the protected `user` role; submitted role fields are ignored because no role choice exists.
 
@@ -177,9 +181,11 @@ set -a; . ./.env.test.local; set +a
 make test-integration
 ```
 
-All five `TEST_DB_*` variables must be explicitly present. The password may be empty. The complete test host/port/database selection must not match the normal runtime connection, and the database may never be `dwh2` or `dwh3`. A disposable database may legitimately be named `dwh` when it is isolated from the runtime connection. Tests apply real migrations and truncate application tables there; they never fall back to runtime credentials.
+All five `TEST_DB_*` variables must be explicitly present. The password may be empty. The complete test host/port/database selection must not match the normal runtime connection, and the database may never be `dwh2` or `dwh3`. With a Unix runtime connection, tests must use a different database name: a TCP endpoint may reach the same MySQL server. A disposable database may legitimately be named `dwh` when it is isolated from a TCP runtime connection. Tests apply real migrations and truncate application tables there; they never fall back to runtime credentials.
 
 Integration coverage also exercises the real Goose adoption topology, snapshot transactions, member-complete fixed-report promotion, runtime additive DDL, schema-lock races, and physical disposal of a connection with uncertain named-lock release.
+
+Datasource integration tests cover migration defaults, credential preservation, mode switching, audit metadata, and guarded rollback. Optional `TEST_DB_SOCKET` enables a real passwordless `auth_socket` check for both the production primary connection and a report datasource; provision the current test process's OS username as a MySQL socket account on the disposable database. `TEST_DB_SOCKET_MISMATCH_USER` additionally checks that a separately provisioned socket account with a different OS identity fails authentication. Never point these variables at production.
 
 ## Renaming the starter
 

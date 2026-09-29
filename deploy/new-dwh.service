@@ -5,10 +5,13 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=new-dwh
-Group=new-dwh
+User=dwhadmin
+Group=dwhadmin
 WorkingDirectory=/opt/new-dwh
 EnvironmentFile=/etc/new-dwh/new-dwh.env
+# Match REPORT_EXPORT_DIR and CUSTOM_DATASET_DIR to subdirectories of this path.
+StateDirectory=new-dwh
+StateDirectoryMode=0700
 ExecStart=/opt/new-dwh/bin/app serve
 Restart=on-failure
 RestartSec=5s

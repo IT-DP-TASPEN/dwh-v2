@@ -193,7 +193,16 @@ func TestAuthorTestsUsePersistedDatasource(t *testing.T) {
 	if err := database.Select(&datasourceAudits, `SELECT metadata FROM audit_logs WHERE action=? AND resource_id=? ORDER BY id`, audit.ActionReportDatasourceUpdated, datasource.ID); err != nil {
 		t.Fatal(err)
 	}
-	if len(datasourceAudits) != 2 || !bytes.Contains(datasourceAudits[0], []byte(`"credentials_changed":true`)) || !bytes.Contains(datasourceAudits[1], []byte(`"credentials_changed":false`)) || bytes.Contains(datasourceAudits[0], []byte(connection.Password)) {
+	if len(datasourceAudits) != 2 {
 		t.Fatalf("datasource update audits=%s", datasourceAudits)
+	}
+	for index, metadata := range datasourceAudits {
+		var decoded audit.DatasourceUpdatedMetadata
+		if err := json.Unmarshal(metadata, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.CredentialsChanged != (index == 0) || (connection.Password != "" && bytes.Contains(metadata, []byte(connection.Password))) {
+			t.Fatalf("datasource update audit=%s", metadata)
+		}
 	}
 }

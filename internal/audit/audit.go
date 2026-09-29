@@ -257,7 +257,9 @@ type ReportExportDownloadedMetadata struct {
 func (ReportExportDownloadedMetadata) auditMetadata() {}
 
 type DatasourceUpdatedMetadata struct {
-	CredentialsChanged bool `json:"credentials_changed"`
+	CredentialsChanged bool     `json:"credentials_changed"`
+	ConnectionChanged  bool     `json:"connection_changed"`
+	ChangedFields      []string `json:"changed_fields,omitempty"`
 }
 
 func (DatasourceUpdatedMetadata) auditMetadata() {}

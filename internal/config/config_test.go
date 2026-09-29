@@ -20,11 +20,121 @@ func TestParseDefaults(t *testing.T) {
 	if config.App.Name != "Go Admin" || config.App.BindHost != "127.0.0.1" || config.App.Port != 8080 || config.App.ShutdownTimeout != 45*time.Second || !config.App.IsDevelopment() {
 		t.Fatalf("unexpected app defaults: %+v", config.App)
 	}
-	if config.Database.Host != "127.0.0.1" || config.Database.Port != 3306 {
+	if config.Database.Network != "tcp" || config.Database.Host != "127.0.0.1" || config.Database.Port != 3306 || config.Database.Socket != "" {
 		t.Fatalf("unexpected database defaults: %+v", config.Database)
 	}
 	if config.Session.Lifetime != 24*time.Hour || config.Session.RememberLifetime != 30*24*time.Hour {
 		t.Fatalf("unexpected session defaults: %+v", config.Session)
+	}
+}
+
+func TestParseDatabaseNetworks(t *testing.T) {
+	for _, network := range []string{"tcp", "unix"} {
+		t.Run(network, func(t *testing.T) {
+			values := baseValues("DB_NETWORK", network)
+			values["DB_HOST"] = "mysql.example.test"
+			values["DB_PORT"] = "3307"
+			values["DB_SOCKET"] = "/var/run/mysqld/mysqld.sock"
+			values["DB_PASSWORD"] = "secret"
+			got, err := parse(mapLookup(values))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Database.Network != network || got.Database.Socket != values["DB_SOCKET"] || got.Database.Name != "go_admin" || got.Database.User != "root" || got.Database.Password != "secret" {
+				t.Fatalf("unexpected database config: %+v", got.Database)
+			}
+			if network == "tcp" && (got.Database.Host != values["DB_HOST"] || got.Database.Port != 3307) {
+				t.Fatalf("unexpected TCP address: %+v", got.Database)
+			}
+		})
+	}
+}
+
+func TestParseDatabaseValidation(t *testing.T) {
+	tests := []struct{ network, key, value, want string }{
+		{"tcp", "DB_HOST", "", "DB_HOST"},
+		{"tcp", "DB_PORT", "", "DB_PORT"},
+		{"tcp", "DB_PORT", "mysql", "DB_PORT"},
+		{"tcp", "DB_PORT", "0", "DB_PORT"},
+		{"tcp", "DB_PORT", "65536", "DB_PORT"},
+		{"tcp", "DB_NAME", "", "DB_NAME"},
+		{"tcp", "DB_USER", "", "DB_USER"},
+		{"unix", "DB_SOCKET", "", "DB_SOCKET"},
+		{"unix", "DB_SOCKET", "   ", "DB_SOCKET"},
+		{"unix", "DB_NAME", "", "DB_NAME"},
+		{"unix", "DB_USER", "", "DB_USER"},
+		{"udp", "DB_NETWORK", "udp", "DB_NETWORK"},
+		{"", "DB_NETWORK", "", "DB_NETWORK"},
+	}
+	for _, test := range tests {
+		t.Run(test.network+"/"+test.key+"="+test.value, func(t *testing.T) {
+			values := baseValues("DB_NETWORK", test.network)
+			values["DB_SOCKET"] = "/var/run/mysqld/mysqld.sock"
+			values[test.key] = test.value
+			if _, err := parse(mapLookup(values)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v want %q", err, test.want)
+			}
+		})
+	}
+	values := baseValues("DB_NETWORK", "unix")
+	if _, err := parse(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "DB_SOCKET") {
+		t.Fatalf("missing socket error=%v", err)
+	}
+}
+
+func TestProductionTCPRequiresPassword(t *testing.T) {
+	for _, network := range []string{"", "tcp"} {
+		values := baseValues("APP_ENV", "production")
+		productionValues(values)
+		if network != "" {
+			values["DB_NETWORK"] = network
+		}
+		delete(values, "DB_PASSWORD")
+		if _, err := parse(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "DB_PASSWORD") {
+			t.Fatalf("network=%q error=%v want DB_PASSWORD", network, err)
+		}
+	}
+}
+
+func TestProductionUnixConfig(t *testing.T) {
+	values := runtimeValues()
+	productionValues(values)
+	values["APP_ENV"] = "production"
+	values["DB_NETWORK"] = "unix"
+	values["DB_SOCKET"] = "/var/run/mysqld/mysqld.sock"
+	values["DB_NAME"] = "dwh"
+	values["DB_USER"] = "dwhadmin"
+	values["REPORT_EXPORT_DIR"] = "/var/lib/new-dwh/report-exports"
+	delete(values, "DB_PASSWORD")
+	for _, port := range []string{"omitted", "", "invalid", "0", "65536"} {
+		t.Run("port="+port, func(t *testing.T) {
+			current := cloneValues(values)
+			if port != "omitted" {
+				current["DB_HOST"] = ""
+				current["DB_PORT"] = port
+				current["DB_PASSWORD"] = ""
+			}
+			got, err := parseRuntime(mapLookup(current))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Database.Network != "unix" || got.Database.Socket != values["DB_SOCKET"] || got.Database.Name != "dwh" || got.Database.User != "dwhadmin" || got.Database.Password != "" || got.Database.Port != 0 {
+				t.Fatalf("unexpected Unix config: %+v", got.Database)
+			}
+		})
+	}
+	for key, value := range map[string]string{
+		"APP_URL": "http://dwh.example.test", "APP_BIND_HOST": "0.0.0.0",
+		"ALLOW_REGISTRATION": "true", "SESSION_SECURE": "false",
+		"APP_SECRET_ENCRYPTION_KEY": "", "REPORT_EXPORT_DIR": "", "CUSTOM_DATASET_DIR": "",
+	} {
+		t.Run(key, func(t *testing.T) {
+			current := cloneValues(values)
+			current[key] = value
+			if _, err := parseRuntime(mapLookup(current)); err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("error=%v want %q", err, key)
+			}
+		})
 	}
 }
 

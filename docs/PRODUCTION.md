@@ -20,6 +20,7 @@ SESSION_LIFETIME=24h
 SESSION_REMEMBER_LIFETIME=720h
 SESSION_SECURE=true
 
+DB_NETWORK=tcp
 DB_HOST=127.0.0.1
 DB_PORT=3306
 DB_NAME=dwh
@@ -31,9 +32,56 @@ FINCLOUD_HTTP_TIMEOUT=30s
 FINCLOUD_INSECURE_SKIP_VERIFY=true
 
 APP_SECRET_ENCRYPTION_KEY=replace-with-standard-base64-32-byte-key
+REPORT_EXPORT_DIR=/var/lib/new-dwh/report-exports
+CUSTOM_DATASET_DIR=/var/lib/new-dwh/custom-datasets
 ```
 
-Production rejects HTTP `APP_URL`, registration, insecure session cookies, empty database passwords, and non-loopback bind addresses. Fincloud TLS verification remains enabled by default. The accepted temporary exception requires the explicit Fincloud-only opt-out above and emits a warning without credentials or endpoint details.
+Production rejects HTTP `APP_URL`, registration, insecure session cookies, empty TCP database passwords, and non-loopback bind addresses. Fincloud TLS verification remains enabled by default. The accepted temporary exception requires the explicit Fincloud-only opt-out above and emits a warning without credentials or endpoint details.
+
+### Local MySQL Unix socket
+
+For MySQL on the same Linux host, replace the entire TCP database block above with:
+
+```dotenv
+DB_NETWORK=unix
+DB_SOCKET=/var/run/mysqld/mysqld.sock
+DB_NAME=dwh
+DB_USER=dwhadmin
+DB_PASSWORD=
+```
+
+Keep the other production settings above, including HTTPS, secure sessions, the encryption key, and durable storage directories. `DB_NETWORK` defaults to `tcp` when omitted; unknown or empty values are rejected. TCP retains its host/port defaults and production password requirement. Unix mode requires the socket, database name, and database user; it does not require or validate `DB_HOST`/`DB_PORT`. It never falls back to TCP. A missing socket or rejected authentication fails startup with the socket address and the driver error.
+
+Run the application, migrations, and administrator CLI as Linux user `dwhadmin` with the same exported configuration. systemd's `EnvironmentFile` is loaded only for the service, not for interactive CLI commands. MySQL authenticates the connecting OS user through its server-side `auth_socket` plugin; the application does not implement authentication plugins, change users, invoke sudo, or supply a fake password. See the [MySQL socket authentication documentation](https://dev.mysql.com/doc/refman/8.4/en/socket-pluggable-authentication.html).
+
+After the operator verifies that `auth_socket` is installed and active, provision a new account using an authorized MySQL administration session:
+
+```sql
+CREATE USER 'dwhadmin'@'localhost' IDENTIFIED WITH auth_socket;
+GRANT ALL PRIVILEGES ON dwh.* TO 'dwhadmin'@'localhost';
+```
+
+If the account already exists, inspect its authentication plugin and grants before changing it. Keep privileges scoped to `dwh.*`; no global grants or `GRANT OPTION` are needed. This account covers runtime DDL and migrations. Separate migration and runtime accounts remain an option for TCP deployments or separately provisioned socket identities.
+
+From a shell already running as `dwhadmin`, verify the actual socket and account without a password:
+
+```sh
+id -un
+mysql --protocol=SOCKET --socket=/var/run/mysqld/mysqld.sock \
+  --user=dwhadmin dwh --execute='SELECT USER(), CURRENT_USER(), DATABASE();'
+```
+
+Confirm `CURRENT_USER()` is `dwhadmin@localhost` and the selected database is `dwh`. Then run the application and check `/ready` after migrations. DSN unit tests cannot validate the host's MySQL plugin, grants, socket permissions, or OS identity.
+
+### Report datasource Unix sockets
+
+After migration `20260929120000_add_report_datasource_unix_socket.sql`, an administrator can create a report datasource with Connection **Unix socket**, Socket path `/var/run/mysqld/mysqld.sock`, Database `dwh`, and Username `dwhadmin`. The form hides and disables TCP host, port, password, and TLS controls. Server validation requires an absolute socket path, database, and username. Unix connections store no password ciphertext and never decrypt an existing TCP credential. Password input or an enabled TLS policy is rejected; omitted TLS means disabled. No TCP fallback occurs.
+
+Every datasource connection runs as the same application process. With `User=dwhadmin` and `Group=dwhadmin`, the datasource above can authenticate as `'dwhadmin'@'localhost'` through `auth_socket`, using the same database-scoped grants shown above. A different MySQL socket account whose OS identity does not match must fail normally. The application never uses sudo, setuid, shell commands, or per-datasource OS impersonation.
+
+Use **Test connection** before activating the datasource. This action opens the actual configured socket and executes `SELECT 1` through the report pool. User-facing failures remain generic and contain no credentials or DSN. Test audits record only the outcome. Updates record changed connection field names and credential/connection change flags without secret values. Existing TCP TLS policy, encrypted passwords, connection bounds, and pool limits remain unchanged. Leaving a TCP edit password blank preserves it. Switching TCP to Unix removes it; switching Unix to TCP requires a new password. Each update increments the revision, so cached pools refresh even across application instances.
+
+The migration defaults existing rows to `tcp` and leaves ciphertext unchanged. Stop the old process before applying this migration, then start the new binary; mixed versions are unsupported because older datasource readers use `SELECT *` and do not know the new fields. Migrations remain operator-controlled. Rollback refuses while any Unix datasource remains: convert those records to valid TCP connections with real passwords before a reviewed non-production rollback. Production `migrate down` remains disabled. When rolling back to a binary without primary Unix support, restore a valid TCP application configuration too.
 
 ## Build and clean installation
 
@@ -62,7 +110,7 @@ Start the application only after `GET /ready` returns `200`. `/health` is proces
 
 ## Database privileges
 
-Use separate migration and runtime accounts. Canonical migrations require DML plus `CREATE`, `ALTER`, `DROP`, `INDEX`, `REFERENCES`, `CREATE ROUTINE`, `ALTER ROUTINE`, and `EXECUTE` on the application database. The routine privileges support the adoption-aware validation procedure inside the canonical source-settings migration; no routine remains after a successful migration. Runtime requires:
+Use separate migration and runtime accounts when provisioning distinct identities; the local socket example above uses the database-scoped `dwhadmin` account for both. Canonical migrations require DML plus `CREATE`, `ALTER`, `DROP`, `INDEX`, `REFERENCES`, `CREATE ROUTINE`, `ALTER ROUTINE`, and `EXECUTE` on the application database. The routine privileges support the adoption-aware validation procedure inside the canonical source-settings migration; no routine remains after a successful migration. Runtime requires:
 
 ```text
 SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, CREATE VIEW, SHOW VIEW, DROP
@@ -74,7 +122,17 @@ Set `CUSTOM_DATASET_DIR` to durable private storage shared by every application 
 
 ## systemd template and shutdown
 
-`deploy/new-dwh.service` is a template only. Install it as a non-root dedicated user after adjusting paths. Its `TimeoutStopSec=60s` exceeds the default application shutdown budget of 45 seconds. If `APP_SHUTDOWN_TIMEOUT` increases, increase `TimeoutStopSec` too.
+`deploy/new-dwh.service` is a template only. It now uses `User=dwhadmin` and `Group=dwhadmin` for the local `auth_socket` deployment. Provision that Linux user and group before starting the service. TCP deployments can retain their existing dedicated service identity. Adjust release paths before installation. Its `TimeoutStopSec=60s` exceeds the default application shutdown budget of 45 seconds. If `APP_SHUTDOWN_TIMEOUT` increases, increase `TimeoutStopSec` too.
+
+The unit uses `StateDirectory=new-dwh` with mode `0700`; systemd creates `/var/lib/new-dwh` owned by the service user and makes it writable under `ProtectSystem=strict`. Set `REPORT_EXPORT_DIR=/var/lib/new-dwh/report-exports` and `CUSTOM_DATASET_DIR=/var/lib/new-dwh/custom-datasets` as above. The application creates private storage subdirectories with mode `0700` and files with mode `0600`. For CLI-first installation, an operator must create the state directory before starting the service:
+
+```sh
+install -d -o dwhadmin -g dwhadmin -m 0700 /var/lib/new-dwh
+```
+
+Before switching an existing service from `new-dwh` to `dwhadmin`, stop writers and back up retained uploads and exports. Inspect the actual configured storage paths and transfer ownership of those two storage trees, including existing files, to `dwhadmin:dwhadmin`. Preserve their private modes and stored paths. Do not recursively change ownership of the release, MySQL data, or unrelated directories. If using custom storage paths, add only those exact paths to `ReadWritePaths=` in a systemd override and ensure the service user owns them; `/home` is inaccessible with `ProtectHome=true`.
+
+Keep `/opt/new-dwh` and its binaries and migrations operator-owned, readable/traversable by `dwhadmin`, with executable binaries. Keep `/etc/new-dwh/new-dwh.env` root-owned with mode `0600`; the system systemd manager reads it before dropping privileges. Do not deploy a second `.env` in the release directory. Ensure `dwhadmin` can traverse the socket's parent directories and connect to the MySQL-managed socket. Adjust only required access; do not change the socket's owner to the application user. `PrivateTmp=true` supports the example socket under `/var/run/mysqld`; a socket under `/tmp` requires a reviewed unit override or a socket location outside the private temporary namespace.
 
 SIGTERM stops scheduler delivery, begins graceful HTTP shutdown, cancels owned ingestion work, waits for component cleanup, and force-closes only after the application deadline.
 

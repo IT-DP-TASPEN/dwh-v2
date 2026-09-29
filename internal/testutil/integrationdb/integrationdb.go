@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,13 +184,21 @@ func testConfig(t *testing.T, root string) config.DatabaseConfig {
 	if environment, err := godotenv.Read(filepath.Join(root, ".env")); err == nil {
 		runtime = environment
 	}
-	for _, key := range []string{"DB_HOST", "DB_PORT", "DB_NAME"} {
+	for _, key := range []string{"DB_NETWORK", "DB_HOST", "DB_PORT", "DB_NAME"} {
 		if value, ok := os.LookupEnv(key); ok {
 			runtime[key] = value
 		}
 	}
-	if values["TEST_DB_HOST"] == runtime["DB_HOST"] && values["TEST_DB_PORT"] == runtime["DB_PORT"] && values["TEST_DB_NAME"] == runtime["DB_NAME"] {
+	if matchesRuntimeDatabase(values, runtime) {
 		t.Fatalf("TEST_DB connection matches the normal runtime database; refusing destructive integration tests")
 	}
 	return config.DatabaseConfig{Host: values["TEST_DB_HOST"], Port: port, Name: values["TEST_DB_NAME"], User: values["TEST_DB_USER"], Password: values["TEST_DB_PASSWORD"]}
+}
+
+func matchesRuntimeDatabase(values, runtime map[string]string) bool {
+	if strings.TrimSpace(runtime["DB_NETWORK"]) == "unix" {
+		// A TCP endpoint may reach the socket's server; require a distinct test schema.
+		return values["TEST_DB_NAME"] == strings.TrimSpace(runtime["DB_NAME"])
+	}
+	return values["TEST_DB_HOST"] == runtime["DB_HOST"] && values["TEST_DB_PORT"] == runtime["DB_PORT"] && values["TEST_DB_NAME"] == runtime["DB_NAME"]
 }

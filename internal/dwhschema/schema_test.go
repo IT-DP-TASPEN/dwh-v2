@@ -108,6 +108,28 @@ func TestApplicationVersionsMatchMigrationFiles(t *testing.T) {
 	}
 }
 
+func TestDatasourceSocketMigrationPreservesTCP(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260929120000_add_report_datasource_unix_socket.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, down, found := strings.Cut(string(data), "-- +goose Down")
+	if !found {
+		t.Fatal("migration lacks rollback")
+	}
+	for _, want := range []string{"network VARCHAR(4)", "NOT NULL DEFAULT 'tcp'", "socket_path VARCHAR(1024)", "DROP CHECK chk_report_datasources_port", "password_ciphertext IS NULL", "tls_policy = 'disabled'"} {
+		if !strings.Contains(up, want) {
+			t.Fatalf("migration missing %q", want)
+		}
+	}
+	if strings.Contains(up, "UPDATE report_datasources") {
+		t.Fatal("migration rewrites existing credentials")
+	}
+	if !strings.Contains(down, "CHECK (port BETWEEN 1 AND 65535)") {
+		t.Fatal("rollback can discard Unix connection configuration")
+	}
+}
+
 func TestValidateMigrationPrefix(t *testing.T) {
 	complete := MigrationState{TableExists: true, Records: []MigrationRecord{{Version: 0, Applied: true}}}
 	for _, version := range ApplicationVersions {

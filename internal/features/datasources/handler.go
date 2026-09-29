@@ -34,6 +34,7 @@ type DetailData struct {
 type FormData struct {
 	ID, Revision                                                     uint64
 	Name, Description, Host, Port, DatabaseName, Username, TLSPolicy string
+	Network, SocketPath, OriginalNetwork                             string
 	Errors                                                           map[string]string
 }
 
@@ -63,7 +64,7 @@ func (handler *Handler) Index(writer http.ResponseWriter, request *http.Request)
 }
 
 func (handler *Handler) New(writer http.ResponseWriter, request *http.Request) {
-	handler.admin.RenderPage(writer, request, 200, "features/datasources/form", "New report datasource", FormData{Port: "3306", TLSPolicy: string(reporting.TLSRequired), Errors: map[string]string{}})
+	handler.admin.RenderPage(writer, request, 200, "features/datasources/form", "New report datasource", FormData{Network: "tcp", Port: "3306", TLSPolicy: string(reporting.TLSRequired), Errors: map[string]string{}})
 }
 
 func (handler *Handler) Create(writer http.ResponseWriter, request *http.Request) {
@@ -99,7 +100,10 @@ func (handler *Handler) Edit(writer http.ResponseWriter, request *http.Request) 
 	if !ok {
 		return
 	}
-	form := FormData{ID: value.ID, Revision: value.Revision, Name: value.Name, Description: value.Description, Host: value.Host, Port: strconv.Itoa(int(value.Port)), DatabaseName: value.DatabaseName, Username: value.Username, TLSPolicy: string(value.TLSPolicy), Errors: map[string]string{}}
+	form := FormData{ID: value.ID, Revision: value.Revision, Name: value.Name, Description: value.Description, Network: value.Network, OriginalNetwork: value.Network, SocketPath: value.SocketPath, Host: value.Host, Port: strconv.Itoa(int(value.Port)), DatabaseName: value.DatabaseName, Username: value.Username, TLSPolicy: string(value.TLSPolicy), Errors: map[string]string{}}
+	if value.Network == "unix" {
+		form.Port = "3306"
+	}
 	handler.admin.RenderPage(writer, request, 200, "features/datasources/form", "Edit report datasource", form)
 }
 
@@ -114,6 +118,14 @@ func (handler *Handler) Update(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	form.ID = id
+	existing, found := handler.find(writer, request)
+	if !found {
+		return
+	}
+	form.OriginalNetwork = existing.Network
+	if form.Network == "tcp" && existing.Network == "unix" && input.Password == "" {
+		form.Errors["password"] = "A new password is required when switching to TCP."
+	}
 	if len(form.Errors) != 0 {
 		handler.admin.RenderPage(writer, request, 422, "features/datasources/form", "Edit report datasource", form)
 		return
@@ -166,17 +178,26 @@ func (handler *Handler) form(writer http.ResponseWriter, request *http.Request, 
 	if !webutil.ParseForm(writer, request, 64<<10) {
 		return FormData{}, reporting.DatasourceInput{}, false
 	}
-	form := FormData{Name: strings.TrimSpace(request.PostFormValue("name")), Description: strings.TrimSpace(request.PostFormValue("description")), Host: strings.TrimSpace(request.PostFormValue("host")), Port: request.PostFormValue("port"), DatabaseName: strings.TrimSpace(request.PostFormValue("database_name")), Username: strings.TrimSpace(request.PostFormValue("username")), TLSPolicy: request.PostFormValue("tls_policy"), Errors: map[string]string{}}
+	form := FormData{Name: strings.TrimSpace(request.PostFormValue("name")), Description: strings.TrimSpace(request.PostFormValue("description")), Network: strings.TrimSpace(request.PostFormValue("network")), SocketPath: strings.TrimSpace(request.PostFormValue("socket_path")), Host: strings.TrimSpace(request.PostFormValue("host")), Port: request.PostFormValue("port"), DatabaseName: strings.TrimSpace(request.PostFormValue("database_name")), Username: strings.TrimSpace(request.PostFormValue("username")), TLSPolicy: request.PostFormValue("tls_policy"), Errors: map[string]string{}}
+	if form.Network == "" {
+		form.Network = "tcp"
+	}
 	form.Revision, _ = strconv.ParseUint(request.PostFormValue("revision"), 10, 64)
-	port, err := strconv.ParseUint(form.Port, 10, 16)
-	if err != nil || port == 0 {
-		form.Errors["port"] = "Port must be between 1 and 65535."
+	var port uint64
+	if form.Network == "tcp" {
+		var err error
+		port, err = strconv.ParseUint(form.Port, 10, 16)
+		if err != nil || port == 0 {
+			form.Errors["port"] = "Port must be between 1 and 65535."
+		}
+	} else if form.Network == "unix" && form.TLSPolicy == "" {
+		form.TLSPolicy = string(reporting.TLSDisabled)
 	}
 	password := request.PostFormValue("password")
-	if passwordRequired && password == "" {
+	if form.Network == "tcp" && passwordRequired && password == "" {
 		form.Errors["password"] = "Password is required."
 	}
-	input := reporting.DatasourceInput{Name: form.Name, Description: form.Description, Host: form.Host, Port: uint16(port), DatabaseName: form.DatabaseName, Username: form.Username, Password: password, TLSPolicy: reporting.TLSPolicy(form.TLSPolicy)}
+	input := reporting.DatasourceInput{Name: form.Name, Description: form.Description, Network: form.Network, SocketPath: form.SocketPath, Host: form.Host, Port: uint16(port), DatabaseName: form.DatabaseName, Username: form.Username, Password: password, TLSPolicy: reporting.TLSPolicy(form.TLSPolicy)}
 	return form, input, true
 }
 
@@ -210,6 +231,6 @@ func publicError(err error) string {
 	case errors.Is(err, reporting.ErrInvalid), errors.Is(err, reporting.ErrInactive):
 		return err.Error()
 	default:
-		return "The operation could not be completed." + err.Error()
+		return "The operation could not be completed."
 	}
 }
