@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +44,7 @@ type Config struct {
 	App      AppConfig
 	Database DatabaseConfig
 	Session  SessionConfig
+	Auth     AuthConfig
 }
 
 // RuntimeConfig contains configuration required by the long-running web
@@ -60,6 +63,9 @@ type CustomDatasetConfig struct {
 }
 
 type ReportingConfig struct {
+	AllowedTCPCIDRs           []string
+	AllowedHosts              []string
+	AllowedUnixSockets        []string
 	MasterKey                 [32]byte
 	ExportDir                 string
 	ConnectTimeout            time.Duration
@@ -114,7 +120,15 @@ type DatabaseConfig struct {
 	Password string
 }
 
+type AuthConfig struct {
+	MaxConcurrentPasswordHashes int
+	LoginFailureWindow          time.Duration
+	LoginMaxFailures            int
+	LoginLockout                time.Duration
+}
+
 type SessionConfig struct {
+	IdleTimeout      time.Duration
 	CookieName       string
 	Lifetime         time.Duration
 	RememberLifetime time.Duration
@@ -194,6 +208,36 @@ func parseReporting(lookup lookupEnv, environment string) (ReportingConfig, erro
 			return result
 		}
 		return fallback
+	}
+	list := func(key string) []string {
+		raw := strings.TrimSpace(value(key, ""))
+		if raw == "" {
+			return nil
+		}
+		parts := strings.Split(raw, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+	cidrs, hosts, sockets := list("REPORT_DATASOURCE_ALLOWED_TCP_CIDRS"), list("REPORT_DATASOURCE_ALLOWED_HOSTS"), list("REPORT_DATASOURCE_ALLOWED_UNIX_SOCKETS")
+	if environment != "production" && len(cidrs)+len(hosts)+len(sockets) == 0 {
+		cidrs = []string{"127.0.0.0/8", "::1/128"}
+	}
+	for _, cidr := range cidrs {
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			return ReportingConfig{}, fmt.Errorf("REPORT_DATASOURCE_ALLOWED_TCP_CIDRS contains an invalid CIDR")
+		}
+	}
+	for _, host := range hosts {
+		if host == "" || strings.Contains(host, "*") || strings.ContainsAny(host, "/\\: \t\r\n\x00") && net.ParseIP(host) == nil {
+			return ReportingConfig{}, fmt.Errorf("REPORT_DATASOURCE_ALLOWED_HOSTS requires exact hosts or IPs")
+		}
+	}
+	for _, socket := range sockets {
+		if !filepath.IsAbs(socket) || filepath.Clean(socket) != socket || strings.ContainsRune(socket, 0) {
+			return ReportingConfig{}, fmt.Errorf("REPORT_DATASOURCE_ALLOWED_UNIX_SOCKETS requires cleaned absolute paths")
+		}
 	}
 	keyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value("APP_SECRET_ENCRYPTION_KEY", "")))
 	if err != nil || len(keyBytes) != 32 {
@@ -295,6 +339,7 @@ func parseReporting(lookup lookupEnv, environment string) (ReportingConfig, erro
 	var masterKey [32]byte
 	copy(masterKey[:], keyBytes)
 	return ReportingConfig{
+		AllowedTCPCIDRs: cidrs, AllowedHosts: hosts, AllowedUnixSockets: sockets,
 		MasterKey: masterKey, ExportDir: exportDir, ConnectTimeout: connectTimeout,
 		InteractiveTimeout: interactiveTimeout, ExportTimeout: exportTimeout, DownloadTimeout: downloadTimeout,
 		InteractiveMaxRows: maxRows, InteractivePayloadBytes: int64(payloadBytes), DynamicOptionMaxRows: dynamicOptionRows,
@@ -379,6 +424,26 @@ func parse(lookup lookupEnv) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	idleTimeout, err := parseDuration("SESSION_IDLE_TIMEOUT", value("SESSION_IDLE_TIMEOUT", "2h"))
+	if err != nil {
+		return Config{}, err
+	}
+	maxHashes, err := strconv.Atoi(value("AUTH_MAX_CONCURRENT_PASSWORD_HASHES", "4"))
+	if err != nil || maxHashes <= 0 {
+		return Config{}, fmt.Errorf("AUTH_MAX_CONCURRENT_PASSWORD_HASHES must be a positive integer")
+	}
+	maxFailures, err := strconv.Atoi(value("AUTH_LOGIN_MAX_FAILURES", "5"))
+	if err != nil || maxFailures <= 0 {
+		return Config{}, fmt.Errorf("AUTH_LOGIN_MAX_FAILURES must be a positive integer")
+	}
+	failureWindow, err := parseDuration("AUTH_LOGIN_FAILURE_WINDOW", value("AUTH_LOGIN_FAILURE_WINDOW", "15m"))
+	if err != nil {
+		return Config{}, err
+	}
+	lockout, err := parseDuration("AUTH_LOGIN_LOCKOUT", value("AUTH_LOGIN_LOCKOUT", "15m"))
+	if err != nil {
+		return Config{}, err
+	}
 	rememberLifetime, err := parseDuration("SESSION_REMEMBER_LIFETIME", value("SESSION_REMEMBER_LIFETIME", defaultSessionRememberLifetime.String()))
 	if err != nil {
 		return Config{}, err
@@ -389,6 +454,7 @@ func parse(lookup lookupEnv) (Config, error) {
 	}
 
 	config := Config{
+		Auth: AuthConfig{MaxConcurrentPasswordHashes: maxHashes, LoginFailureWindow: failureWindow, LoginMaxFailures: maxFailures, LoginLockout: lockout},
 		App: AppConfig{
 			Name:              strings.TrimSpace(value("APP_NAME", defaultAppName)),
 			Environment:       strings.TrimSpace(value("APP_ENV", defaultAppEnvironment)),
@@ -408,6 +474,7 @@ func parse(lookup lookupEnv) (Config, error) {
 			Password: value("DB_PASSWORD", ""),
 		},
 		Session: SessionConfig{
+			IdleTimeout:      idleTimeout,
 			CookieName:       strings.TrimSpace(value("SESSION_COOKIE_NAME", defaultSessionCookieName)),
 			Lifetime:         sessionLifetime,
 			RememberLifetime: rememberLifetime,

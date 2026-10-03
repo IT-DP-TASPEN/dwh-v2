@@ -152,7 +152,7 @@ func TestRunsListHierarchyFiltersAndParentSummaries(t *testing.T) {
 		`@htmx:after-request=`,
 		`data-runs-accordion`,
 		`:data-open="open.toString()"`,
-		`every 5s [this.dataset.loaded === 'true' && this.closest('[data-runs-accordion]').dataset.open === 'true']`,
+		`every 5s`, `@htmx:before-request="beforeRequest($event)"`,
 		`No children`,
 		`32 / 36 complete`,
 		`2 failed`,

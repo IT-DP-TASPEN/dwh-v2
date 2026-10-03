@@ -375,6 +375,9 @@ func scanAndValidateStatement(statement string, parameters []Parameter, mode SQL
 	if err != nil {
 		return statementScan{}, nil, err
 	}
+	if err := ValidateReadOnlyStatement(statement, mode); err != nil {
+		return statementScan{}, nil, err
+	}
 	if len(scan.OptionalBlocks) == 0 {
 		if err := validateReferences(scan.Placeholders, parameters); err != nil {
 			return statementScan{}, nil, err
@@ -555,6 +558,9 @@ func Bind(statement string, parameters []Parameter, values map[string]Normalized
 	}
 	statement, err = resolveOptionalBlocks(statement, blocks, values)
 	if err != nil {
+		return "", nil, err
+	}
+	if err := ValidateReadOnlyStatement(statement, mode); err != nil {
 		return "", nil, err
 	}
 	placeholders, err := ScanPlaceholders(statement, mode)

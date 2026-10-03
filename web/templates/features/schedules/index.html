@@ -27,7 +27,7 @@
     <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
         <table class="min-w-full text-left text-sm">
             <thead><tr>
-                {{if .Data.CanSelect}}<th class="w-12 px-4 py-3">{{if gt .Data.SelectableCount 0}}<input type="checkbox" aria-label="Select all schedules on this page" :checked="allSelected" x-effect="$el.indeterminate = partiallySelected" @change="toggleAll($event.target.checked)" class="h-4 w-4 rounded border-slate-300 text-emerald-600 dark:border-slate-700">{{end}}</th>{{end}}
+                {{if .Data.CanSelect}}<th class="w-12 px-4 py-3">{{if gt .Data.SelectableCount 0}}<input type="checkbox" aria-label="Select all schedules on this page" :checked="allSelected" x-effect="updateIndeterminate($el)" @change="toggleAll($event.target.checked)" class="h-4 w-4 rounded border-slate-300 text-emerald-600 dark:border-slate-700">{{end}}</th>{{end}}
                 <th class="px-4 py-3">Schedule</th><th class="px-4 py-3">Definition</th><th class="px-4 py-3">Cursor / backlog</th><th class="px-4 py-3">Latest attempt</th>
             </tr></thead>
             <tbody>

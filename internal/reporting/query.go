@@ -73,7 +73,7 @@ func (QueryEngine) validateTemplate(ctx context.Context, database *sql.DB, state
 				return mode, nil
 			}
 			if err := prepareRaw(ctx, connection, query); err != nil {
-				return mode, fmt.Errorf("%w: %s shape validation failed: %v", ErrInvalid, candidate.label, err)
+				return mode, fmt.Errorf("%w: %s shape validation failed", ErrInvalid, candidate.label)
 			}
 			seen[query] = struct{}{}
 		}
@@ -160,7 +160,37 @@ func prepareRaw(ctx context.Context, connection *sql.Conn, query string) error {
 
 func streamRaw(ctx context.Context, connection *sql.Conn, query string, arguments []driver.NamedValue, sink RowSink) error {
 	var operationErr error
-	rawErr := connection.Raw(func(raw any) error {
+	rawErr := connection.Raw(func(raw any) (result error) {
+		beginner, ok := raw.(driver.ConnBeginTx)
+		cleanup, supportsCleanup := raw.(driver.ExecerContext)
+		if !ok || !supportsCleanup {
+			operationErr = fmt.Errorf("report driver requires read-only transactions and context-aware cleanup")
+			return driver.ErrBadConn
+		}
+		// MySQL implements ReadOnly as START TRANSACTION READ ONLY on this
+		// physical connection. Never fall back to an ordinary transaction.
+		if _, err := beginner.BeginTx(ctx, driver.TxOptions{ReadOnly: true}); err != nil {
+			operationErr = err
+			return driver.ErrBadConn
+		}
+		defer func() {
+			if result != nil || ctx.Err() != nil {
+				if operationErr == nil {
+					operationErr = context.Cause(ctx)
+				}
+				result = driver.ErrBadConn
+				return
+			}
+			// driver.Tx.Rollback has no context. Issue ROLLBACK directly with a
+			// deadline so uncertain cleanup closes the connection, not the pool.
+			cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if _, err := cleanup.ExecContext(cleanupContext, "ROLLBACK", nil); err != nil {
+				operationErr = fmt.Errorf("clean up read-only report transaction: %w", err)
+				result = driver.ErrBadConn
+			}
+		}()
+
 		preparer, ok := raw.(driver.ConnPrepareContext)
 		if !ok {
 			operationErr = fmt.Errorf("report driver does not support context-aware prepare")

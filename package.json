@@ -10,7 +10,7 @@
     "watch:js": "esbuild ./web/src/js/app.js --bundle --sourcemap --target=es2020 --outfile=./web/static/js/app.js --watch=forever"
   },
   "dependencies": {
-    "alpinejs": "^3.15.12",
+    "@alpinejs/csp": "^3.15.12",
     "htmx.org": "^2.0.10",
     "lucide": "^1.31.0"
   },

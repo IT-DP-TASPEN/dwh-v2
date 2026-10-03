@@ -15,6 +15,7 @@ type Action string
 const MaxMetadataBytes = 64 << 10
 
 const (
+	ActionAuthLoginFailed                 Action = "auth.login_failed"
 	ActionAuthLogin                       Action = "auth.login"
 	ActionAuthLogout                      Action = "auth.logout"
 	ActionAuthRegistration                Action = "auth.registration"
@@ -100,6 +101,13 @@ type Attribution struct {
 type Metadata interface {
 	auditMetadata()
 }
+
+// LoginFailureMetadata deliberately contains no account ID or existence flag.
+type LoginFailureMetadata struct {
+	Username string `json:"username"`
+}
+
+func (LoginFailureMetadata) auditMetadata() {}
 
 type RoleChangeMetadata struct {
 	FromRole string `json:"from_role"`
@@ -404,7 +412,7 @@ func validateIdentity(label string, identity *Identity) error {
 
 func knownAction(action Action) bool {
 	switch action {
-	case ActionAuthLogin,
+	case ActionAuthLoginFailed, ActionAuthLogin,
 		ActionAuthLogout,
 		ActionAuthRegistration,
 		ActionImpersonationStarted,

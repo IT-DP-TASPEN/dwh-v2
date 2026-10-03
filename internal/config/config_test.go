@@ -26,6 +26,49 @@ func TestParseDefaults(t *testing.T) {
 	if config.Session.Lifetime != 24*time.Hour || config.Session.RememberLifetime != 30*24*time.Hour {
 		t.Fatalf("unexpected session defaults: %+v", config.Session)
 	}
+	if config.Session.IdleTimeout != 2*time.Hour || config.Auth.MaxConcurrentPasswordHashes != 4 || config.Auth.LoginMaxFailures != 5 || config.Auth.LoginFailureWindow != 15*time.Minute || config.Auth.LoginLockout != 15*time.Minute {
+		t.Fatalf("security defaults: %+v %+v", config.Session, config.Auth)
+	}
+}
+
+func TestAuthenticationSecurityConfigRequiresPositiveBounds(t *testing.T) {
+	for _, key := range []string{"SESSION_IDLE_TIMEOUT", "AUTH_MAX_CONCURRENT_PASSWORD_HASHES", "AUTH_LOGIN_MAX_FAILURES", "AUTH_LOGIN_FAILURE_WINDOW", "AUTH_LOGIN_LOCKOUT"} {
+		for _, value := range []string{"0", "-1", "invalid"} {
+			values := baseValues(key, value)
+			if _, err := parse(mapLookup(values)); err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("%s=%s: %v", key, value, err)
+			}
+		}
+	}
+}
+
+func TestReportingDestinationConfiguration(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	for _, test := range []struct {
+		name, environment, cidr, host, socket string
+		invalid                               bool
+	}{
+		{name: "production empty", environment: "production"},
+		{name: "development default", environment: "development"},
+		{name: "configured", environment: "production", cidr: "10.1.0.0/16", host: "mysql.example", socket: "/run/mysql/mysql.sock"},
+		{name: "bad CIDR", environment: "production", cidr: "10.1.0.0", invalid: true},
+		{name: "wildcard host", environment: "production", host: "*.example", invalid: true},
+		{name: "socket traversal", environment: "production", socket: "/run/mysql/../mysql.sock", invalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			values := map[string]string{"APP_SECRET_ENCRYPTION_KEY": key, "REPORT_EXPORT_DIR": "/tmp/exports", "REPORT_DATASOURCE_ALLOWED_TCP_CIDRS": test.cidr, "REPORT_DATASOURCE_ALLOWED_HOSTS": test.host, "REPORT_DATASOURCE_ALLOWED_UNIX_SOCKETS": test.socket}
+			got, err := parseReporting(mapLookup(values), test.environment)
+			if (err != nil) != test.invalid {
+				t.Fatal(err)
+			}
+			if test.name == "production empty" && len(got.AllowedTCPCIDRs)+len(got.AllowedHosts)+len(got.AllowedUnixSockets) != 0 {
+				t.Fatal("production got implicit allowlist")
+			}
+			if test.name == "development default" && (len(got.AllowedTCPCIDRs) != 2 || got.AllowedTCPCIDRs[0] != "127.0.0.0/8") {
+				t.Fatal("development default not local")
+			}
+		})
+	}
 }
 
 func TestParseDatabaseNetworks(t *testing.T) {

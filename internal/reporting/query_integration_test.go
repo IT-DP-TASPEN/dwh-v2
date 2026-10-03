@@ -10,9 +10,76 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ibldzn/go-admin/internal/database"
 	"github.com/ibldzn/go-admin/internal/reporting"
 	"github.com/ibldzn/go-admin/internal/testutil/integrationdb"
 )
+
+func TestMySQLReadOnlyPolicyAndTransaction(t *testing.T) {
+	config := integrationdb.Config(t)
+	setup, err := database.OpenMigrations(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = setup.Close() })
+	for _, statement := range []string{
+		`DROP FUNCTION IF EXISTS report_security_write_probe`,
+		`DROP TABLE IF EXISTS report_security_probe`,
+		`CREATE TABLE report_security_probe (id INT PRIMARY KEY, value INT NOT NULL) ENGINE=InnoDB`,
+		`INSERT INTO report_security_probe VALUES (1,10)`,
+		`CREATE FUNCTION report_security_write_probe() RETURNS INT MODIFIES SQL DATA BEGIN UPDATE report_security_probe SET value=99 WHERE id=1; RETURN 1; END`,
+	} {
+		if _, err := setup.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = setup.Exec(`DROP FUNCTION IF EXISTS report_security_write_probe`)
+		_, _ = setup.Exec(`DROP TABLE IF EXISTS report_security_probe`)
+	})
+	db := reportDatabase(t)
+	engine := reporting.QueryEngine{}
+	sink := &collectingSink{}
+	if err := engine.Stream(context.Background(), db, `SELECT value FROM report_security_probe`, nil, nil, sink); err != nil || len(sink.rows) != 1 || sink.rows[0][0] != int64(10) {
+		t.Fatalf("valid SELECT: rows=%v err=%v", sink.rows, err)
+	}
+	for _, unsafe := range []string{`INSERT INTO report_security_probe VALUES(2,20)`, `UPDATE report_security_probe SET value=20`, `DELETE FROM report_security_probe`, "SELECT `GET_LOCK`('report_security_probe_lock',0)"} {
+		if err := engine.Stream(context.Background(), db, unsafe, nil, nil, &collectingSink{}); !errors.Is(err, reporting.ErrInvalid) {
+			t.Fatalf("unsafe SQL %q: %v", unsafe, err)
+		}
+	}
+	// Observe the current physical connection's transaction, not its default
+	// session variable (which does not describe START TRANSACTION READ ONLY).
+	sink = &collectingSink{}
+	if err := engine.Stream(context.Background(), db, `SELECT tx.ACCESS_MODE FROM performance_schema.events_transactions_current tx JOIN performance_schema.threads th ON th.THREAD_ID=tx.THREAD_ID WHERE th.PROCESSLIST_ID=CONNECTION_ID() AND tx.STATE='ACTIVE'`, nil, nil, sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.rows) != 1 || string(sink.rows[0][0].([]byte)) != "READ ONLY" {
+		t.Fatalf("transaction=%v", sink.rows)
+	}
+	// A routine hides writes behind a lexically valid SELECT. MySQL must block
+	// it even though this disposable account intentionally has write privileges.
+	if err := engine.Stream(context.Background(), db, `SELECT report_security_write_probe()`, nil, nil, &collectingSink{}); err == nil {
+		t.Fatal("routine wrote through READ ONLY transaction")
+	}
+	var count, value int
+	if err := setup.QueryRow(`SELECT COUNT(*),MAX(value) FROM report_security_probe`).Scan(&count, &value); err != nil || count != 1 || value != 10 {
+		t.Fatalf("data modified: count=%d value=%d err=%v", count, value, err)
+	}
+	// Normal EOF must leave no active transaction on the reused connection.
+	sink = &collectingSink{}
+	if err := engine.Stream(context.Background(), db, `SELECT CONNECTION_ID()`, nil, nil, sink); err != nil {
+		t.Fatal(err)
+	}
+	id := sink.rows[0][0].(int64)
+	var reused int64
+	if err := db.QueryRow(`SELECT CONNECTION_ID()`).Scan(&reused); err != nil || reused != id {
+		t.Fatalf("connection not reusable: %d %d %v", id, reused, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM performance_schema.events_transactions_current tx JOIN performance_schema.threads th ON th.THREAD_ID=tx.THREAD_ID WHERE th.PROCESSLIST_ID=CONNECTION_ID() AND tx.STATE='ACTIVE'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("dirty transaction count=%d err=%v", count, err)
+	}
+}
 
 type collectingSink struct{ rows [][]driver.Value }
 

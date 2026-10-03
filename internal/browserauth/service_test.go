@@ -501,6 +501,14 @@ func TestResolveSessionErrors(t *testing.T) {
 func newTestService(t *testing.T, users userStore, roles roleStore, sessions sessionStore) *Service {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if store, ok := sessions.(*fakeSessions); ok {
+		if store.found.ExpiresAt.IsZero() {
+			store.found.ExpiresAt = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+		}
+		if store.found.LastSeenAt.IsZero() {
+			store.found.LastSeenAt = time.Now().UTC()
+		}
+	}
 	service, err := NewService(users, roles, sessions, 24*time.Hour, 30*24*time.Hour, logger)
 	if err != nil {
 		t.Fatal(err)

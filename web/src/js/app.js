@@ -1,4 +1,4 @@
-import Alpine from "alpinejs";
+import Alpine from "@alpinejs/csp";
 import htmx from "htmx.org";
 import {
   Activity,
@@ -29,6 +29,71 @@ import {
 
 window.Alpine = Alpine;
 window.htmx = htmx;
+htmx.config.allowEval = false;
+htmx.config.allowScriptTags = false;
+htmx.config.includeIndicatorStyles = false;
+
+Alpine.data("noticeToast", () => ({
+  open: true,
+  init() { setTimeout(() => { this.open = false; }, 5000); },
+}));
+
+Alpine.data("scheduleJobSelection", () => ({
+  selectAll() { this.$root.querySelectorAll("[name=job_keys]").forEach((input) => { input.checked = true; }); },
+}));
+
+Alpine.data("folderRename", () => ({
+  editing: false, folderID: "", form: null,
+  init() { this.form = this.$el; this.folderID = this.form.dataset.folderId; this.editing = this.form.dataset.editing === "true"; },
+  rename(event) {
+    if (String(event.detail) !== this.folderID) return;
+    this.editing = true;
+    this.$nextTick(() => { this.$refs.input.value = this.form.dataset.currentName; this.$refs.input.select(); });
+  },
+  prepareSubmit() { this.form.action = `/reports/folders/${this.folderID}/rename${window.location.search}`; },
+  cancel() {
+    this.editing = false;
+    this.$refs.input.value = this.form.dataset.currentName;
+    document.getElementById(`folder-actions-button-${this.folderID}`)?.focus();
+  },
+}));
+
+Alpine.data("runsAccordion", (reference, trigger) => ({
+  open: false, loaded: false, loading: false, failed: false, refreshFailed: false,
+  toggle() { this.open = !this.open; if (this.open) this.load(); },
+  load() { if (!this.loaded && !this.loading) htmx.trigger(this.$refs[reference], trigger); },
+  beforeRequest(event) {
+    const host = event.detail.elt;
+    if (!host?.matches("[data-runs-poll-host]")) return;
+    const initial = event.detail.requestConfig?.triggeringEvent?.type === trigger;
+    if (!initial && (host.dataset.loaded !== "true" || !this.open)) { event.preventDefault(); return; }
+    this.loading = true;
+    if (!this.loaded) this.failed = false;
+  },
+  afterSwap(event) {
+    if (!event.target.matches("[data-runs-poll-host]")) return;
+    this.loading = false; this.loaded = true; this.failed = false; this.refreshFailed = false;
+  },
+  afterRequest(event) {
+    if (!event.detail.elt?.matches("[data-runs-poll-host]") || event.detail.successful === true) return;
+    this.loading = false;
+    if (this.loaded) this.refreshFailed = true; else this.failed = true;
+  },
+}));
+
+document.addEventListener("change", (event) => {
+  if (event.target.matches("[data-source-auth-select]")) event.target.form.requestSubmit();
+});
+for (const name of ["htmx:responseError", "htmx:sendError"]) {
+  document.addEventListener(name, (event) => {
+    const form = event.target.closest("form");
+    const message = form?.querySelector("[data-source-auth-error]");
+    if (!message) return;
+    form.reset();
+    message.textContent = "Auth Profile assignment could not be saved.";
+    message.classList.remove("hidden");
+  });
+}
 
 const root = document.documentElement;
 const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -92,6 +157,7 @@ Alpine.data("csvUpload", () => ({
   file: null,
   error: "",
   dragging: false,
+  drop(event) { this.dragging = false; this.select(event.dataTransfer.files, true); },
   select(files, dropped = false) {
     if (!files.length) return;
     if (files.length !== 1) return this.reject("Choose one CSV file.", !dropped);
@@ -134,6 +200,10 @@ Alpine.data("navigationDisclosure", () => ({
   },
   get open() {
     return this.active || this.manualOpen;
+  },
+  togglePrimary() {
+    if (this.sidebarCollapsed) { this.expandSidebar(); this.openDisclosure(); }
+    else this.toggleDisclosure();
   },
   openDisclosure() {
     if (this.active || this.manualOpen) return;
@@ -190,6 +260,9 @@ Alpine.data("contextMenu", () => ({
     this.open = false;
     if (restoreFocus) this.$nextTick(() => this.$refs.trigger?.focus());
   },
+  closeOther(event) { if (event.detail !== this.$el) this.close(); },
+  blur(event) { if (!this.$el.contains(event.relatedTarget)) this.close(); },
+  renameFolder(id) { this.close(); this.$dispatch("folder-rename", id); },
   viewportChanged() {
     this.close(this.$refs.menu?.contains(document.activeElement));
   },
@@ -246,6 +319,7 @@ Alpine.data("scheduleBulkActions", () => ({
   get partiallySelected() {
     return this.selected.length > 0 && !this.allSelected;
   },
+  updateIndeterminate(element) { element.indeterminate = this.partiallySelected; },
   toggleAll(checked) {
     this.selected = checked ? [...this.visibleIDs] : [];
   },

@@ -1,6 +1,7 @@
 package sources
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,7 +20,14 @@ func TestSourceAuthProfileSelectAutoSavesWithoutButton(t *testing.T) {
 	}
 	data := ListData{Rows: []Source{{Job: catalog.Jobs()[0], Category: "Fixed", Enabled: true, ConfigurationRequired: true}}, AuthProfiles: []AuthProfileOption{{ID: 7, Name: "Operations", Status: "active"}}, CanManage: true}
 	body := renderSources(t, data)
-	for _, want := range []string{`hx-post="/sources/`, `hx-target="closest tr"`, `hx-swap="outerHTML"`, `hx-on::response-error="this.reset()`, `hx-on::send-error="this.reset()`, `data-source-auth-error`, `onchange="this.form.requestSubmit()"`, `border-slate-300`, `dark:border-slate-700`, `rounded-xl border border-slate-200`, `dark:border-slate-800`, "Configuration required"} {
+	if strings.Contains(body, "hx-on:") || strings.Contains(body, "onchange=") {
+		t.Fatal("eval-dependent handler remains")
+	}
+	script, err := fs.ReadFile(webfiles.Files, "static/js/app.js")
+	if err != nil || !strings.Contains(string(script), "data-source-auth-select") || !strings.Contains(string(script), "htmx:responseError") || !strings.Contains(string(script), "htmx:sendError") {
+		t.Fatal("delegated autosave/error handlers missing")
+	}
+	for _, want := range []string{`hx-post="/sources/`, `hx-target="closest tr"`, `hx-swap="outerHTML"`, `data-source-auth-error`, `data-source-auth-select`, `border-slate-300`, `dark:border-slate-700`, `rounded-xl border border-slate-200`, `dark:border-slate-800`, "Configuration required"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("sources page missing %q: %s", want, body)
 		}
@@ -42,6 +50,13 @@ func TestSourceMutationFailureFragmentRestoresPersistedSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := response.Body.String()
+	if strings.Contains(body, "hx-on:") || strings.Contains(body, "onchange=") {
+		t.Fatal("eval-dependent handler remains")
+	}
+	script, err := fs.ReadFile(webfiles.Files, "static/js/app.js")
+	if err != nil || !strings.Contains(string(script), "data-source-auth-select") || !strings.Contains(string(script), "htmx:responseError") || !strings.Contains(string(script), "htmx:sendError") {
+		t.Fatal("delegated autosave/error handlers missing")
+	}
 	if !strings.Contains(body, `value="7"  selected`) && !strings.Contains(body, `value="7" selected`) {
 		t.Fatalf("persisted selection not restored: %s", body)
 	}

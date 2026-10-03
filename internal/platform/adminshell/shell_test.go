@@ -87,13 +87,28 @@ func TestAdminShellRendersFilteredNestedNavigation(t *testing.T) {
 	if strings.Contains(body, ">Users<") {
 		t.Fatal("unauthorized navigation item rendered")
 	}
+	head, err := fs.ReadFile(webfiles.Files, "static/js/head-state-init.js")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, key := range []string{"sidebar-collapsed", "sidebar-disclosures"} {
-		if script, stylesheet := strings.Index(body, `localStorage.getItem("`+key+`")`), strings.Index(body, `rel="stylesheet"`); script < 0 || stylesheet < 0 || script > stylesheet {
-			t.Fatalf("persisted %s state is not initialized before stylesheet", key)
+		if !strings.Contains(string(head), `localStorage.getItem("`+key+`")`) {
+			t.Fatalf("missing persisted %s state", key)
 		}
 	}
-	if !strings.Contains(body, `data-sidebar-disclosure-pending="true"`) || !strings.Contains(body, `root.removeAttribute("data-sidebar-disclosure-pending")`) {
-		t.Fatal("disclosure navigation is not hidden and revealed around pre-paint initialization")
+	if script, stylesheet := strings.Index(body, `/static/js/head-state-init.js`), strings.Index(body, `rel="stylesheet"`); script < 0 || stylesheet < 0 || script > stylesheet {
+		t.Fatal("state script must run before stylesheet")
+	}
+	sidebar, err := fs.ReadFile(webfiles.Files, "static/js/sidebar-init.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := fs.ReadFile(webfiles.Files, "static/css/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(head), `root.dataset.sidebarDisclosurePending = "true"`) || !strings.Contains(string(sidebar), `root.removeAttribute("data-sidebar-disclosure-pending")`) || !strings.Contains(string(css), "data-sidebar-disclosure-pending") {
+		t.Fatal("missing pre-paint disclosure hiding/reveal")
 	}
 
 	data.Navigation = registry.Prepare("/", principal.Can)

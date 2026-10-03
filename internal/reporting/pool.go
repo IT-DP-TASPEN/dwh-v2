@@ -14,6 +14,7 @@ import (
 )
 
 type PoolConfig struct {
+	Destinations        *DestinationPolicy
 	ConnectTimeout      time.Duration
 	MySQLMaxPacketBytes int
 	MaxOpen             int
@@ -58,6 +59,9 @@ func (manager *PoolManager) Database(ctx context.Context, datasource Datasource,
 	if datasource.Status != StatusActive && !(allowDisabled && datasource.Status == StatusDisabled) {
 		return nil, ErrInactive
 	}
+	if err := manager.config.Destinations.Validate(ctx, datasource.Network, datasource.Host, datasource.SocketPath); err != nil {
+		return nil, err
+	}
 	entry := manager.entry(datasource.ID)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
@@ -68,10 +72,11 @@ func (manager *PoolManager) Database(ctx context.Context, datasource Datasource,
 	if err != nil {
 		return nil, err
 	}
-	database, err := sql.Open("mysql", config.FormatDSN())
+	connector, err := mysql.NewConnector(config)
 	if err != nil {
-		return nil, fmt.Errorf("open report datasource: %w", err)
+		return nil, fmt.Errorf("configure report datasource: %w", err)
 	}
+	database := sql.OpenDB(connector)
 	database.SetMaxOpenConns(manager.config.MaxOpen)
 	database.SetMaxIdleConns(manager.config.MaxIdle)
 	database.SetConnMaxLifetime(manager.config.MaxLifetime)
@@ -114,6 +119,7 @@ func (manager *PoolManager) mysqlConfig(datasource Datasource) (*mysql.Config, e
 	driverConfig.Timeout = manager.config.ConnectTimeout
 	driverConfig.MaxAllowedPacket = manager.config.MySQLMaxPacketBytes
 	driverConfig.MultiStatements = false
+	driverConfig.DialFunc = manager.config.Destinations.dial
 	if driverConfig.Net == "tcp" && datasource.TLSPolicy == TLSRequired {
 		driverConfig.TLSConfig = "true"
 	}

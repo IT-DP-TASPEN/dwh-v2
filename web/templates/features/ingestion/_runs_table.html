@@ -13,7 +13,7 @@
 {{end}}
 
 {{define "run-all-children-host"}}
-<div id="run-all-children-{{.Data.Parent.ID}}" data-runs-poll-host data-loaded="true" x-ref="children" hx-get="/runs/{{.Data.Parent.ID}}/children" hx-trigger="load-run-all-children{{if not .Data.Parent.Terminal}}, every 5s [this.dataset.loaded === 'true' && this.closest('[data-runs-accordion]').dataset.open === 'true']{{end}}" hx-target="this" hx-swap="outerHTML">
+<div id="run-all-children-{{.Data.Parent.ID}}" data-runs-poll-host data-loaded="true" x-ref="children" hx-get="/runs/{{.Data.Parent.ID}}/children" hx-trigger="load-run-all-children{{if not .Data.Parent.Terminal}}, every 5s{{end}}" hx-target="this" hx-swap="outerHTML">
   {{template "run-all-children-content" .}}
   <p x-cloak x-show="refreshFailed" role="status" aria-live="polite" class="mt-2 text-xs text-amber-700 dark:text-amber-300">Refresh failed · Retrying…</p>
 </div>
@@ -50,7 +50,7 @@
 {{end}}
 
 {{define "scheduler-wave-host"}}
-<div id="scheduler-wave-{{.Data.Wave.DOMID}}" data-runs-poll-host data-loaded="true" x-ref="attempts" hx-get="{{.Data.Wave.URL}}" hx-trigger="load-scheduler-wave{{if .Data.Wave.Unresolved}}, every 5s [this.dataset.loaded === 'true' && this.closest('[data-runs-accordion]').dataset.open === 'true']{{end}}" hx-target="this" hx-swap="outerHTML">
+<div id="scheduler-wave-{{.Data.Wave.DOMID}}" data-runs-poll-host data-loaded="true" x-ref="attempts" hx-get="{{.Data.Wave.URL}}" hx-trigger="load-scheduler-wave{{if .Data.Wave.Unresolved}}, every 5s{{end}}" hx-target="this" hx-swap="outerHTML">
   {{template "scheduler-wave-attempts-content" .}}
   <p x-cloak x-show="refreshFailed" role="status" aria-live="polite" class="mt-2 text-xs text-amber-700 dark:text-amber-300">Refresh failed · Retrying…</p>
 </div>
@@ -69,14 +69,14 @@
       {{range .Data.Rows}}
       {{with .SchedulerWave}}
       <tbody id="scheduler-wave-row-{{.DOMID}}" class="border-t border-slate-100 dark:border-slate-800" data-runs-accordion data-open="false" :data-open="open.toString()" data-scheduler-wave="{{.ScheduledForKey}}"
-        x-data="{ open: false, loaded: false, loading: false, failed: false, refreshFailed: false, load() { if (this.loaded || this.loading) return; window.htmx.trigger(this.$refs.attempts, 'load-scheduler-wave') } }"
-        @htmx:before-request="if ($event.detail.elt && $event.detail.elt.matches('[data-runs-poll-host]')) { loading = true; if (!loaded) failed = false }"
-        @htmx:after-swap="if ($event.target.matches('[data-runs-poll-host]')) { loading = false; loaded = true; failed = false; refreshFailed = false }"
-        @htmx:after-request="if ($event.detail.elt && $event.detail.elt.matches('[data-runs-poll-host]') && $event.detail.successful !== true) { loading = false; if (loaded) refreshFailed = true; else failed = true }">
+        x-data="runsAccordion('attempts', 'load-scheduler-wave')"
+        @htmx:before-request="beforeRequest($event)"
+        @htmx:after-swap="afterSwap($event)"
+        @htmx:after-request="afterRequest($event)">
         <tr>
           <td class="px-4 py-3">
             <div class="flex items-center gap-2">
-              <button type="button" aria-expanded="false" :aria-expanded="open.toString()" aria-controls="scheduler-wave-{{.DOMID}}" aria-label="Expand Scheduled {{.ScheduledForLabel}} attempts" :aria-label="(open ? 'Collapse' : 'Expand') + ' Scheduled {{.ScheduledForLabel}} attempts'" class="rounded p-1 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:hover:bg-slate-800" @click="open = !open; if (open) load()"><span aria-hidden="true" x-text="open ? '▼' : '▶'">▶</span></button>
+              <button type="button" aria-expanded="false" :aria-expanded="open.toString()" aria-controls="scheduler-wave-{{.DOMID}}" aria-label="Expand Scheduled {{.ScheduledForLabel}} attempts" :aria-label="(open ? 'Collapse' : 'Expand') + ' Scheduled {{.ScheduledForLabel}} attempts'" class="rounded p-1 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:hover:bg-slate-800" @click="toggle()"><span aria-hidden="true" x-text="open ? '▼' : '▶'">▶</span></button>
               <span class="font-medium">Scheduled</span>
             </div>
             <span class="block text-xs text-slate-500">virtual wave</span>
@@ -88,7 +88,7 @@
         </tr>
         <tr x-cloak x-show="open">
           <td colspan="5" class="bg-slate-50 px-4 py-3 dark:bg-slate-950/50">
-            <div id="scheduler-wave-{{.DOMID}}" data-runs-poll-host data-loaded="false" x-ref="attempts" hx-get="{{.URL}}" hx-trigger="load-scheduler-wave{{if .Unresolved}}, every 5s [this.dataset.loaded === 'true' && this.closest('[data-runs-accordion]').dataset.open === 'true']{{end}}" hx-target="this" hx-swap="outerHTML">
+            <div id="scheduler-wave-{{.DOMID}}" data-runs-poll-host data-loaded="false" x-ref="attempts" hx-get="{{.URL}}" hx-trigger="load-scheduler-wave{{if .Unresolved}}, every 5s{{end}}" hx-target="this" hx-swap="outerHTML">
               <p x-cloak x-show="loading" role="status" class="text-sm text-slate-500">Loading scheduler attempts…</p>
               <div x-cloak x-show="failed" role="alert" class="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-100">Could not load scheduler attempts. <button type="button" class="font-semibold underline" @click="load()">Retry</button></div>
               <p x-cloak x-show="refreshFailed" role="status" aria-live="polite" class="mt-2 text-xs text-amber-700 dark:text-amber-300">Refresh failed · Retrying…</p>
@@ -99,14 +99,14 @@
       {{else}}
       {{if eq .Kind "run_all_parent"}}
       <tbody class="border-t border-slate-100 dark:border-slate-800" data-runs-accordion data-open="false" :data-open="open.toString()"
-        x-data="{ open: false, loaded: false, loading: false, failed: false, refreshFailed: false, load() { if (this.loaded || this.loading) return; window.htmx.trigger(this.$refs.children, 'load-run-all-children') } }"
-        @htmx:before-request="if ($event.detail.elt && $event.detail.elt.matches('[data-runs-poll-host]')) { loading = true; if (!loaded) failed = false }"
-        @htmx:after-swap="if ($event.target.matches('[data-runs-poll-host]')) { loading = false; loaded = true; failed = false; refreshFailed = false }"
-        @htmx:after-request="if ($event.detail.elt && $event.detail.elt.matches('[data-runs-poll-host]') && $event.detail.successful !== true) { loading = false; if (loaded) refreshFailed = true; else failed = true }">
+        x-data="runsAccordion('children', 'load-run-all-children')"
+        @htmx:before-request="beforeRequest($event)"
+        @htmx:after-swap="afterSwap($event)"
+        @htmx:after-request="afterRequest($event)">
         <tr>
           <td class="px-4 py-3">
             <div class="flex items-center gap-2">
-              <button type="button" aria-expanded="false" :aria-expanded="open.toString()" aria-controls="run-all-children-{{.ID}}" aria-label="Expand Run All #{{.ID}} children" :aria-label="(open ? 'Collapse' : 'Expand') + ' Run All #{{.ID}} children'" class="rounded p-1 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:hover:bg-slate-800" @click="open = !open; if (open) load()"><span aria-hidden="true" x-text="open ? '▼' : '▶'">▶</span></button>
+              <button type="button" aria-expanded="false" :aria-expanded="open.toString()" aria-controls="run-all-children-{{.ID}}" aria-label="Expand Run All #{{.ID}} children" :aria-label="(open ? 'Collapse' : 'Expand') + ' Run All #{{.ID}} children'" class="rounded p-1 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:hover:bg-slate-800" @click="toggle()"><span aria-hidden="true" x-text="open ? '▼' : '▶'">▶</span></button>
               <a class="font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="/runs/{{.ID}}">#{{.ID}}</a>
             </div>
             <span class="block text-xs text-slate-500">{{.KindLabel}}</span>
@@ -118,7 +118,7 @@
         </tr>
         <tr x-cloak x-show="open">
           <td colspan="5" class="bg-slate-50 px-4 py-3 dark:bg-slate-950/50">
-            <div id="run-all-children-{{.ID}}" data-runs-poll-host data-loaded="false" x-ref="children" hx-get="/runs/{{.ID}}/children" hx-trigger="load-run-all-children{{if not .Terminal}}, every 5s [this.dataset.loaded === 'true' && this.closest('[data-runs-accordion]').dataset.open === 'true']{{end}}" hx-target="this" hx-swap="outerHTML">
+            <div id="run-all-children-{{.ID}}" data-runs-poll-host data-loaded="false" x-ref="children" hx-get="/runs/{{.ID}}/children" hx-trigger="load-run-all-children{{if not .Terminal}}, every 5s{{end}}" hx-target="this" hx-swap="outerHTML">
               <p x-cloak x-show="loading" role="status" class="text-sm text-slate-500">Loading children…</p>
               <div x-cloak x-show="failed" role="alert" class="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-100">Could not load Run All children. <button type="button" class="font-semibold underline" @click="load()">Retry</button></div>
               <p x-cloak x-show="refreshFailed" role="status" aria-live="polite" class="mt-2 text-xs text-amber-700 dark:text-amber-300">Refresh failed · Retrying…</p>

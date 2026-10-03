@@ -15,15 +15,23 @@ import (
 )
 
 type Repository struct {
-	database *sqlx.DB
-	cipher   *Cipher
+	database     *sqlx.DB
+	cipher       *Cipher
+	destinations *DestinationPolicy
 }
 
-func NewRepository(database *sqlx.DB, cipher *Cipher) (*Repository, error) {
+func NewRepository(database *sqlx.DB, cipher *Cipher, policies ...*DestinationPolicy) (*Repository, error) {
 	if database == nil || cipher == nil {
 		return nil, fmt.Errorf("reporting database and cipher are required")
 	}
-	return &Repository{database: database, cipher: cipher}, nil
+	if len(policies) > 1 {
+		return nil, fmt.Errorf("only one report destination policy is supported")
+	}
+	var destinations *DestinationPolicy
+	if len(policies) == 1 {
+		destinations = policies[0]
+	}
+	return &Repository{database: database, cipher: cipher, destinations: destinations}, nil
 }
 
 type DatasourceInput struct {
@@ -54,6 +62,9 @@ func (repository *Repository) FindDatasource(ctx context.Context, id uint64) (Da
 
 func (repository *Repository) CreateDatasource(ctx context.Context, requester securityctx.Requester, input DatasourceInput, now time.Time) (Datasource, error) {
 	input = normalizeDatasourceInput(input)
+	if err := repository.destinations.Validate(ctx, input.Network, input.Host, input.SocketPath); err != nil {
+		return Datasource{}, err
+	}
 	if err := validateDatasourceInput(input, true); err != nil {
 		return Datasource{}, err
 	}
@@ -91,6 +102,9 @@ func (repository *Repository) CreateDatasource(ctx context.Context, requester se
 
 func (repository *Repository) UpdateDatasource(ctx context.Context, requester securityctx.Requester, id, expectedRevision uint64, input DatasourceInput, now time.Time) (Datasource, error) {
 	input = normalizeDatasourceInput(input)
+	if err := repository.destinations.Validate(ctx, input.Network, input.Host, input.SocketPath); err != nil {
+		return Datasource{}, err
+	}
 	if err := validateDatasourceInput(input, false); err != nil {
 		return Datasource{}, err
 	}

@@ -15,9 +15,11 @@ var registerBoundedDriver sync.Once
 var boundedState atomic.Pointer[fakeRawState]
 
 type fakeRawState struct {
-	rowsClosed, connectionsClosed atomic.Int32
-	rows                          int
-	nextResult                    bool
+	rowsClosed, connectionsClosed                                                atomic.Int32
+	rows                                                                         int
+	nextResult                                                                   bool
+	begins, rollbacks                                                            atomic.Int32
+	beginErr, prepareErr, queryErr, rollbackErr, rowsCloseErr, statementCloseErr error
 }
 type fakeDriver struct{}
 type fakeConn struct{ state *fakeRawState }
@@ -34,21 +36,49 @@ func (connection *fakeConn) Prepare(string) (driver.Stmt, error) {
 	return &fakeStmt{state: connection.state}, nil
 }
 func (connection *fakeConn) PrepareContext(context.Context, string) (driver.Stmt, error) {
+	if connection.state.prepareErr != nil {
+		return nil, connection.state.prepareErr
+	}
 	return &fakeStmt{state: connection.state}, nil
 }
-func (connection *fakeConn) Close() error                    { connection.state.connectionsClosed.Add(1); return nil }
+func (connection *fakeConn) Close() error { connection.state.connectionsClosed.Add(1); return nil }
+func (connection *fakeConn) BeginTx(_ context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if !opts.ReadOnly {
+		return nil, errors.New("writable transaction")
+	}
+	connection.state.begins.Add(1)
+	if connection.state.beginErr != nil {
+		return nil, connection.state.beginErr
+	}
+	return fakeTx{}, nil
+}
+func (connection *fakeConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	if query != "ROLLBACK" {
+		return nil, errors.New("unexpected cleanup")
+	}
+	connection.state.rollbacks.Add(1)
+	return driver.RowsAffected(0), connection.state.rollbackErr
+}
+
+type fakeTx struct{}
+
+func (fakeTx) Commit() error                                 { return errors.New("must not commit") }
+func (fakeTx) Rollback() error                               { return nil }
 func (*fakeConn) Begin() (driver.Tx, error)                  { return nil, errors.New("not supported") }
-func (*fakeStmt) Close() error                               { return nil }
+func (statement *fakeStmt) Close() error                     { return statement.state.statementCloseErr }
 func (*fakeStmt) NumInput() int                              { return -1 }
 func (*fakeStmt) Exec([]driver.Value) (driver.Result, error) { return nil, errors.New("not supported") }
 func (statement *fakeStmt) Query([]driver.Value) (driver.Rows, error) {
 	return &fakeRows{state: statement.state}, nil
 }
 func (statement *fakeStmt) QueryContext(context.Context, []driver.NamedValue) (driver.Rows, error) {
+	if statement.state.queryErr != nil {
+		return nil, statement.state.queryErr
+	}
 	return &fakeRows{state: statement.state}, nil
 }
 func (*fakeRows) Columns() []string { return []string{"value"} }
-func (rows *fakeRows) Close() error { rows.state.rowsClosed.Add(1); return nil }
+func (rows *fakeRows) Close() error { rows.state.rowsClosed.Add(1); return rows.state.rowsCloseErr }
 func (rows *fakeRows) Next(destination []driver.Value) error {
 	if rows.read >= rows.state.rows {
 		return io.EOF
@@ -98,6 +128,9 @@ func TestRawEOFClosesRowsAndKeepsConnectionReusable(t *testing.T) {
 	if sink.rows != 2 || state.rowsClosed.Load() != 1 || state.connectionsClosed.Load() != 0 {
 		t.Fatalf("rows=%d rows_close=%d conn_close=%d", sink.rows, state.rowsClosed.Load(), state.connectionsClosed.Load())
 	}
+	if state.begins.Load() != 1 || state.rollbacks.Load() != 1 {
+		t.Fatalf("transaction begins=%d rollbacks=%d", state.begins.Load(), state.rollbacks.Load())
+	}
 	if err := connection.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +139,30 @@ func TestRawEOFClosesRowsAndKeepsConnectionReusable(t *testing.T) {
 	}
 	if state.connectionsClosed.Load() != 1 {
 		t.Fatalf("connection was not returned and closed normally")
+	}
+}
+
+func TestRawTransactionFailuresDiscardPhysicalConnection(t *testing.T) {
+	failure := errors.New("transaction/protocol failure")
+	for _, test := range []struct {
+		name  string
+		state *fakeRawState
+	}{
+		{"read-only begin", &fakeRawState{beginErr: failure}},
+		{"prepare", &fakeRawState{prepareErr: failure}},
+		{"query", &fakeRawState{queryErr: failure}},
+		{"rollback", &fakeRawState{rollbackErr: failure}},
+		{"rows close", &fakeRawState{rowsCloseErr: failure}},
+		{"statement close", &fakeRawState{statementCloseErr: failure}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, connection := fakeDatabase(t, test.state)
+			defer database.Close()
+			err := streamRaw(context.Background(), connection, "SELECT 1", nil, &testSink{})
+			if !errors.Is(err, failure) || test.state.connectionsClosed.Load() != 1 {
+				t.Fatalf("err=%v discarded=%d", err, test.state.connectionsClosed.Load())
+			}
+		})
 	}
 }
 

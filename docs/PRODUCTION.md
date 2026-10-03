@@ -18,6 +18,11 @@ ALLOW_REGISTRATION=false
 SESSION_COOKIE_NAME=admin_session
 SESSION_LIFETIME=24h
 SESSION_REMEMBER_LIFETIME=720h
+SESSION_IDLE_TIMEOUT=2h
+AUTH_MAX_CONCURRENT_PASSWORD_HASHES=4
+AUTH_LOGIN_FAILURE_WINDOW=15m
+AUTH_LOGIN_MAX_FAILURES=5
+AUTH_LOGIN_LOCKOUT=15m
 SESSION_SECURE=true
 
 DB_NETWORK=tcp
@@ -33,6 +38,10 @@ FINCLOUD_INSECURE_SKIP_VERIFY=true
 
 APP_SECRET_ENCRYPTION_KEY=replace-with-standard-base64-32-byte-key
 REPORT_EXPORT_DIR=/var/lib/new-dwh/report-exports
+# Replace examples with the actual reporting destinations. Narrow CIDRs preferred.
+REPORT_DATASOURCE_ALLOWED_TCP_CIDRS=10.20.30.40/32
+REPORT_DATASOURCE_ALLOWED_HOSTS=
+REPORT_DATASOURCE_ALLOWED_UNIX_SOCKETS=/var/run/mysqld/mysqld.sock
 CUSTOM_DATASET_DIR=/var/lib/new-dwh/custom-datasets
 ```
 
@@ -75,9 +84,16 @@ Confirm `CURRENT_USER()` is `dwhadmin@localhost` and the selected database is `d
 
 ### Report datasource Unix sockets
 
-After migration `20260929120000_add_report_datasource_unix_socket.sql`, an administrator can create a report datasource with Connection **Unix socket**, Socket path `/var/run/mysqld/mysqld.sock`, Database `dwh`, and Username `dwhadmin`. The form hides and disables TCP host, port, password, and TLS controls. Server validation requires an absolute socket path, database, and username. Unix connections store no password ciphertext and never decrypt an existing TCP credential. Password input or an enabled TLS policy is rejected; omitted TLS means disabled. No TCP fallback occurs.
+After migration `20260929120000_add_report_datasource_unix_socket.sql`, an administrator can create a report datasource with Connection **Unix socket**, Socket path `/var/run/mysqld/mysqld.sock`, Database `dwh`, and Username `dwhreport`. The form hides and disables TCP host, port, password, and TLS controls. Server validation requires an absolute socket path, database, and username. Unix connections store no password ciphertext and never decrypt an existing TCP credential. Password input or an enabled TLS policy is rejected; omitted TLS means disabled. No TCP fallback occurs.
 
-Every datasource connection runs as the same application process. With `User=dwhadmin` and `Group=dwhadmin`, the datasource above can authenticate as `'dwhadmin'@'localhost'` through `auth_socket`, using the same database-scoped grants shown above. A different MySQL socket account whose OS identity does not match must fail normally. The application never uses sudo, setuid, shell commands, or per-datasource OS impersonation.
+Every datasource connection runs as the same application process. Do not reuse the primary `dwhadmin` runtime/migration account: its write and schema privileges are inappropriate for reporting. Provision a dedicated SELECT-only database account mapped by the server's `auth_socket` configuration to the application's OS identity:
+
+```sql
+CREATE USER 'dwhreport'@'localhost' IDENTIFIED WITH auth_socket AS 'dwhadmin';
+GRANT SELECT ON dwh.* TO 'dwhreport'@'localhost';
+```
+
+Verify this mapping on the deployed MySQL server from a shell running as `dwhadmin`, using `--user=dwhreport`, before activation. Do not grant write, schema, FILE, or dangerous routine privileges. Socket authentication can otherwise inherit strong local privileges depending on server configuration. If the configured plugin does not support the required read-only identity mapping, use a separately provisioned SELECT-only TCP account. A socket account whose configured OS identity does not match must fail normally. The application never uses sudo, setuid, shell commands, or per-datasource OS impersonation.
 
 Use **Test connection** before activating the datasource. This action opens the actual configured socket and executes `SELECT 1` through the report pool. User-facing failures remain generic and contain no credentials or DSN. Test audits record only the outcome. Updates record changed connection field names and credential/connection change flags without secret values. Existing TCP TLS policy, encrypted passwords, connection bounds, and pool limits remain unchanged. Leaving a TCP edit password blank preserves it. Switching TCP to Unix removes it; switching Unix to TCP requires a new password. Each update increments the revision, so cached pools refresh even across application instances.
 
@@ -204,3 +220,17 @@ WHERE s.enabled = TRUE
 ```
 
 After the UI and query both show zero configuration-required enabled sources, bulk-enable exactly the schedules recorded before the cutover, remove the ingress block, and confirm scheduler, direct, Run All, and reporting-v1 access.
+
+## Reporting and authentication security
+
+Production report datasource destinations fail closed when all destination allowlists are empty. Configure the three `REPORT_DATASOURCE_ALLOWED_*` variables before restarting. Existing stored datasources are validated again, and every new physical connection resolves and checks its destination before dialing an already validated IP. An exact hostname alone permits its public addresses; private, loopback, and link-local destinations require an explicitly permitted CIDR or literal IP. When CIDRs are configured, every resolved address must match a CIDR or exact literal IP. Socket paths must be absolute, already cleaned, and exactly allowlisted; traversal and equivalent alternate spelling are rejected. Use narrowly scoped CIDRs and protect allowlisted socket paths against replacement or symlinks by untrusted local users.
+
+Every production reporting account must be SELECT-only, with no INSERT/UPDATE/DELETE, CREATE/ALTER/DROP, FILE, or privilege to invoke dangerous stored routines. Use a separate reporting account from the application runtime/migration accounts. Unix socket authentication can inherit strong local privileges depending on MySQL configuration; the socket's database account must also be read-only. SQL validation and READ ONLY transactions are defense in depth, not substitutes for these grants. See [Reporting](REPORTING.md).
+
+`SESSION_IDLE_TIMEOUT` defaults to `2h`; absolute session lifetimes still apply, including remember-me sessions. Session activity is touched periodically, so expiry is measured from the last persisted activity (up to five minutes before the last request with default settings). Idle sessions are revoked when encountered. Password reset and deactivation still revoke sessions.
+
+`AUTH_MAX_CONCURRENT_PASSWORD_HASHES` defaults to `4`. Requests wait within their context; synchronous Argon2 work keeps its slot until completion even after cancellation. Argon2 parameters and unknown-user dummy verification remain unchanged. Failed usernames are normalized and locked after `AUTH_LOGIN_MAX_FAILURES` (default `5`) within `AUTH_LOGIN_FAILURE_WINDOW` (default `15m`) for `AUTH_LOGIN_LOCKOUT` (default `15m`). Success resets the state. Failed-login audit records contain only the attempted normalized username and event time, never account existence, passwords, hashes, or tokens.
+
+Throttling is process-local and resets on restart. Its map holds at most 10,000 usernames; saturation rejects new usernames until cleanup frees entries, preserving existing lockouts. Continue applying per-IP limits at a trusted reverse proxy and aggregate security events across replicas. The application does not trust X-Forwarded-For for security decisions. All new durations and integer bounds must be positive.
+
+Rebuild frontend assets (`npm ci && npm run build`) and deploy the updated binary and static assets together. CSP requires the official Alpine CSP build; inline scripts and eval are disabled. The narrow `style-src-attr 'unsafe-inline'` exception supports Alpine visibility/transitions and context-menu positioning; stylesheet elements remain self-hosted. No schema migration is required for these changes.

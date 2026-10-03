@@ -16,26 +16,7 @@
         </section>
         {{end}}
     </nav>
-    <script>
-    (() => {
-        const root = document.documentElement;
-        try {
-            const disclosures = window.__sidebarDisclosures || {};
-            document.querySelectorAll("#admin-sidebar [data-navigation-disclosure]").forEach((item) => {
-                const active = item.dataset.navigationActive === "true";
-                const manualOpen = disclosures[item.dataset.navigationKey] === true;
-                const open = active || manualOpen;
-                item.dataset.navigationManualOpen = String(manualOpen);
-                const button = item.querySelector("[data-navigation-button]");
-                const panel = item.querySelector("[data-navigation-panel]");
-                if (button) button.setAttribute("aria-expanded", String(open));
-                if (panel) panel.style.display = open ? "" : "none";
-            });
-        } finally {
-            root.removeAttribute("data-sidebar-disclosure-pending");
-        }
-    })();
-    </script>
+    <script src="/static/js/sidebar-init.js"></script>
 
     <div class="sidebar-expanded-only border-t border-slate-200 p-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
         BANK DP TASPEN &copy; 2026
@@ -50,7 +31,7 @@
         {{if .Children}}
         <button type="button" data-navigation-button
             class="{{if eq .Depth 1}}sidebar-top-level{{end}} flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition {{if .Active}}bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300{{else}}text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white{{end}}"
-            {{if eq .Depth 1}}@click="if (sidebarCollapsed) { expandSidebar(); openDisclosure() } else { toggleDisclosure() }"{{else}}@click="toggleDisclosure()"{{end}}
+            {{if eq .Depth 1}}@click="togglePrimary()"{{else}}@click="toggleDisclosure()"{{end}}
             :aria-expanded="open.toString()" aria-expanded="{{if .Open}}true{{else}}false{{end}}" aria-controls="nav-children-{{.Key}}">
             {{if .Icon}}<i data-lucide="{{.Icon}}" class="size-5 shrink-0" aria-hidden="true"></i>{{end}}
             <span class="sidebar-expanded-only min-w-0 flex-1 truncate">{{.Label}}</span>

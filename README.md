@@ -135,7 +135,7 @@ See [Adding a Feature](docs/ADDING_A_FEATURE.md) for the complete migration, SQL
 
 All state changes are POST-only and protected by `http.CrossOriginProtection`. Missing application routes return a themed real `404`; unexpected failures return a generic `500` with a request ID. Panic values and stacks are logged, never rendered. Authenticated `403` pages retain the impersonation banner and Return to Admin action.
 
-Sensitive HTML and HTMX fragments use `Cache-Control: no-store`; static assets do not. Baseline headers deny framing/sniffing and restrict referrers, browser capabilities, form targets, base URIs, and objects. The CSP intentionally omits `script-src` so the current Alpine build remains compatible.
+Sensitive HTML and HTMX fragments use `Cache-Control: no-store`; static assets do not. Headers deny framing/sniffing and restrict referrers and browser capabilities. CSP restricts default, script, stylesheet, image, font, and connection sources to self-hosted assets (data images are allowed). Inline scripts and eval are disabled using Alpine's CSP build and delegated HTMX handlers. Only style attributes have an inline exception for visibility/transitions and positioned menus.
 
 HTMX is progressive enhancement: ordinary links/forms and server-rendered POST/redirect flows remain authoritative. Alpine handles theme/sidebar state, toasts, and the accessible destructive confirmation dialog. Theme and desktop sidebar preferences use `localStorage`; mobile drawer state is transient.
 
@@ -156,7 +156,7 @@ See [Production operation](docs/PRODUCTION.md) and [Production ingestion validat
 - protect environment secrets and database credentials;
 - operate database backups and migrations explicitly.
 
-The starter deliberately has no in-process login limiter: it cannot safely infer client identity behind arbitrary proxies, and an attacker-keyed in-memory map would be unsafe across replicas.
+The application bounds Argon2 verification concurrency and keeps a bounded, process-local failed-login throttle by normalized username. Both existing and unknown usernames return generic failures; unknown users still perform dummy verification outside lockout. Configure `AUTH_MAX_CONCURRENT_PASSWORD_HASHES`, `AUTH_LOGIN_FAILURE_WINDOW`, `AUTH_LOGIN_MAX_FAILURES`, and `AUTH_LOGIN_LOCKOUT`. Per-IP limits remain an edge responsibility. `SESSION_IDLE_TIMEOUT` defaults to `2h` and applies to remember-me sessions alongside absolute expiry. See [Production operation](docs/PRODUCTION.md) for deployment settings and limitations.
 
 ## Testing
 

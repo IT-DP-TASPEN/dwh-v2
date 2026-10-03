@@ -197,7 +197,7 @@ func TestReportOrganizationRendersAuthoritativeRenameError(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := recorder.Body.String()
-	for _, want := range []string{`x-data="{ editing: true }"`, `value="  Deposito &amp; Baru  "`, `role="alert"`, "Folder name already exists."} {
+	for _, want := range []string{`data-editing="true" x-data="folderRename"`, `value="  Deposito &amp; Baru  "`, `role="alert"`, "Folder name already exists."} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("rename error view missing %q", want)
 		}

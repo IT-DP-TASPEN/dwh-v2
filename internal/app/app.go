@@ -117,11 +117,15 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("initialize ingestion scheduler: %w", err)
 	}
 	reportCipher := reporting.NewCipher(applicationConfig.Reporting.MasterKey)
-	reportingRepository, err := reporting.NewRepository(databaseConnection, reportCipher)
+	reportDestinations, err := reporting.NewDestinationPolicy(applicationConfig.Reporting.AllowedTCPCIDRs, applicationConfig.Reporting.AllowedHosts, applicationConfig.Reporting.AllowedUnixSockets)
+	if err != nil {
+		return fmt.Errorf("initialize report destination policy: %w", err)
+	}
+	reportingRepository, err := reporting.NewRepository(databaseConnection, reportCipher, reportDestinations)
 	if err != nil {
 		return fmt.Errorf("initialize reporting repository: %w", err)
 	}
-	reportingPools, err := reporting.NewPoolManager(reportCipher, reporting.PoolConfig{ConnectTimeout: applicationConfig.Reporting.ConnectTimeout, MySQLMaxPacketBytes: applicationConfig.Reporting.MySQLMaxPacketBytes})
+	reportingPools, err := reporting.NewPoolManager(reportCipher, reporting.PoolConfig{Destinations: reportDestinations, ConnectTimeout: applicationConfig.Reporting.ConnectTimeout, MySQLMaxPacketBytes: applicationConfig.Reporting.MySQLMaxPacketBytes})
 	if err != nil {
 		return fmt.Errorf("initialize reporting pools: %w", err)
 	}
@@ -174,6 +178,7 @@ func Run(ctx context.Context) error {
 		applicationConfig.Session.Lifetime,
 		applicationConfig.Session.RememberLifetime,
 		logger,
+		browserauth.SecurityConfig{IdleTimeout: applicationConfig.Session.IdleTimeout, MaxConcurrentPasswordHashes: applicationConfig.Auth.MaxConcurrentPasswordHashes, LoginFailureWindow: applicationConfig.Auth.LoginFailureWindow, LoginMaxFailures: applicationConfig.Auth.LoginMaxFailures, LoginLockout: applicationConfig.Auth.LoginLockout},
 	)
 	if err != nil {
 		return fmt.Errorf("initialize browser authentication: %w", err)

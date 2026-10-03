@@ -2,6 +2,7 @@ package browserauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -308,6 +309,26 @@ func TestAuthenticationAuditAttributionAndBestEffortFailure(t *testing.T) {
 		events = append(events, event)
 		return errors.New("audit unavailable")
 	}
+	t.Run("failed login has no account identity or secrets", func(t *testing.T) {
+		events = nil
+		handler := newTestHTTPWithAudit(t, &fakeHTTPService{loginErr: ErrInvalidCredentials}, false, appendAudit)
+		form := url.Values{"username": {" UNKNOWN "}, "password": {"never-record-this-password"}}
+		request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response := httptest.NewRecorder()
+		handler.Login(response, request)
+		if response.Code != http.StatusUnprocessableEntity || len(events) != 1 {
+			t.Fatalf("status=%d events=%v", response.Code, events)
+		}
+		event := events[0]
+		if event.Action != audit.ActionAuthLoginFailed || event.Attribution.Actor != nil || event.Attribution.Effective != nil || event.ResourceID != 0 || event.Resource != "" {
+			t.Fatalf("unsafe failure attribution: %+v", event)
+		}
+		encoded, _ := json.Marshal(event.Metadata)
+		if string(encoded) != `{"username":"unknown"}` {
+			t.Fatalf("unexpected failure metadata: %s", encoded)
+		}
+	})
 
 	t.Run("login uses logged in user", func(t *testing.T) {
 		events = nil

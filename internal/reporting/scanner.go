@@ -37,8 +37,11 @@ type optionalBlock struct {
 }
 
 type statementScan struct {
-	Placeholders   []Placeholder
-	OptionalBlocks []optionalBlock
+	Placeholders      []Placeholder
+	OptionalBlocks    []optionalBlock
+	Tokens            []string
+	QuotedNames       map[int]string
+	ExecutableComment bool
 }
 
 func ScanPlaceholders(statement string, mode SQLMode) ([]Placeholder, error) {
@@ -57,13 +60,27 @@ func scanStatement(statement string, mode SQLMode) (statementScan, error) {
 		blockComment
 	)
 	state := normal
-	scan := statementScan{Placeholders: make([]Placeholder, 0), OptionalBlocks: make([]optionalBlock, 0)}
+	quotedStart := 0
+	scan := statementScan{QuotedNames: make(map[int]string), Placeholders: make([]Placeholder, 0), OptionalBlocks: make([]optionalBlock, 0)}
 	var openBlock *optionalBlock
 	blockHasSQL := false
 	for index := 0; index < len(statement); {
 		character := statement[index]
 		switch state {
 		case normal:
+			// Keep policy tokens in the same lexer as parameter binding.
+			if isIdentifierByte(character) {
+				end := index + 1
+				for end < len(statement) && isIdentifierByte(statement[end]) {
+					end++
+				}
+				scan.Tokens = append(scan.Tokens, strings.ToUpper(statement[index:end]))
+				if openBlock != nil {
+					blockHasSQL = true
+				}
+				index = end
+				continue
+			}
 			if index+1 < len(statement) {
 				switch statement[index : index+2] {
 				case "[[":
@@ -90,24 +107,29 @@ func scanStatement(statement string, mode SQLMode) (statementScan, error) {
 			}
 			switch character {
 			case '\'':
+				scan.Tokens = append(scan.Tokens, "<literal>")
 				if openBlock != nil {
 					blockHasSQL = true
 				}
 				state, index = singleString, index+1
 			case '"':
+				scan.Tokens = append(scan.Tokens, "<quoted>")
 				if openBlock != nil {
 					blockHasSQL = true
 				}
 				if mode.ANSIQuotes {
+					quotedStart = index
 					state = doubleIdentifier
 				} else {
 					state = doubleString
 				}
 				index++
 			case '`':
+				scan.Tokens = append(scan.Tokens, "<quoted>")
 				if openBlock != nil {
 					blockHasSQL = true
 				}
+				quotedStart = index
 				state, index = backtickIdentifier, index+1
 			case '#':
 				state, index = lineComment, index+1
@@ -122,6 +144,12 @@ func scanStatement(statement string, mode SQLMode) (statementScan, error) {
 				}
 			case '/':
 				if index+1 < len(statement) && statement[index+1] == '*' {
+					if index+2 < len(statement) && statement[index+2] == '!' {
+						scan.ExecutableComment = true
+					}
+					if index+3 < len(statement) && statement[index+2:index+4] == "M!" {
+						scan.ExecutableComment = true
+					}
 					state, index = blockComment, index+2
 				} else {
 					if openBlock != nil {
@@ -130,6 +158,11 @@ func scanStatement(statement string, mode SQLMode) (statementScan, error) {
 					index++
 				}
 			case ':':
+				if index+1 < len(statement) && statement[index+1] == '=' {
+					scan.Tokens = append(scan.Tokens, ":=")
+					index += 2
+					continue
+				}
 				end := index + 1
 				for end < len(statement) && isIdentifierByte(statement[end]) {
 					end++
@@ -142,6 +175,7 @@ func scanStatement(statement string, mode SQLMode) (statementScan, error) {
 				if !parameterKeyPattern.MatchString(key) {
 					return statementScan{}, fmt.Errorf("%w: invalid placeholder :%s", ErrInvalid, key)
 				}
+				scan.Tokens = append(scan.Tokens, "?")
 				placeholder := Placeholder{Key: key, Start: index, End: end}
 				scan.Placeholders = append(scan.Placeholders, placeholder)
 				if openBlock != nil {
@@ -150,6 +184,9 @@ func scanStatement(statement string, mode SQLMode) (statementScan, error) {
 				}
 				index = end
 			default:
+				if !isCommentWhitespace(character) {
+					scan.Tokens = append(scan.Tokens, string(character))
+				}
 				if openBlock != nil && !isCommentWhitespace(character) {
 					blockHasSQL = true
 				}
@@ -181,6 +218,7 @@ func scanStatement(statement string, mode SQLMode) (statementScan, error) {
 					index += 2
 					continue
 				}
+				scan.QuotedNames[len(scan.Tokens)-1] = strings.ToUpper(strings.ReplaceAll(statement[quotedStart+1:index], string([]byte{quote, quote}), string(quote)))
 				state, index = normal, index+1
 			} else {
 				index++

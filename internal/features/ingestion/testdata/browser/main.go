@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 	authprofilesfeature "github.com/ibldzn/go-admin/internal/features/fincloudauthprofiles"
 	ingestionfeature "github.com/ibldzn/go-admin/internal/features/ingestion"
 	reportsfeature "github.com/ibldzn/go-admin/internal/features/reports"
+	reporttemplatesfeature "github.com/ibldzn/go-admin/internal/features/reporttemplates"
 	schedulesfeature "github.com/ibldzn/go-admin/internal/features/schedules"
 	sourcesfeature "github.com/ibldzn/go-admin/internal/features/sources"
 	"github.com/ibldzn/go-admin/internal/fincloud"
@@ -31,6 +33,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/render"
 	"github.com/ibldzn/go-admin/internal/reportexport"
 	"github.com/ibldzn/go-admin/internal/reporting"
+	"github.com/ibldzn/go-admin/internal/server"
 	webfiles "github.com/ibldzn/go-admin/web"
 )
 
@@ -82,6 +85,18 @@ func main() {
 	mux.HandleFunc("/sources/", fixture.sourceMutation)
 	mux.HandleFunc("/reports", fixture.reportsPage)
 	mux.HandleFunc("/reports/", fixture.reportMutation)
+	mux.HandleFunc("/csp/report-template", func(writer http.ResponseWriter, request *http.Request) {
+		data := reporttemplatesfeature.FormData{ID: 9, Name: "CSP template", DatasourceID: "7", Datasources: []reporting.Datasource{{ID: 7, Name: "Read only"}}, ParametersJSON: `[{"key":"branch","label":"Branch","type":"single_option","required":true,"default":"001","options":[{"value":"001","label":"Main"}]}]`, TestValuesJSON: `{}`, Errors: map[string]string{}, TestResult: &reporting.InteractiveResult{}, TestResultJSON: template.JS(`{"columns":[],"rows":[]}`)}
+		fixture.renderAdmin(writer, request, "features/reporttemplates/form", "Template", "/report-templates", data)
+	})
+	mux.HandleFunc("/csp/report-result", func(writer http.ResponseWriter, request *http.Request) {
+		data := reportsfeature.ShowData{Report: reporting.Template{ID: 9, Name: "CSP report"}, Parameters: []reportsfeature.ParameterView{{Value: reporting.Parameter{Key: "branch", Label: "Branch", Type: reporting.ParameterSingleOption, OptionSource: reporting.OptionSourceDynamic, Required: true}}}, ParametersJSON: template.JS(`[{"key":"branch","type":"single_option","option_source":"dynamic","required":true,"default":"001","current":[],"present":false}]`), Errors: map[string]string{}, CanExecute: true, CanLoadOptions: true, Result: &reporting.InteractiveResult{}, ResultJSON: template.JS(`{"columns":[],"rows":[]}`)}
+		fixture.renderAdmin(writer, request, "features/reports/show", "Report", "/reports", data)
+	})
+	mux.HandleFunc("/reports/9/parameters/branch/options", func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"state":"ready","dependencies":[],"options":[{"value":"001","label":"Main"}]}`))
+	})
 	mux.HandleFunc("/exports", fixture.exportsPage)
 	mux.HandleFunc("/exports/", fixture.exportObject)
 	mux.HandleFunc("/custom-datasets", fixture.customDatasetsPage)
@@ -94,7 +109,7 @@ func main() {
 		fixture.renderAdmin(writer, request, "features/datasources/form", "Datasource", "/datasources", data)
 	})
 	log.Printf("Run Details browser fixture listening on %s", address)
-	log.Fatal(http.ListenAndServe(address, mux))
+	log.Fatal(http.ListenAndServe(address, server.SecurityHeaders(mux)))
 }
 
 func (fixture *fixture) dashboardPage(writer http.ResponseWriter, request *http.Request) {

@@ -43,3 +43,8 @@ html[data-mobile-sidebar-open="true"] .admin-sidebar {
     padding-inline: 0.75rem;
   }
 }
+
+html[data-sidebar-disclosure-pending="true"] #admin-sidebar nav { visibility: hidden; }
+
+.htmx-indicator { opacity: 0; }
+.htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }

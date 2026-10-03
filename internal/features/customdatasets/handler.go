@@ -177,7 +177,9 @@ func (handler *Handler) Configure(writer http.ResponseWriter, request *http.Requ
 		handler.admin.NotFound(writer, request)
 		return
 	}
-	upload, err := handler.repository.FindUpload(request.Context(), uploadID)
+	datasetID, _ := strconv.ParseUint(request.URL.Query().Get("dataset_id"), 10, 64)
+	principal, _ := browserauth.CurrentPrincipal(request.Context())
+	upload, err := handler.repository.FindUploadForRequester(request.Context(), principal.SecurityContext(), uploadID, datasetID)
 	if err != nil {
 		handler.admin.NotFound(writer, request)
 		return
@@ -189,8 +191,8 @@ func (handler *Handler) Configure(writer http.ResponseWriter, request *http.Requ
 	if mode := customdataset.ImportMode(request.URL.Query().Get("mode")); mode == customdataset.ModeAppend {
 		data.Mode = mode
 	}
-	if id, _ := strconv.ParseUint(request.URL.Query().Get("dataset_id"), 10, 64); id != 0 {
-		dataset, findErr := handler.repository.Find(request.Context(), id)
+	if datasetID != 0 {
+		dataset, findErr := handler.repository.Find(request.Context(), datasetID)
 		if findErr != nil || dataset.Status == customdataset.DatasetArchived {
 			handler.admin.NotFound(writer, request)
 			return
@@ -265,9 +267,10 @@ func (handler *Handler) Submit(writer http.ResponseWriter, request *http.Request
 	header, _ := strconv.ParseUint(request.PostFormValue("header_record"), 10, 64)
 	delimiter := customdataset.Delimiter(request.PostFormValue("delimiter"))
 	mode := customdataset.ImportMode(request.PostFormValue("mode"))
-	upload, err := handler.repository.FindUpload(request.Context(), uploadID)
+	principal, _ := browserauth.CurrentPrincipal(request.Context())
+	upload, err := handler.repository.FindUploadForRequester(request.Context(), principal.SecurityContext(), uploadID, datasetID)
 	if err != nil {
-		http.Error(writer, "Upload not found.", http.StatusUnprocessableEntity)
+		handler.admin.NotFound(writer, request)
 		return
 	}
 	file, err := handler.storage.Open(upload.StorageKey)
@@ -327,9 +330,12 @@ func (handler *Handler) Submit(writer http.ResponseWriter, request *http.Request
 	} else {
 		mode = customdataset.ModeReplace
 	}
-	principal, _ := browserauth.CurrentPrincipal(request.Context())
 	created, _, err := handler.repository.Submit(request.Context(), principal.SecurityContext(), customdataset.Submission{Name: request.PostFormValue("name"), Description: request.PostFormValue("description"), DatasetID: datasetID, DatasetRevision: revision, UploadID: uploadID, Delimiter: delimiter, HeaderRecordNumber: header, Mode: mode, Columns: columns}, time.Now().UTC())
 	if err != nil {
+		if errors.Is(err, customdataset.ErrNotFound) {
+			handler.admin.NotFound(writer, request)
+			return
+		}
 		http.Error(writer, publicError(err), http.StatusUnprocessableEntity)
 		return
 	}

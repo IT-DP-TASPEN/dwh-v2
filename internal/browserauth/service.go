@@ -53,6 +53,9 @@ type Service struct {
 	verifyPassword   func(string, string) (bool, error)
 	generateToken    func() (string, error)
 	logger           *slog.Logger
+	security         SecurityConfig
+	passwordSlots    chan struct{}
+	failures         loginFailures
 }
 
 type LoginInput struct {
@@ -123,9 +126,20 @@ func NewService(
 	lifetime time.Duration,
 	rememberLifetime time.Duration,
 	logger *slog.Logger,
+	options ...SecurityConfig,
 ) (*Service, error) {
 	if lifetime <= 0 || rememberLifetime <= 0 {
 		return nil, fmt.Errorf("session lifetimes must be positive")
+	}
+	security := SecurityConfig{IdleTimeout: 2 * time.Hour, MaxConcurrentPasswordHashes: 4, LoginFailureWindow: 15 * time.Minute, LoginMaxFailures: 5, LoginLockout: 15 * time.Minute}
+	if len(options) > 1 {
+		return nil, fmt.Errorf("only one authentication security configuration is supported")
+	}
+	if len(options) == 1 {
+		security = options[0]
+	}
+	if security.IdleTimeout <= 0 || security.MaxConcurrentPasswordHashes <= 0 || security.LoginFailureWindow <= 0 || security.LoginMaxFailures <= 0 || security.LoginLockout <= 0 {
+		return nil, fmt.Errorf("authentication security bounds must be positive")
 	}
 	dummyHash, err := auth.HashPassword("dummy authentication password")
 	if err != nil {
@@ -135,6 +149,9 @@ func NewService(
 		logger = slog.Default()
 	}
 	return &Service{
+		security:         security,
+		passwordSlots:    make(chan struct{}, security.MaxConcurrentPasswordHashes),
+		failures:         loginFailures{entries: make(map[string]loginFailure), window: security.LoginFailureWindow, max: security.LoginMaxFailures, lockout: security.LoginLockout},
 		users:            users,
 		roles:            roles,
 		sessions:         sessions,
@@ -147,15 +164,23 @@ func NewService(
 	}, nil
 }
 
-func (s *Service) Login(ctx context.Context, input LoginInput, now time.Time) (LoginResult, error) {
+func (s *Service) Login(ctx context.Context, input LoginInput, now time.Time) (result LoginResult, loginErr error) {
 	input.Username = user.NormalizeUsername(input.Username)
 	if err := user.ValidateUsername(input.Username); err != nil || input.Password == "" || len(input.Password) > auth.MaxPasswordBytes {
 		return LoginResult{}, ErrInvalidCredentials
 	}
 
+	if s.failures.blocked(input.Username, now) {
+		return LoginResult{}, ErrInvalidCredentials
+	}
+	defer func() {
+		if errors.Is(loginErr, ErrInvalidCredentials) {
+			s.failures.fail(input.Username, now)
+		}
+	}()
 	found, err := s.users.FindByUsername(ctx, input.Username)
 	if errors.Is(err, user.ErrNotFound) {
-		if _, verifyErr := s.verifyPassword(input.Password, s.dummyHash); verifyErr != nil {
+		if _, verifyErr := s.verifyBounded(ctx, input.Username, input.Password, s.dummyHash, now); verifyErr != nil {
 			return LoginResult{}, fmt.Errorf("verify dummy password: %w", verifyErr)
 		}
 		return LoginResult{}, ErrInvalidCredentials
@@ -164,7 +189,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput, now time.Time) (L
 		return LoginResult{}, fmt.Errorf("find login user: %w", err)
 	}
 
-	valid, err := s.verifyPassword(input.Password, found.PasswordHash)
+	valid, err := s.verifyBounded(ctx, input.Username, input.Password, found.PasswordHash, now)
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("verify password: %w", err)
 	}
@@ -172,6 +197,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput, now time.Time) (L
 		return LoginResult{}, ErrInvalidCredentials
 	}
 
+	s.failures.clear(input.Username)
 	rawToken, err := s.generateToken()
 	if err != nil {
 		return LoginResult{}, err
@@ -240,6 +266,9 @@ func (s *Service) ResolveSession(ctx context.Context, tokenHash [32]byte, now ti
 		return Principal{}, fmt.Errorf("find browser session: %w", err)
 	}
 
+	if !session.ExpiresAt.After(now) || !session.LastSeenAt.Add(s.security.IdleTimeout).After(now) {
+		return Principal{}, s.revokeUnauthenticated(ctx, tokenHash)
+	}
 	actor, found, err := s.findIdentity(ctx, session.UserID)
 	if err != nil {
 		return Principal{}, fmt.Errorf("find session actor: %w", err)
@@ -269,7 +298,7 @@ func (s *Service) ResolveSession(ctx context.Context, tokenHash [32]byte, now ti
 		}
 		permissions = access.NewPermissionSet(keys)
 	}
-	if now.Sub(session.LastSeenAt) >= LastSeenTouchInterval {
+	if now.Sub(session.LastSeenAt) >= min(LastSeenTouchInterval, s.security.IdleTimeout/2) {
 		if err := s.sessions.UpdateLastSeenAt(ctx, session.ID, now); err != nil {
 			s.logger.WarnContext(ctx, "update session activity", "session_id", session.ID, "error", err)
 		}

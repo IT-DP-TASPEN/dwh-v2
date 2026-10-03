@@ -70,6 +70,26 @@ func (repository *Repository) FindUpload(ctx context.Context, id uint64) (Upload
 	return upload, nil
 }
 
+// FindUploadForRequester enforces pending-upload privacy and retained retry association.
+// FindUpload is reserved for internal workers that already hold an import claim.
+func (repository *Repository) FindUploadForRequester(ctx context.Context, requester securityctx.Requester, id, datasetID uint64) (Upload, error) {
+	if requester.Effective.UserID == 0 {
+		return Upload{}, ErrNotFound
+	}
+	var upload Upload
+	if err := repository.db.GetContext(ctx, &upload, `SELECT u.id,u.storage_key,u.original_filename,u.byte_size,u.sha256,u.status,u.revision,u.created_by_user_id,u.retained_at,u.expires_at,u.created_at
+		FROM custom_dataset_uploads u WHERE u.id=? AND (
+			(u.status='uploaded' AND u.created_by_user_id=? AND u.expires_at>UTC_TIMESTAMP(6))
+			OR (u.status='retained' AND EXISTS (
+				SELECT 1 FROM custom_dataset_imports i JOIN custom_datasets d ON d.id=i.dataset_id
+				WHERE i.upload_id=u.id AND i.dataset_id=? AND d.status='provisioning'
+			))
+		)`, id, requester.Effective.UserID, datasetID); err != nil {
+		return Upload{}, notFound(err)
+	}
+	return upload, nil
+}
+
 func (repository *Repository) ExpiredUploads(ctx context.Context) ([]Upload, error) {
 	rows := make([]Upload, 0)
 	err := repository.db.SelectContext(ctx, &rows, `SELECT id,storage_key,original_filename,byte_size,sha256,status,revision,created_by_user_id,retained_at,expires_at,created_at FROM custom_dataset_uploads WHERE status='uploaded' AND expires_at<=UTC_TIMESTAMP(6) ORDER BY id`)
@@ -168,6 +188,9 @@ func (repository *Repository) Submit(ctx context.Context, requester securityctx.
 	if err := validateSubmission(input); err != nil {
 		return Dataset{}, Import{}, err
 	}
+	if requester.Effective.UserID == 0 {
+		return Dataset{}, Import{}, ErrNotFound
+	}
 	tx, err := repository.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return Dataset{}, Import{}, err
@@ -240,20 +263,25 @@ func (repository *Repository) Submit(ctx context.Context, requester securityctx.
 		}
 	}
 
-	var uploadStatus string
-	if err := tx.GetContext(ctx, &uploadStatus, `SELECT status FROM custom_dataset_uploads WHERE id=? FOR UPDATE`, input.UploadID); err != nil {
-		return Dataset{}, Import{}, fmt.Errorf("%w: upload is unavailable", ErrInvalid)
+	var upload Upload
+	if err := tx.GetContext(ctx, &upload, `SELECT status,created_by_user_id,expires_at FROM custom_dataset_uploads WHERE id=? FOR UPDATE`, input.UploadID); err != nil {
+		return Dataset{}, Import{}, notFound(err)
 	}
-	if uploadStatus == "expired" || (created || dataset.Status == DatasetActive) && uploadStatus != "uploaded" {
-		return Dataset{}, Import{}, fmt.Errorf("%w: active and new datasets require a new upload", ErrInvalid)
+	if upload.Status == "uploaded" {
+		// Ownership is checked under the same row lock used to retain the upload.
+		if upload.CreatedByUserID != requester.Effective.UserID || upload.ExpiresAt == nil || !upload.ExpiresAt.After(now) {
+			return Dataset{}, Import{}, ErrNotFound
+		}
+	} else if upload.Status != "retained" || created || dataset.Status != DatasetProvisioning {
+		return Dataset{}, Import{}, ErrNotFound
 	}
-	if !created && dataset.Status == DatasetProvisioning && uploadStatus == "retained" {
+	if upload.Status == "retained" {
 		var associated int
 		if err := tx.GetContext(ctx, &associated, `SELECT COUNT(*) FROM custom_dataset_imports WHERE upload_id=? AND dataset_id=?`, input.UploadID, dataset.ID); err != nil {
 			return Dataset{}, Import{}, err
 		}
 		if associated == 0 {
-			return Dataset{}, Import{}, fmt.Errorf("%w: retained upload belongs to another dataset", ErrInvalid)
+			return Dataset{}, Import{}, ErrNotFound
 		}
 	}
 

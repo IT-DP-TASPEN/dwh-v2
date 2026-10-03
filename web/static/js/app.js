@@ -1,5 +1,5 @@
 (() => {
-  // node_modules/alpinejs/dist/module.esm.js
+  // node_modules/@alpinejs/csp/dist/module.esm.js
   var flushPending = false;
   var flushing = false;
   var queue = [];
@@ -494,13 +494,6 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
   function setRawEvaluator(newEvaluator) {
     theRawEvaluatorFunction = newEvaluator;
   }
-  function normalEvaluator(el, expression) {
-    let overriddenMagics = {};
-    injectMagics(overriddenMagics, el);
-    let dataStack = [overriddenMagics, ...closestDataStack(el)];
-    let evaluator = typeof expression === "function" ? generateEvaluatorFromFunction(dataStack, expression) : generateEvaluatorFromString(dataStack, expression, el);
-    return tryCatch.bind(null, el, expression, evaluator);
-  }
   function generateEvaluatorFromFunction(dataStack, func) {
     return (receiver = () => {
     }, { scope: scope2 = {}, params = [], context } = {}) => {
@@ -510,53 +503,6 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
       }
       let result = func.apply(mergeProxies([scope2, ...dataStack]), params);
       runIfTypeOfFunction(receiver, result);
-    };
-  }
-  var evaluatorMemo = {};
-  function generateFunctionFromString(expression, el) {
-    if (evaluatorMemo[expression]) {
-      return evaluatorMemo[expression];
-    }
-    let AsyncFunction = Object.getPrototypeOf(async function() {
-    }).constructor;
-    let rightSideSafeExpression = /^[\n\s]*if.*\(.*\)/.test(expression.trim()) || /^(let|const)\s/.test(expression.trim()) ? `(async()=>{ ${expression} })()` : expression;
-    const safeAsyncFunction = () => {
-      try {
-        let func2 = new AsyncFunction(
-          ["__self", "scope"],
-          `with (scope) { __self.result = ${rightSideSafeExpression} }; __self.finished = true; return __self.result;`
-        );
-        Object.defineProperty(func2, "name", {
-          value: `[Alpine] ${expression}`
-        });
-        return func2;
-      } catch (error2) {
-        handleError(error2, el, expression);
-        return Promise.resolve();
-      }
-    };
-    let func = safeAsyncFunction();
-    evaluatorMemo[expression] = func;
-    return func;
-  }
-  function generateEvaluatorFromString(dataStack, expression, el) {
-    let func = generateFunctionFromString(expression, el);
-    return (receiver = () => {
-    }, { scope: scope2 = {}, params = [], context } = {}) => {
-      func.result = void 0;
-      func.finished = false;
-      let completeScope = mergeProxies([scope2, ...dataStack]);
-      if (typeof func === "function") {
-        let promise = func.call(context, func, completeScope).catch((error2) => handleError(error2, el, expression));
-        if (func.finished) {
-          runIfTypeOfFunction(receiver, func.result, completeScope, params, el);
-          func.result = void 0;
-        } else {
-          promise.then((result) => {
-            runIfTypeOfFunction(receiver, result, completeScope, params, el);
-          }).catch((error2) => handleError(error2, el, expression)).finally(() => func.result = void 0);
-        }
-      }
     };
   }
   function runIfTypeOfFunction(receiver, value, scope2, params, el) {
@@ -575,35 +521,6 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
   }
   function evaluateRaw(...args) {
     return theRawEvaluatorFunction(...args);
-  }
-  function normalRawEvaluator(el, expression, extras = {}) {
-    let overriddenMagics = {};
-    injectMagics(overriddenMagics, el);
-    let dataStack = [overriddenMagics, ...closestDataStack(el)];
-    let scope2 = mergeProxies([extras.scope ?? {}, ...dataStack]);
-    let params = extras.params ?? [];
-    if (expression.includes("await")) {
-      let AsyncFunction = Object.getPrototypeOf(async function() {
-      }).constructor;
-      let rightSideSafeExpression = /^[\n\s]*if.*\(.*\)/.test(expression.trim()) || /^(let|const)\s/.test(expression.trim()) ? `(async()=>{ ${expression} })()` : expression;
-      let func = new AsyncFunction(
-        ["scope"],
-        `with (scope) { let __result = ${rightSideSafeExpression}; return __result }`
-      );
-      let result = func.call(extras.context, scope2);
-      return result;
-    } else {
-      let rightSideSafeExpression = /^[\n\s]*if.*\(.*\)/.test(expression.trim()) || /^(let|const)\s/.test(expression.trim()) ? `(()=>{ ${expression} })()` : expression;
-      let func = new Function(
-        ["scope"],
-        `with (scope) { let __result = ${rightSideSafeExpression}; return __result }`
-      );
-      let result = func.call(extras.context, scope2);
-      if (typeof result === "function" && shouldAutoEvaluateFunctions) {
-        return result.apply(scope2, params);
-      }
-      return result;
-    }
   }
   var prefixAsString = "x-";
   function prefix(subject = "") {
@@ -1752,6 +1669,856 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     bind: bind2
   };
   var alpine_default = Alpine;
+  var safemap = /* @__PURE__ */ new WeakMap();
+  var globals = /* @__PURE__ */ new Set();
+  Object.getOwnPropertyNames(globalThis).forEach((key) => {
+    if (key === "styleMedia" || key === "sharedStorage")
+      return;
+    globals.add(globalThis[key]);
+  });
+  var Token = class {
+    constructor(type, value, start2, end) {
+      this.type = type;
+      this.value = value;
+      this.start = start2;
+      this.end = end;
+    }
+  };
+  var Tokenizer = class {
+    constructor(input) {
+      this.input = input;
+      this.position = 0;
+      this.tokens = [];
+    }
+    tokenize() {
+      while (this.position < this.input.length) {
+        this.skipWhitespace();
+        if (this.position >= this.input.length)
+          break;
+        const char = this.input[this.position];
+        if (this.isDigit(char)) {
+          this.readNumber();
+        } else if (this.isAlpha(char) || char === "_" || char === "$") {
+          this.readIdentifierOrKeyword();
+        } else if (char === '"' || char === "'") {
+          this.readString();
+        } else if (char === "/" && this.peek() === "/") {
+          this.skipLineComment();
+        } else {
+          this.readOperatorOrPunctuation();
+        }
+      }
+      this.tokens.push(new Token("EOF", null, this.position, this.position));
+      return this.tokens;
+    }
+    skipWhitespace() {
+      while (this.position < this.input.length && /\s/.test(this.input[this.position])) {
+        this.position++;
+      }
+    }
+    skipLineComment() {
+      while (this.position < this.input.length && this.input[this.position] !== "\n") {
+        this.position++;
+      }
+    }
+    isDigit(char) {
+      return /[0-9]/.test(char);
+    }
+    isAlpha(char) {
+      return /[a-zA-Z]/.test(char);
+    }
+    isAlphaNumeric(char) {
+      return /[a-zA-Z0-9_$]/.test(char);
+    }
+    peek(offset = 1) {
+      return this.input[this.position + offset] || "";
+    }
+    readNumber() {
+      const start2 = this.position;
+      let hasDecimal = false;
+      while (this.position < this.input.length) {
+        const char = this.input[this.position];
+        if (this.isDigit(char)) {
+          this.position++;
+        } else if (char === "." && !hasDecimal) {
+          hasDecimal = true;
+          this.position++;
+        } else {
+          break;
+        }
+      }
+      const value = this.input.slice(start2, this.position);
+      this.tokens.push(new Token("NUMBER", parseFloat(value), start2, this.position));
+    }
+    readIdentifierOrKeyword() {
+      const start2 = this.position;
+      while (this.position < this.input.length && this.isAlphaNumeric(this.input[this.position])) {
+        this.position++;
+      }
+      const value = this.input.slice(start2, this.position);
+      const keywords = ["true", "false", "null", "undefined", "new", "typeof", "void", "delete", "in", "instanceof"];
+      if (keywords.includes(value)) {
+        if (value === "true" || value === "false") {
+          this.tokens.push(new Token("BOOLEAN", value === "true", start2, this.position));
+        } else if (value === "null") {
+          this.tokens.push(new Token("NULL", null, start2, this.position));
+        } else if (value === "undefined") {
+          this.tokens.push(new Token("UNDEFINED", void 0, start2, this.position));
+        } else {
+          this.tokens.push(new Token("KEYWORD", value, start2, this.position));
+        }
+      } else {
+        this.tokens.push(new Token("IDENTIFIER", value, start2, this.position));
+      }
+    }
+    readString() {
+      const start2 = this.position;
+      const quote = this.input[this.position];
+      this.position++;
+      let value = "";
+      let escaped = false;
+      while (this.position < this.input.length) {
+        const char = this.input[this.position];
+        if (escaped) {
+          switch (char) {
+            case "n":
+              value += "\n";
+              break;
+            case "t":
+              value += "	";
+              break;
+            case "r":
+              value += "\r";
+              break;
+            case "\\":
+              value += "\\";
+              break;
+            case quote:
+              value += quote;
+              break;
+            default:
+              value += char;
+          }
+          escaped = false;
+        } else if (char === "\\") {
+          escaped = true;
+        } else if (char === quote) {
+          this.position++;
+          this.tokens.push(new Token("STRING", value, start2, this.position));
+          return;
+        } else {
+          value += char;
+        }
+        this.position++;
+      }
+      throw new Error(`Unterminated string starting at position ${start2}`);
+    }
+    readOperatorOrPunctuation() {
+      const start2 = this.position;
+      const char = this.input[this.position];
+      const next = this.peek();
+      const nextNext = this.peek(2);
+      if (char === "=" && next === "=" && nextNext === "=") {
+        this.position += 3;
+        this.tokens.push(new Token("OPERATOR", "===", start2, this.position));
+      } else if (char === "!" && next === "=" && nextNext === "=") {
+        this.position += 3;
+        this.tokens.push(new Token("OPERATOR", "!==", start2, this.position));
+      } else if (char === "=" && next === "=") {
+        this.position += 2;
+        this.tokens.push(new Token("OPERATOR", "==", start2, this.position));
+      } else if (char === "!" && next === "=") {
+        this.position += 2;
+        this.tokens.push(new Token("OPERATOR", "!=", start2, this.position));
+      } else if (char === "<" && next === "=") {
+        this.position += 2;
+        this.tokens.push(new Token("OPERATOR", "<=", start2, this.position));
+      } else if (char === ">" && next === "=") {
+        this.position += 2;
+        this.tokens.push(new Token("OPERATOR", ">=", start2, this.position));
+      } else if (char === "&" && next === "&") {
+        this.position += 2;
+        this.tokens.push(new Token("OPERATOR", "&&", start2, this.position));
+      } else if (char === "|" && next === "|") {
+        this.position += 2;
+        this.tokens.push(new Token("OPERATOR", "||", start2, this.position));
+      } else if (char === "+" && next === "+") {
+        this.position += 2;
+        this.tokens.push(new Token("OPERATOR", "++", start2, this.position));
+      } else if (char === "-" && next === "-") {
+        this.position += 2;
+        this.tokens.push(new Token("OPERATOR", "--", start2, this.position));
+      } else {
+        this.position++;
+        const type = "()[]{},.;:?".includes(char) ? "PUNCTUATION" : "OPERATOR";
+        this.tokens.push(new Token(type, char, start2, this.position));
+      }
+    }
+  };
+  var Parser = class {
+    constructor(tokens) {
+      this.tokens = tokens;
+      this.position = 0;
+    }
+    parse() {
+      if (this.isAtEnd()) {
+        throw new Error("Empty expression");
+      }
+      const expr = this.parseExpression();
+      this.match("PUNCTUATION", ";");
+      if (!this.isAtEnd()) {
+        throw new Error(`Unexpected token: ${this.current().value}`);
+      }
+      return expr;
+    }
+    parseExpression() {
+      return this.parseAssignment();
+    }
+    parseAssignment() {
+      const expr = this.parseTernary();
+      if (this.match("OPERATOR", "=")) {
+        const value = this.parseAssignment();
+        if (expr.type === "Identifier" || expr.type === "MemberExpression") {
+          return {
+            type: "AssignmentExpression",
+            left: expr,
+            operator: "=",
+            right: value
+          };
+        }
+        throw new Error("Invalid assignment target");
+      }
+      return expr;
+    }
+    parseTernary() {
+      const expr = this.parseLogicalOr();
+      if (this.match("PUNCTUATION", "?")) {
+        const consequent = this.parseExpression();
+        this.consume("PUNCTUATION", ":");
+        const alternate = this.parseExpression();
+        return {
+          type: "ConditionalExpression",
+          test: expr,
+          consequent,
+          alternate
+        };
+      }
+      return expr;
+    }
+    parseLogicalOr() {
+      let expr = this.parseLogicalAnd();
+      while (this.match("OPERATOR", "||")) {
+        const operator = this.previous().value;
+        const right = this.parseLogicalAnd();
+        expr = {
+          type: "BinaryExpression",
+          operator,
+          left: expr,
+          right
+        };
+      }
+      return expr;
+    }
+    parseLogicalAnd() {
+      let expr = this.parseEquality();
+      while (this.match("OPERATOR", "&&")) {
+        const operator = this.previous().value;
+        const right = this.parseEquality();
+        expr = {
+          type: "BinaryExpression",
+          operator,
+          left: expr,
+          right
+        };
+      }
+      return expr;
+    }
+    parseEquality() {
+      let expr = this.parseRelational();
+      while (this.match("OPERATOR", "==", "!=", "===", "!==")) {
+        const operator = this.previous().value;
+        const right = this.parseRelational();
+        expr = {
+          type: "BinaryExpression",
+          operator,
+          left: expr,
+          right
+        };
+      }
+      return expr;
+    }
+    parseRelational() {
+      let expr = this.parseAdditive();
+      while (this.match("OPERATOR", "<", ">", "<=", ">=")) {
+        const operator = this.previous().value;
+        const right = this.parseAdditive();
+        expr = {
+          type: "BinaryExpression",
+          operator,
+          left: expr,
+          right
+        };
+      }
+      return expr;
+    }
+    parseAdditive() {
+      let expr = this.parseMultiplicative();
+      while (this.match("OPERATOR", "+", "-")) {
+        const operator = this.previous().value;
+        const right = this.parseMultiplicative();
+        expr = {
+          type: "BinaryExpression",
+          operator,
+          left: expr,
+          right
+        };
+      }
+      return expr;
+    }
+    parseMultiplicative() {
+      let expr = this.parseUnary();
+      while (this.match("OPERATOR", "*", "/", "%")) {
+        const operator = this.previous().value;
+        const right = this.parseUnary();
+        expr = {
+          type: "BinaryExpression",
+          operator,
+          left: expr,
+          right
+        };
+      }
+      return expr;
+    }
+    parseUnary() {
+      if (this.match("OPERATOR", "++", "--")) {
+        const operator = this.previous().value;
+        const argument = this.parseUnary();
+        return {
+          type: "UpdateExpression",
+          operator,
+          argument,
+          prefix: true
+        };
+      }
+      if (this.match("OPERATOR", "!", "-", "+")) {
+        const operator = this.previous().value;
+        const argument = this.parseUnary();
+        return {
+          type: "UnaryExpression",
+          operator,
+          argument,
+          prefix: true
+        };
+      }
+      return this.parsePostfix();
+    }
+    parsePostfix() {
+      let expr = this.parseMember();
+      if (this.match("OPERATOR", "++", "--")) {
+        const operator = this.previous().value;
+        return {
+          type: "UpdateExpression",
+          operator,
+          argument: expr,
+          prefix: false
+        };
+      }
+      return expr;
+    }
+    parseMember() {
+      let expr = this.parsePrimary();
+      while (true) {
+        if (this.match("PUNCTUATION", ".")) {
+          const property = this.consume("IDENTIFIER");
+          expr = {
+            type: "MemberExpression",
+            object: expr,
+            property: { type: "Identifier", name: property.value },
+            computed: false
+          };
+        } else if (this.match("PUNCTUATION", "[")) {
+          const property = this.parseExpression();
+          this.consume("PUNCTUATION", "]");
+          expr = {
+            type: "MemberExpression",
+            object: expr,
+            property,
+            computed: true
+          };
+        } else if (this.match("PUNCTUATION", "(")) {
+          const args = this.parseArguments();
+          expr = {
+            type: "CallExpression",
+            callee: expr,
+            arguments: args
+          };
+        } else {
+          break;
+        }
+      }
+      return expr;
+    }
+    parseArguments() {
+      const args = [];
+      if (!this.check("PUNCTUATION", ")")) {
+        do {
+          args.push(this.parseExpression());
+        } while (this.match("PUNCTUATION", ","));
+      }
+      this.consume("PUNCTUATION", ")");
+      return args;
+    }
+    parsePrimary() {
+      if (this.match("NUMBER")) {
+        return { type: "Literal", value: this.previous().value };
+      }
+      if (this.match("STRING")) {
+        return { type: "Literal", value: this.previous().value };
+      }
+      if (this.match("BOOLEAN")) {
+        return { type: "Literal", value: this.previous().value };
+      }
+      if (this.match("NULL")) {
+        return { type: "Literal", value: null };
+      }
+      if (this.match("UNDEFINED")) {
+        return { type: "Literal", value: void 0 };
+      }
+      if (this.match("IDENTIFIER")) {
+        return { type: "Identifier", name: this.previous().value };
+      }
+      if (this.match("PUNCTUATION", "(")) {
+        const expr = this.parseExpression();
+        this.consume("PUNCTUATION", ")");
+        return expr;
+      }
+      if (this.match("PUNCTUATION", "[")) {
+        return this.parseArrayLiteral();
+      }
+      if (this.match("PUNCTUATION", "{")) {
+        return this.parseObjectLiteral();
+      }
+      throw new Error(`Unexpected token: ${this.current().type} "${this.current().value}"`);
+    }
+    parseArrayLiteral() {
+      const elements = [];
+      while (!this.check("PUNCTUATION", "]") && !this.isAtEnd()) {
+        elements.push(this.parseExpression());
+        if (this.match("PUNCTUATION", ",")) {
+          if (this.check("PUNCTUATION", "]")) {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+      this.consume("PUNCTUATION", "]");
+      return {
+        type: "ArrayExpression",
+        elements
+      };
+    }
+    parseObjectLiteral() {
+      const properties = [];
+      while (!this.check("PUNCTUATION", "}") && !this.isAtEnd()) {
+        let key;
+        let computed = false;
+        if (this.match("STRING")) {
+          key = { type: "Literal", value: this.previous().value };
+        } else if (this.match("IDENTIFIER")) {
+          const name = this.previous().value;
+          key = { type: "Identifier", name };
+        } else if (this.match("PUNCTUATION", "[")) {
+          key = this.parseExpression();
+          computed = true;
+          this.consume("PUNCTUATION", "]");
+        } else {
+          throw new Error("Expected property key");
+        }
+        this.consume("PUNCTUATION", ":");
+        const value = this.parseExpression();
+        properties.push({
+          type: "Property",
+          key,
+          value,
+          computed,
+          shorthand: false
+        });
+        if (this.match("PUNCTUATION", ",")) {
+          if (this.check("PUNCTUATION", "}")) {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+      this.consume("PUNCTUATION", "}");
+      return {
+        type: "ObjectExpression",
+        properties
+      };
+    }
+    match(...args) {
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (i === 0 && args.length > 1) {
+          const type = arg;
+          for (let j = 1; j < args.length; j++) {
+            if (this.check(type, args[j])) {
+              this.advance();
+              return true;
+            }
+          }
+          return false;
+        } else if (args.length === 1) {
+          if (this.checkType(arg)) {
+            this.advance();
+            return true;
+          }
+          return false;
+        }
+      }
+      return false;
+    }
+    check(type, value) {
+      if (this.isAtEnd())
+        return false;
+      if (value !== void 0) {
+        return this.current().type === type && this.current().value === value;
+      }
+      return this.current().type === type;
+    }
+    checkType(type) {
+      if (this.isAtEnd())
+        return false;
+      return this.current().type === type;
+    }
+    advance() {
+      if (!this.isAtEnd())
+        this.position++;
+      return this.previous();
+    }
+    isAtEnd() {
+      return this.current().type === "EOF";
+    }
+    current() {
+      return this.tokens[this.position];
+    }
+    previous() {
+      return this.tokens[this.position - 1];
+    }
+    consume(type, value) {
+      if (value !== void 0) {
+        if (this.check(type, value))
+          return this.advance();
+        throw new Error(`Expected ${type} "${value}" but got ${this.current().type} "${this.current().value}"`);
+      }
+      if (this.check(type))
+        return this.advance();
+      throw new Error(`Expected ${type} but got ${this.current().type} "${this.current().value}"`);
+    }
+  };
+  var Evaluator = class {
+    evaluate({ node, scope: scope2 = {}, context = null, forceBindingRootScopeToFunctions = true }) {
+      switch (node.type) {
+        case "Literal":
+          return node.value;
+        case "Identifier":
+          if (node.name in scope2) {
+            const value2 = scope2[node.name];
+            this.checkForDangerousValues(value2);
+            if (typeof value2 === "function") {
+              return value2.bind(scope2);
+            }
+            return value2;
+          }
+          throw new Error(`Undefined variable: ${node.name}`);
+        case "MemberExpression":
+          const object = this.evaluate({ node: node.object, scope: scope2, context, forceBindingRootScopeToFunctions });
+          if (object == null) {
+            throw new Error("Cannot read property of null or undefined");
+          }
+          let property;
+          if (node.computed) {
+            property = this.evaluate({ node: node.property, scope: scope2, context, forceBindingRootScopeToFunctions });
+          } else {
+            property = node.property.name;
+          }
+          this.checkForDangerousKeywords(property);
+          let memberValue = object[property];
+          this.checkForDangerousValues(memberValue);
+          if (typeof memberValue === "function") {
+            if (forceBindingRootScopeToFunctions) {
+              return memberValue.bind(scope2);
+            } else {
+              return memberValue.bind(object);
+            }
+          }
+          return memberValue;
+        case "CallExpression":
+          const args = node.arguments.map((arg) => this.evaluate({ node: arg, scope: scope2, context, forceBindingRootScopeToFunctions }));
+          let returnValue;
+          if (node.callee.type === "MemberExpression") {
+            const obj = this.evaluate({ node: node.callee.object, scope: scope2, context, forceBindingRootScopeToFunctions });
+            let prop;
+            if (node.callee.computed) {
+              prop = this.evaluate({ node: node.callee.property, scope: scope2, context, forceBindingRootScopeToFunctions });
+            } else {
+              prop = node.callee.property.name;
+            }
+            this.checkForDangerousKeywords(prop);
+            let func = obj[prop];
+            if (typeof func !== "function") {
+              throw new Error("Value is not a function");
+            }
+            returnValue = func.apply(obj, args);
+          } else {
+            if (node.callee.type === "Identifier") {
+              const name = node.callee.name;
+              let func;
+              if (name in scope2) {
+                func = scope2[name];
+              } else {
+                throw new Error(`Undefined variable: ${name}`);
+              }
+              if (typeof func !== "function") {
+                throw new Error("Value is not a function");
+              }
+              const thisContext = context !== null ? context : scope2;
+              returnValue = func.apply(thisContext, args);
+            } else {
+              const callee = this.evaluate({ node: node.callee, scope: scope2, context, forceBindingRootScopeToFunctions });
+              if (typeof callee !== "function") {
+                throw new Error("Value is not a function");
+              }
+              returnValue = callee.apply(context, args);
+            }
+          }
+          this.checkForDangerousValues(returnValue);
+          return returnValue;
+        case "UnaryExpression":
+          const argument = this.evaluate({ node: node.argument, scope: scope2, context, forceBindingRootScopeToFunctions });
+          switch (node.operator) {
+            case "!":
+              return !argument;
+            case "-":
+              return -argument;
+            case "+":
+              return +argument;
+            default:
+              throw new Error(`Unknown unary operator: ${node.operator}`);
+          }
+        case "UpdateExpression":
+          if (node.argument.type === "Identifier") {
+            const name = node.argument.name;
+            if (!(name in scope2)) {
+              throw new Error(`Undefined variable: ${name}`);
+            }
+            const oldValue = scope2[name];
+            if (node.operator === "++") {
+              scope2[name] = oldValue + 1;
+            } else if (node.operator === "--") {
+              scope2[name] = oldValue - 1;
+            }
+            return node.prefix ? scope2[name] : oldValue;
+          } else if (node.argument.type === "MemberExpression") {
+            const obj = this.evaluate({ node: node.argument.object, scope: scope2, context, forceBindingRootScopeToFunctions });
+            const prop = node.argument.computed ? this.evaluate({ node: node.argument.property, scope: scope2, context, forceBindingRootScopeToFunctions }) : node.argument.property.name;
+            if (this.isDOMObject(obj)) {
+              throw new Error("Property assignments on DOM objects are prohibited in the CSP build");
+            }
+            this.checkForDangerousKeywords(prop);
+            const oldValue = obj[prop];
+            if (node.operator === "++") {
+              obj[prop] = oldValue + 1;
+            } else if (node.operator === "--") {
+              obj[prop] = oldValue - 1;
+            }
+            return node.prefix ? obj[prop] : oldValue;
+          }
+          throw new Error("Invalid update expression target");
+        case "BinaryExpression":
+          const left = this.evaluate({ node: node.left, scope: scope2, context, forceBindingRootScopeToFunctions });
+          const evalRight = () => this.evaluate({ node: node.right, scope: scope2, context, forceBindingRootScopeToFunctions });
+          if (node.operator === "&&")
+            return left && evalRight();
+          if (node.operator === "||")
+            return left || evalRight();
+          const right = evalRight();
+          switch (node.operator) {
+            case "+":
+              return left + right;
+            case "-":
+              return left - right;
+            case "*":
+              return left * right;
+            case "/":
+              return left / right;
+            case "%":
+              return left % right;
+            case "==":
+              return left == right;
+            case "!=":
+              return left != right;
+            case "===":
+              return left === right;
+            case "!==":
+              return left !== right;
+            case "<":
+              return left < right;
+            case ">":
+              return left > right;
+            case "<=":
+              return left <= right;
+            case ">=":
+              return left >= right;
+            default:
+              throw new Error(`Unknown binary operator: ${node.operator}`);
+          }
+        case "ConditionalExpression":
+          const test = this.evaluate({ node: node.test, scope: scope2, context, forceBindingRootScopeToFunctions });
+          return test ? this.evaluate({ node: node.consequent, scope: scope2, context, forceBindingRootScopeToFunctions }) : this.evaluate({ node: node.alternate, scope: scope2, context, forceBindingRootScopeToFunctions });
+        case "AssignmentExpression":
+          const value = this.evaluate({ node: node.right, scope: scope2, context, forceBindingRootScopeToFunctions });
+          if (node.left.type === "Identifier") {
+            scope2[node.left.name] = value;
+            return value;
+          } else if (node.left.type === "MemberExpression") {
+            const obj = this.evaluate({ node: node.left.object, scope: scope2, context, forceBindingRootScopeToFunctions });
+            const prop = node.left.computed ? this.evaluate({ node: node.left.property, scope: scope2, context, forceBindingRootScopeToFunctions }) : node.left.property.name;
+            if (this.isDOMObject(obj)) {
+              throw new Error("Property assignments on DOM objects are prohibited in the CSP build");
+            }
+            this.checkForDangerousKeywords(prop);
+            obj[prop] = value;
+            return value;
+          }
+          throw new Error("Invalid assignment target");
+        case "ArrayExpression":
+          return node.elements.map((el) => this.evaluate({ node: el, scope: scope2, context, forceBindingRootScopeToFunctions }));
+        case "ObjectExpression":
+          const result = {};
+          for (const prop of node.properties) {
+            const key = prop.computed ? this.evaluate({ node: prop.key, scope: scope2, context, forceBindingRootScopeToFunctions }) : prop.key.type === "Identifier" ? prop.key.name : this.evaluate({ node: prop.key, scope: scope2, context, forceBindingRootScopeToFunctions });
+            const value2 = this.evaluate({ node: prop.value, scope: scope2, context, forceBindingRootScopeToFunctions });
+            result[key] = value2;
+          }
+          return result;
+        default:
+          throw new Error(`Unknown node type: ${node.type}`);
+      }
+    }
+    isDOMObject(obj) {
+      return obj instanceof Node || typeof CSSStyleDeclaration !== "undefined" && obj instanceof CSSStyleDeclaration || typeof DOMStringMap !== "undefined" && obj instanceof DOMStringMap || typeof DOMTokenList !== "undefined" && obj instanceof DOMTokenList || typeof NamedNodeMap !== "undefined" && obj instanceof NamedNodeMap;
+    }
+    checkForDangerousKeywords(keyword) {
+      let blacklist = [
+        "constructor",
+        "prototype",
+        "__proto__",
+        "__defineGetter__",
+        "__defineSetter__",
+        "insertAdjacentHTML",
+        "setAttribute",
+        "setAttributeNS",
+        "setAttributeNode",
+        "setAttributeNodeNS"
+      ];
+      if (blacklist.includes(keyword)) {
+        throw new Error(`Accessing "${keyword}" is prohibited in the CSP build`);
+      }
+    }
+    checkForDangerousValues(prop) {
+      if (prop === null) {
+        return;
+      }
+      if (typeof prop !== "object" && typeof prop !== "function") {
+        return;
+      }
+      if (safemap.has(prop)) {
+        return;
+      }
+      if (prop instanceof HTMLIFrameElement || prop instanceof HTMLScriptElement) {
+        throw new Error("Accessing iframes and scripts is prohibited in the CSP build");
+      }
+      if (globals.has(prop)) {
+        throw new Error("Accessing global variables is prohibited in the CSP build");
+      }
+      safemap.set(prop, true);
+      return true;
+    }
+  };
+  function generateRuntimeFunction(expression) {
+    try {
+      const tokenizer = new Tokenizer(expression);
+      const tokens = tokenizer.tokenize();
+      const parser = new Parser(tokens);
+      const ast = parser.parse();
+      const evaluator = new Evaluator();
+      return function(options = {}) {
+        const { scope: scope2 = {}, context = null, forceBindingRootScopeToFunctions = false } = options;
+        return evaluator.evaluate({ node: ast, scope: scope2, context, forceBindingRootScopeToFunctions });
+      };
+    } catch (error2) {
+      throw new Error(`CSP Parser Error: ${error2.message}`);
+    }
+  }
+  function cspRawEvaluator(el, expression, extras = {}) {
+    let dataStack = generateDataStack(el);
+    let scope2 = mergeProxies([extras.scope ?? {}, ...dataStack]);
+    let params = extras.params ?? [];
+    let evaluate2 = generateRuntimeFunction(expression);
+    let result = evaluate2({
+      scope: scope2,
+      forceBindingRootScopeToFunctions: true
+    });
+    if (typeof result === "function" && shouldAutoEvaluateFunctions) {
+      return result.apply(scope2, params);
+    }
+    return result;
+  }
+  function cspEvaluator(el, expression) {
+    let dataStack = generateDataStack(el);
+    if (typeof expression === "function") {
+      return generateEvaluatorFromFunction(dataStack, expression);
+    }
+    let evaluator = generateEvaluator(el, expression, dataStack);
+    return tryCatch.bind(null, el, expression, evaluator);
+  }
+  function generateDataStack(el) {
+    let overriddenMagics = {};
+    injectMagics(overriddenMagics, el);
+    return [overriddenMagics, ...closestDataStack(el)];
+  }
+  function generateEvaluator(el, expression, dataStack) {
+    if (el instanceof HTMLIFrameElement) {
+      throw new Error("Evaluating expressions on an iframe is prohibited in the CSP build");
+    }
+    if (el instanceof HTMLScriptElement) {
+      throw new Error("Evaluating expressions on a script is prohibited in the CSP build");
+    }
+    return (receiver = () => {
+    }, { scope: scope2 = {}, params = [] } = {}) => {
+      let completeScope = mergeProxies([scope2, ...dataStack]);
+      let evaluate2 = generateRuntimeFunction(expression);
+      let returnValue = evaluate2({
+        scope: completeScope,
+        forceBindingRootScopeToFunctions: true
+      });
+      if (shouldAutoEvaluateFunctions && typeof returnValue === "function") {
+        let nextReturnValue = returnValue.apply(returnValue, params);
+        if (nextReturnValue instanceof Promise) {
+          nextReturnValue.then((i) => receiver(i));
+        } else {
+          receiver(nextReturnValue);
+        }
+      } else if (typeof returnValue === "object" && returnValue instanceof Promise) {
+        returnValue.then((i) => receiver(i));
+      } else {
+        receiver(returnValue);
+      }
+    };
+  }
   function makeMap(str2, expectsLowerCase) {
     const map = /* @__PURE__ */ Object.create(null);
     const list = str2.split(",");
@@ -3392,8 +4159,11 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
   function warnMissingPluginDirective(name, directiveName, slug) {
     directive(directiveName, (el) => warn(`You can't use [x-${directiveName}] without first installing the "${name}" plugin here: https://alpinejs.dev/plugins/${slug}`, el));
   }
-  alpine_default.setEvaluator(normalEvaluator);
-  alpine_default.setRawEvaluator(normalRawEvaluator);
+  directive("html", (el, { expression }) => {
+    handleError(new Error("Using the x-html directive is prohibited in the CSP build"), el);
+  });
+  alpine_default.setEvaluator(cspEvaluator);
+  alpine_default.setRawEvaluator(cspRawEvaluator);
   alpine_default.setReactivityEngine({ reactive: reactive2, effect: effect2, release: stop, raw: toRaw });
   var src_default = alpine_default;
   var module_default = src_default;
@@ -7421,6 +8191,101 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
   // web/src/js/app.js
   window.Alpine = module_default;
   window.htmx = htmx_esm_default;
+  htmx_esm_default.config.allowEval = false;
+  htmx_esm_default.config.allowScriptTags = false;
+  htmx_esm_default.config.includeIndicatorStyles = false;
+  module_default.data("noticeToast", () => ({
+    open: true,
+    init() {
+      setTimeout(() => {
+        this.open = false;
+      }, 5e3);
+    }
+  }));
+  module_default.data("scheduleJobSelection", () => ({
+    selectAll() {
+      this.$root.querySelectorAll("[name=job_keys]").forEach((input) => {
+        input.checked = true;
+      });
+    }
+  }));
+  module_default.data("folderRename", () => ({
+    editing: false,
+    folderID: "",
+    form: null,
+    init() {
+      this.form = this.$el;
+      this.folderID = this.form.dataset.folderId;
+      this.editing = this.form.dataset.editing === "true";
+    },
+    rename(event) {
+      if (String(event.detail) !== this.folderID) return;
+      this.editing = true;
+      this.$nextTick(() => {
+        this.$refs.input.value = this.form.dataset.currentName;
+        this.$refs.input.select();
+      });
+    },
+    prepareSubmit() {
+      this.form.action = `/reports/folders/${this.folderID}/rename${window.location.search}`;
+    },
+    cancel() {
+      this.editing = false;
+      this.$refs.input.value = this.form.dataset.currentName;
+      document.getElementById(`folder-actions-button-${this.folderID}`)?.focus();
+    }
+  }));
+  module_default.data("runsAccordion", (reference, trigger2) => ({
+    open: false,
+    loaded: false,
+    loading: false,
+    failed: false,
+    refreshFailed: false,
+    toggle() {
+      this.open = !this.open;
+      if (this.open) this.load();
+    },
+    load() {
+      if (!this.loaded && !this.loading) htmx_esm_default.trigger(this.$refs[reference], trigger2);
+    },
+    beforeRequest(event) {
+      const host = event.detail.elt;
+      if (!host?.matches("[data-runs-poll-host]")) return;
+      const initial = event.detail.requestConfig?.triggeringEvent?.type === trigger2;
+      if (!initial && (host.dataset.loaded !== "true" || !this.open)) {
+        event.preventDefault();
+        return;
+      }
+      this.loading = true;
+      if (!this.loaded) this.failed = false;
+    },
+    afterSwap(event) {
+      if (!event.target.matches("[data-runs-poll-host]")) return;
+      this.loading = false;
+      this.loaded = true;
+      this.failed = false;
+      this.refreshFailed = false;
+    },
+    afterRequest(event) {
+      if (!event.detail.elt?.matches("[data-runs-poll-host]") || event.detail.successful === true) return;
+      this.loading = false;
+      if (this.loaded) this.refreshFailed = true;
+      else this.failed = true;
+    }
+  }));
+  document.addEventListener("change", (event) => {
+    if (event.target.matches("[data-source-auth-select]")) event.target.form.requestSubmit();
+  });
+  for (const name of ["htmx:responseError", "htmx:sendError"]) {
+    document.addEventListener(name, (event) => {
+      const form = event.target.closest("form");
+      const message = form?.querySelector("[data-source-auth-error]");
+      if (!message) return;
+      form.reset();
+      message.textContent = "Auth Profile assignment could not be saved.";
+      message.classList.remove("hidden");
+    });
+  }
   var root = document.documentElement;
   var systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
   var sidebarDisclosures = window.__sidebarDisclosures || /* @__PURE__ */ Object.create(null);
@@ -7482,6 +8347,10 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     file: null,
     error: "",
     dragging: false,
+    drop(event) {
+      this.dragging = false;
+      this.select(event.dataTransfer.files, true);
+    },
     select(files, dropped = false) {
       if (!files.length) return;
       if (files.length !== 1) return this.reject("Choose one CSV file.", !dropped);
@@ -7523,6 +8392,12 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     },
     get open() {
       return this.active || this.manualOpen;
+    },
+    togglePrimary() {
+      if (this.sidebarCollapsed) {
+        this.expandSidebar();
+        this.openDisclosure();
+      } else this.toggleDisclosure();
     },
     openDisclosure() {
       if (this.active || this.manualOpen) return;
@@ -7578,6 +8453,16 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
       this.open = false;
       if (restoreFocus) this.$nextTick(() => this.$refs.trigger?.focus());
     },
+    closeOther(event) {
+      if (event.detail !== this.$el) this.close();
+    },
+    blur(event) {
+      if (!this.$el.contains(event.relatedTarget)) this.close();
+    },
+    renameFolder(id) {
+      this.close();
+      this.$dispatch("folder-rename", id);
+    },
     viewportChanged() {
       this.close(this.$refs.menu?.contains(document.activeElement));
     }
@@ -7631,6 +8516,9 @@ ${expression ? 'Expression: "' + expression + '"\n\n' : ""}`, el);
     },
     get partiallySelected() {
       return this.selected.length > 0 && !this.allSelected;
+    },
+    updateIndeterminate(element) {
+      element.indeterminate = this.partiallySelected;
     },
     toggleAll(checked) {
       this.selected = checked ? [...this.visibleIDs] : [];
