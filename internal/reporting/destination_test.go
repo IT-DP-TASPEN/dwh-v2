@@ -23,7 +23,10 @@ func TestDestinationPolicy(t *testing.T) {
 		{name: "public IP not implicitly allowed", hosts: []string{"mysql.example"}, host: "8.8.8.8"},
 		{name: "exact hostname", hosts: []string{"mysql.example"}, host: "MySQL.Example", resolved: "8.8.8.8", allow: true},
 		{name: "different hostname", hosts: []string{"mysql.example"}, host: "other.example", resolved: "8.8.8.8"},
-		{name: "DNS outside CIDR", cidrs: []string{"10.20.0.0/16"}, hosts: []string{"mysql.example"}, host: "mysql.example", resolved: "8.8.8.8"},
+		{name: "exact public hostname with unrelated CIDR", cidrs: []string{"10.20.0.0/16"}, hosts: []string{"mysql.example"}, host: "mysql.example", resolved: "8.8.8.8", allow: true},
+		{name: "exact private hostname outside CIDR", cidrs: []string{"10.20.0.0/16"}, hosts: []string{"mysql.example"}, host: "mysql.example", resolved: "192.168.1.1"},
+		{name: "exact private hostname inside CIDR", cidrs: []string{"10.20.0.0/16"}, hosts: []string{"mysql.example"}, host: "mysql.example", resolved: "10.20.1.2", allow: true},
+		{name: "non-allowlisted hostname outside CIDR", cidrs: []string{"10.20.0.0/16"}, host: "other.example", resolved: "8.8.8.8"},
 		{name: "DNS inside CIDR", cidrs: []string{"10.20.0.0/16"}, host: "mysql.example", resolved: "10.20.1.2", allow: true},
 		{name: "DNS rebinding loopback", hosts: []string{"mysql.example"}, host: "mysql.example", resolved: "127.0.0.1"},
 		{name: "DNS rebinding private", hosts: []string{"mysql.example"}, host: "mysql.example", resolved: "192.168.1.1"},
@@ -52,6 +55,31 @@ func TestDestinationPolicy(t *testing.T) {
 }
 
 func TestDestinationPolicyChecksEveryDNSAddress(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		addresses []string
+		allow     bool
+	}{
+		{"all public", []string{"8.8.8.8", "1.1.1.1"}, true},
+		{"public and disallowed private", []string{"8.8.8.8", "192.168.1.1"}, false},
+		{"public and explicitly allowed private", []string{"8.8.8.8", "10.20.1.2"}, true},
+		{"public and disallowed loopback", []string{"8.8.8.8", "127.0.0.1"}, false},
+		{"public and disallowed link local", []string{"8.8.8.8", "169.254.169.254"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy, _ := NewDestinationPolicy([]string{"10.20.0.0/16"}, []string{"mysql.example"}, nil)
+			policy.lookup = func(context.Context, string) ([]net.IPAddr, error) {
+				var addresses []net.IPAddr
+				for _, address := range test.addresses {
+					addresses = append(addresses, net.IPAddr{IP: net.ParseIP(address)})
+				}
+				return addresses, nil
+			}
+			if err := policy.Validate(context.Background(), "tcp", "mysql.example", ""); (err == nil) != test.allow {
+				t.Fatalf("allowed=%v error=%v", test.allow, err)
+			}
+		})
+	}
 	policy, _ := NewDestinationPolicy([]string{"10.20.0.0/16"}, nil, nil)
 	policy.lookup = func(context.Context, string) ([]net.IPAddr, error) {
 		return []net.IPAddr{{IP: net.ParseIP("10.20.1.2")}, {IP: net.ParseIP("127.0.0.1")}}, nil
@@ -62,6 +90,35 @@ func TestDestinationPolicyChecksEveryDNSAddress(t *testing.T) {
 	policy.lookup = func(context.Context, string) ([]net.IPAddr, error) { return nil, errors.New("DNS failed") }
 	if err := policy.Validate(context.Background(), "tcp", "mysql.example", ""); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
+	}
+}
+
+func TestDestinationDialUsesValidatedIPWithoutSecondLookup(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	policy, _ := NewDestinationPolicy([]string{"10.0.0.0/8"}, []string{"does-not-resolve.invalid", "127.0.0.1"}, nil)
+	lookups := 0
+	policy.lookup = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		lookups++
+		if host != "does-not-resolve.invalid" || lookups != 1 {
+			t.Errorf("unexpected DNS lookup: host=%q count=%d", host, lookups)
+			return nil, errors.New("second lookup")
+		}
+		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	connection, err := policy.dial(ctx, "tcp", net.JoinHostPort("does-not-resolve.invalid", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if connection.RemoteAddr().String() != listener.Addr().String() || lookups != 1 {
+		t.Fatalf("dialed %s after %d lookups", connection.RemoteAddr(), lookups)
 	}
 }
 

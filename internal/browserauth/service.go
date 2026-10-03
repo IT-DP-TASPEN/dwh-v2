@@ -171,7 +171,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput, now time.Time) (r
 	}
 
 	if s.failures.blocked(input.Username, now) {
-		return LoginResult{}, ErrInvalidCredentials
+		return LoginResult{}, errLoginThrottled
 	}
 	defer func() {
 		if errors.Is(loginErr, ErrInvalidCredentials) {

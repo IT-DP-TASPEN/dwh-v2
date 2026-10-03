@@ -79,10 +79,10 @@ func (p *DestinationPolicy) addresses(ctx context.Context, host string) ([]net.I
 	}
 	exact := p.hosts[strings.ToLower(host)]
 	for _, address := range addresses {
-		// CIDRs constrain every resolved address when configured. An exact host
-		// alone permits public destinations; private/local addresses need a CIDR
-		// or exact literal IP permission, preventing DNS rebinding into local DBs.
-		if !p.allowedIP(address.IP) && !(exact && len(p.cidrs) == 0 && publicDestination(address.IP)) {
+		// Exact hostnames independently authorize public addresses. Private/local
+		// addresses still need explicit CIDR or literal IP permission, and every
+		// DNS answer must pass to prevent rebinding into local databases.
+		if !p.allowedIP(address.IP) && !(exact && publicDestination(address.IP)) {
 			return nil, ErrInvalid
 		}
 	}

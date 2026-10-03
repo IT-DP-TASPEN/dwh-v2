@@ -2,6 +2,7 @@ package browserauth
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -15,6 +16,10 @@ type SecurityConfig struct {
 }
 
 const maxLoginFailureEntries = 10000
+
+// errLoginThrottled is internal: HTTP renders the same invalid-credentials
+// response, but skipped verification must not count or create an audit event.
+var errLoginThrottled = errors.New("login throttled")
 
 type loginFailure struct {
 	count       int
@@ -50,13 +55,11 @@ func (f *loginFailures) blocked(username string, now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cleanup(now)
-	entry, exists := f.entries[username]
-	if exists && !entry.lockedUntil.IsZero() && !entry.lockedUntil.After(now) {
+	entry := f.entries[username]
+	if !entry.lockedUntil.IsZero() && !entry.lockedUntil.After(now) {
 		delete(f.entries, username)
-		exists = false
 	}
-	// Fail closed for new names when saturated; never evict a live lockout.
-	return entry.lockedUntil.After(now) || !exists && len(f.entries) >= maxLoginFailureEntries
+	return entry.lockedUntil.After(now)
 }
 
 func (f *loginFailures) fail(username string, now time.Time) {
@@ -97,7 +100,7 @@ func (s *Service) verifyBounded(ctx context.Context, username, password, hash st
 		return false, context.Cause(ctx)
 	}
 	if s.failures.blocked(username, now) {
-		return false, ErrInvalidCredentials
+		return false, errLoginThrottled
 	}
 	// Argon2 is synchronous and cannot be interrupted. Hold the slot until it
 	// returns, including on cancellation; never spawn detached hashing work.

@@ -31,7 +31,7 @@ func TestLoginThrottleCounterLockoutExpiryAndSuccessReset(t *testing.T) {
 		t.Fatal("failure count")
 	}
 	valid = true
-	if _, err := service.Login(context.Background(), input, now.Add(time.Minute)); !errors.Is(err, ErrInvalidCredentials) || verified != 5 {
+	if _, err := service.Login(context.Background(), input, now.Add(time.Minute)); !errors.Is(err, errLoginThrottled) || errors.Is(err, ErrInvalidCredentials) || verified != 5 {
 		t.Fatalf("lockout err=%v verified=%d", err, verified)
 	}
 	if _, err := service.Login(context.Background(), input, now.Add(15*time.Minute)); err != nil {
@@ -64,14 +64,45 @@ func TestLoginThrottleBoundedMemory(t *testing.T) {
 	for i := 0; i < maxLoginFailureEntries+10; i++ {
 		f.fail(fmt.Sprint(i), now)
 	}
-	if len(f.entries) != maxLoginFailureEntries || !f.blocked("new", now) {
+	if len(f.entries) != maxLoginFailureEntries || f.blocked("new", now) {
 		t.Fatalf("entries=%d", len(f.entries))
+	}
+	f.fail("new", now)
+	if len(f.entries) != maxLoginFailureEntries {
+		t.Fatal("overflow failure grew the map")
 	}
 	if !f.blocked("0", now.Add(time.Minute)) {
 		t.Fatal("window cleanup erased live lockout")
 	}
 	if f.blocked("new", now.Add(2*time.Minute)) || len(f.entries) != 0 {
 		t.Fatal("stale entries not reclaimed")
+	}
+	f.fail("new", now.Add(2*time.Minute))
+	if len(f.entries) != 1 || f.entries["new"].count != 1 || !f.blocked("new", now.Add(2*time.Minute)) {
+		t.Fatal("new failures not tracked after stale cleanup")
+	}
+}
+
+func TestSaturatedLoginThrottleStillVerifiesUntrackedUsername(t *testing.T) {
+	service := newTestService(t, &fakeUsers{byUsername: user.User{ID: 1, IsActive: true, PasswordHash: "hash"}}, &fakeRoles{}, &fakeSessions{})
+	now := time.Now()
+	for i := 0; i < maxLoginFailureEntries; i++ {
+		service.failures.entries[fmt.Sprint(i)] = loginFailure{count: 5, first: now, lockedUntil: now.Add(time.Minute)}
+	}
+	verified := 0
+	service.verifyPassword = func(string, string) (bool, error) {
+		verified++
+		if len(service.passwordSlots) != 1 {
+			t.Fatal("verification bypassed password slots")
+		}
+		return false, nil
+	}
+	_, err := service.Login(context.Background(), LoginInput{Username: "new", Password: "wrong"}, now)
+	if !errors.Is(err, ErrInvalidCredentials) || verified != 1 {
+		t.Fatalf("verification count=%d error=%v", verified, err)
+	}
+	if len(service.failures.entries) != maxLoginFailureEntries || service.failures.entries["new"].count != 0 || !service.failures.blocked("0", now) {
+		t.Fatal("overflow changed the bound or a live lockout")
 	}
 }
 
@@ -129,7 +160,11 @@ func TestUnknownUsernameDummyHashStopsOnlyDuringLockout(t *testing.T) {
 	now := time.Now()
 	for i := 0; i < 6; i++ {
 		_, err := service.Login(context.Background(), LoginInput{Username: "missing", Password: "wrong"}, now)
-		if !errors.Is(err, ErrInvalidCredentials) {
+		expected := ErrInvalidCredentials
+		if i == 5 {
+			expected = errLoginThrottled
+		}
+		if !errors.Is(err, expected) {
 			t.Fatal(err)
 		}
 	}

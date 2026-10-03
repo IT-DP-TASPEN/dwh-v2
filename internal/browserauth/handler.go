@@ -88,8 +88,10 @@ func (h *HTTP) Login(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	result, err := h.service.Login(request.Context(), LoginInput{Username: form.Username, Password: password, RememberMe: form.RememberMe}, time.Now().UTC())
-	if errors.Is(err, ErrInvalidCredentials) {
-		h.appendBestEffortAudit(request, audit.Event{Action: audit.ActionAuthLoginFailed, Metadata: audit.LoginFailureMetadata{Username: form.Username}, CreatedAt: time.Now().UTC()})
+	if errors.Is(err, ErrInvalidCredentials) || errors.Is(err, errLoginThrottled) {
+		if errors.Is(err, ErrInvalidCredentials) {
+			h.appendBestEffortAudit(request, audit.Event{Action: audit.ActionAuthLoginFailed, Metadata: audit.LoginFailureMetadata{Username: form.Username}, CreatedAt: time.Now().UTC()})
+		}
 		form.Errors["credentials"] = "Invalid username or password."
 		h.renderLogin(writer, request, http.StatusUnprocessableEntity, form)
 		return

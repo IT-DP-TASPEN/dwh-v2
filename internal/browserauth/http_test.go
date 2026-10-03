@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -260,6 +262,153 @@ func TestLoginHandler(t *testing.T) {
 			t.Fatalf("expected 413, got %d", response.Code)
 		}
 	})
+}
+
+// Keep production handler/service wiring while controlling lockout expiry.
+type timedLoginService struct {
+	*Service
+	now time.Time
+}
+
+func (s *timedLoginService) Login(ctx context.Context, input LoginInput, _ time.Time) (LoginResult, error) {
+	return s.Service.Login(ctx, input, s.now)
+}
+
+func TestLoginFailureAuditsExcludeThrottledRequests(t *testing.T) {
+	var publicResponse *httptest.ResponseRecorder
+	for _, unknown := range []bool{false, true} {
+		name := "known"
+		if unknown {
+			name = "unknown"
+		}
+		t.Run(name, func(t *testing.T) {
+			users := &fakeUsers{byUsername: user.User{ID: 1, IsActive: true, PasswordHash: "known-hash"}}
+			if unknown {
+				users.findUsernameErr = user.ErrNotFound
+			}
+			service := newTestService(t, users, &fakeRoles{}, &fakeSessions{})
+			verified := 0
+			service.verifyPassword = func(_, hash string) (bool, error) {
+				verified++
+				expected := "known-hash"
+				if unknown {
+					expected = service.dummyHash
+				}
+				if hash != expected {
+					t.Errorf("verification hash=%q expected=%q", hash, expected)
+				}
+				return false, nil
+			}
+			clock := &timedLoginService{Service: service, now: time.Now().UTC()}
+			var events []audit.Event
+			handler := newTestHTTPWithAudit(t, clock, false, func(_ context.Context, event audit.Event) error {
+				events = append(events, event)
+				if event.Action != audit.ActionAuthLoginFailed || event.Attribution.Actor != nil || event.Attribution.Effective != nil || event.Resource != "" || event.ResourceID != 0 || event.Metadata != (audit.LoginFailureMetadata{Username: "user"}) {
+					t.Errorf("unsafe failure event: %+v", event)
+				}
+				return nil
+			})
+			attempt := func() {
+				form := url.Values{"username": {" USER "}, "password": {"wrong"}}
+				request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+				request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				response := httptest.NewRecorder()
+				handler.Login(response, request)
+				if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "Invalid username or password.") {
+					t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+				}
+				if publicResponse == nil {
+					publicResponse = response
+				} else if response.Code != publicResponse.Code || response.Body.String() != publicResponse.Body.String() || !reflect.DeepEqual(response.Header(), publicResponse.Header()) {
+					t.Fatal("known/unknown, throttled/verified responses differ")
+				}
+			}
+			for i := 1; i <= 5; i++ {
+				attempt()
+				if verified != i || len(events) != i || service.failures.entries["user"].count != i {
+					t.Fatalf("attempt=%d verified=%d audits=%d failure=%+v", i, verified, len(events), service.failures.entries["user"])
+				}
+			}
+			if !service.failures.blocked("user", clock.now) {
+				t.Fatal("threshold did not start lockout")
+			}
+			failure := service.failures.entries["user"]
+			attempt()
+			if verified != 5 || len(events) != 5 || service.failures.entries["user"] != failure {
+				t.Fatal("locked request verified, audited or changed failure state")
+			}
+			clock.now = failure.lockedUntil
+			attempt()
+			if verified != 6 || len(events) != 6 || service.failures.entries["user"].count != 1 {
+				t.Fatal("expired lockout did not restore verified, audited failures")
+			}
+		})
+	}
+}
+
+type hashSlotWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *hashSlotWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
+func TestLoginHashSlotWaiterDoesNotCountOrAuditNewLockout(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		name := "known"
+		if unknown {
+			name = "unknown"
+		}
+		t.Run(name, func(t *testing.T) {
+			users := &fakeUsers{byUsername: user.User{ID: 1, IsActive: true, PasswordHash: "hash"}}
+			if unknown {
+				users.findUsernameErr = user.ErrNotFound
+			}
+			service := newTestService(t, users, &fakeRoles{}, &fakeSessions{})
+			service.passwordSlots = make(chan struct{}, 1)
+			service.passwordSlots <- struct{}{}
+			verified := 0
+			service.verifyPassword = func(string, string) (bool, error) { verified++; return false, nil }
+			now := time.Now().UTC()
+			for i := 0; i < 4; i++ {
+				service.failures.fail("user", now)
+			}
+			audits := 0
+			handler := newTestHTTPWithAudit(t, &timedLoginService{Service: service, now: now}, false, func(context.Context, audit.Event) error { audits++; return nil })
+			form := url.Values{"username": {" USER "}, "password": {"wrong"}}
+			base, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ctx := &hashSlotWaitContext{Context: base, waiting: make(chan struct{})}
+			request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode())).WithContext(ctx)
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			response := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() { defer close(done); handler.Login(response, request) }()
+			select {
+			case <-ctx.waiting: // initial throttle check passed; password slot is full
+			case <-base.Done():
+				t.Fatal("request never waited for password slot")
+			}
+			service.failures.fail("user", now) // another completed attempt reaches threshold
+			failure := service.failures.entries["user"]
+			<-service.passwordSlots
+			select {
+			case <-done:
+			case <-base.Done():
+				t.Fatal("waiting request did not finish")
+			}
+			if verified != 0 || audits != 0 || service.failures.entries["user"] != failure || len(service.passwordSlots) != 0 {
+				t.Fatalf("verified=%d audits=%d failure=%+v slots=%d", verified, audits, service.failures.entries["user"], len(service.passwordSlots))
+			}
+			if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "Invalid username or password.") {
+				t.Fatalf("unexpected public response: %d %s", response.Code, response.Body.String())
+			}
+		})
+	}
 }
 
 func TestRegistrationHandler(t *testing.T) {
