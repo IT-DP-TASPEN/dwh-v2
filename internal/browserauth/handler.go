@@ -12,6 +12,7 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/auth"
+	"github.com/ibldzn/go-admin/internal/mfa"
 	"github.com/ibldzn/go-admin/internal/render"
 	"github.com/ibldzn/go-admin/internal/user"
 )
@@ -26,6 +27,7 @@ type authenticationService interface {
 }
 
 type HTTP struct {
+	mfa               *mfa.Store
 	service           authenticationService
 	renderer          *render.Renderer
 	cookies           CookieManager
@@ -87,7 +89,7 @@ func (h *HTTP) Login(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	result, err := h.service.Login(request.Context(), LoginInput{Username: form.Username, Password: password, RememberMe: form.RememberMe}, time.Now().UTC())
+	result, err := h.service.Login(request.Context(), LoginInput{Username: form.Username, Password: password, RememberMe: form.RememberMe, Next: form.Next}, time.Now().UTC())
 	if errors.Is(err, ErrInvalidCredentials) || errors.Is(err, errLoginThrottled) {
 		if errors.Is(err, ErrInvalidCredentials) {
 			h.appendBestEffortAudit(request, audit.Event{Action: audit.ActionAuthLoginFailed, Metadata: audit.LoginFailureMetadata{Username: form.Username}, CreatedAt: time.Now().UTC()})
@@ -100,13 +102,12 @@ func (h *HTTP) Login(writer http.ResponseWriter, request *http.Request) {
 		h.internalError(writer, request, "login", err)
 		return
 	}
-	identity := audit.Identity{UserID: result.Session.UserID, Username: form.Username}
-	h.appendBestEffortAudit(request, audit.Event{
-		Attribution: audit.Attribution{Actor: &identity, Effective: &identity},
-		Action:      audit.ActionAuthLogin, Resource: audit.ResourceUser, ResourceID: identity.UserID, CreatedAt: time.Now().UTC(),
-	})
-	h.cookies.Set(writer, result.RawToken, result.Session.RememberMe, result.Session.CreatedAt)
-	http.Redirect(writer, request, form.Next, http.StatusSeeOther)
+	if result.Challenge.Token == "" {
+		h.internalError(writer, request, "login MFA", errors.New("missing MFA challenge"))
+		return
+	}
+	h.setChallenge(writer, result.Challenge)
+	http.Redirect(writer, request, "/mfa", http.StatusSeeOther)
 }
 
 func (h *HTTP) RegisterPage(writer http.ResponseWriter, request *http.Request) {
@@ -167,6 +168,7 @@ func (h *HTTP) Logout(writer http.ResponseWriter, request *http.Request) {
 	rawToken, err := h.cookies.Read(request)
 	if errors.Is(err, http.ErrNoCookie) {
 		h.cookies.Clear(writer)
+		h.clearChallenge(writer)
 		http.Redirect(writer, request, "/login", http.StatusSeeOther)
 		return
 	}
@@ -176,6 +178,7 @@ func (h *HTTP) Logout(writer http.ResponseWriter, request *http.Request) {
 	}
 	if !validToken(rawToken) {
 		h.cookies.Clear(writer)
+		h.clearChallenge(writer)
 		http.Redirect(writer, request, "/login", http.StatusSeeOther)
 		return
 	}
@@ -191,6 +194,7 @@ func (h *HTTP) Logout(writer http.ResponseWriter, request *http.Request) {
 		})
 	}
 	h.cookies.Clear(writer)
+	h.clearChallenge(writer)
 	http.Redirect(writer, request, "/login", http.StatusSeeOther)
 }
 

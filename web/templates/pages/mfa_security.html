@@ -1,0 +1,15 @@
+{{define "content"}}
+<div class="space-y-6">
+<h1 class="text-2xl font-semibold">Security / MFA</h1>
+<p>MFA enabled: {{.Data.Status.Enabled}}</p>
+<p>Enrolled: {{.Data.Status.EnrolledAt}}</p>
+<p>Unused recovery codes: {{.Data.Status.Remaining}}</p>
+<p>MFA is mandatory. Every new session requires your password and authenticator or a recovery code.</p>
+<p>Rotation and recovery code regeneration require your current password and current factor. Both revoke all sessions.</p>
+<form method="post" action="/mfa/security" class="space-y-4">
+<button name="action" value="rotate_authorize" class="rounded bg-blue-700 px-4 py-2 text-white">Rotate authenticator</button>
+<button name="action" value="regenerate" class="rounded bg-blue-700 px-4 py-2 text-white">Regenerate recovery codes</button>
+</form>
+<a href="/">Return to application</a>
+</div>
+{{end}}

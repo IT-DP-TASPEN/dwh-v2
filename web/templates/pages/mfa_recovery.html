@@ -1,0 +1,11 @@
+{{define "content"}}
+<div class="space-y-6">
+<h1 class="text-2xl font-semibold">Save your recovery codes</h1>
+<p>These 10 one-time recovery codes appear exactly once. Copy or print this page now. Refreshing cannot show them again.</p>
+<textarea aria-label="Recovery codes" rows="10" readonly class="w-full rounded border p-2 font-mono" autocomplete="off">{{range .Data.RecoveryCodes}}{{.}}
+{{end}}</textarea>
+<p>Store codes securely. Each code replaces one authenticator verification. Never share codes.</p>
+{{if .Data.Logout}}<p>All sessions revoked. Sign in again with your password and new factor.</p>{{end}}
+<a href="{{.Data.Next}}" class="rounded bg-blue-700 px-4 py-2 text-white">{{if .Data.Logout}}Sign in again{{else}}Continue{{end}}</a>
+</div>
+{{end}}

@@ -234,3 +234,18 @@ Every production reporting account must be SELECT-only, with no INSERT/UPDATE/DE
 Throttling is process-local and resets on restart. Its map holds at most 10,000 usernames; saturation leaves new usernames untracked until cleanup frees entries, but does not block their bounded password verification or evict existing live lockouts. Continue applying per-IP limits at a trusted reverse proxy and aggregate security events across replicas. The application does not trust X-Forwarded-For for security decisions. All new durations and integer bounds must be positive.
 
 Rebuild frontend assets (`npm ci && npm run build`) and deploy the updated binary and static assets together. CSP requires the official Alpine CSP build; inline scripts and eval are disabled. The narrow `style-src-attr 'unsafe-inline'` exception supports Alpine visibility/transitions and context-menu positioning; stylesheet elements remain self-hosted. No schema migration is required for these changes.
+
+## Mandatory MFA deployment
+
+The mandatory TOTP MFA migration revokes all existing browser sessions. Back up
+the database, preserve `APP_SECRET_ENCRYPTION_KEY`, deploy the new migration,
+binary, and assets together, apply migrations through the normal migration
+command, then restart. There are no automatic startup migrations. Users without
+an enrollment must verify their authenticator and save the 10 recovery codes
+before entering the application. Ensure server NTP synchronization.
+
+Challenges last five minutes with five failed factor attempts. Sensitive actions
+require MFA within 10 minutes. Rotation, recovery regeneration, administrative
+reset, and emergency operator reset revoke sessions. No remembered-device or
+administrator MFA bypass exists. See [MFA operations](MFA.md) for the full rollout
+sequence, protected operations, and `app user mfa-reset --username USER` recovery.

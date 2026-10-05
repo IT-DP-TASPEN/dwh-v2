@@ -64,10 +64,18 @@ func NewRouter(dependencies RouterDependencies) http.Handler {
 				guest.Post("/register", dependencies.Authentication.Register)
 			}
 		})
+		web.Get("/mfa", dependencies.Authentication.MFA)
+		web.Post("/mfa", dependencies.Authentication.VerifyMFA)
+		web.Get("/mfa/qr", dependencies.Authentication.QR)
 		web.Post("/logout", dependencies.Authentication.Logout)
 
 		web.Group(func(authenticated chi.Router) {
 			authenticated.Use(dependencies.Authentication.RequireAuth)
+			authenticated.Get("/mfa/step-up", dependencies.Authentication.StepUp)
+			authenticated.Get("/mfa/security", dependencies.Authentication.Security)
+			authenticated.Post("/mfa/security", dependencies.Authentication.Manage)
+			authenticated.Get("/mfa/users/{id}/reset", dependencies.Authentication.AdminResetPage)
+			authenticated.Post("/mfa/users/{id}/reset", dependencies.Authentication.AdminReset)
 			if dependencies.RegisterAuthenticated != nil {
 				dependencies.RegisterAuthenticated(authenticated)
 			}

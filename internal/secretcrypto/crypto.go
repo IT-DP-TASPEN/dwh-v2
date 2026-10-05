@@ -14,6 +14,8 @@ type Purpose string
 const (
 	PurposeReportingDatasourcePassword Purpose = "reporting-datasource-password"
 	PurposeFincloudAuthPassword        Purpose = "fincloud-auth-profile-password"
+	PurposeMFATOTPActive               Purpose = "mfa-totp-active"
+	PurposeMFATOTPPending              Purpose = "mfa-totp-pending"
 	versionLegacyReporting             byte    = 1
 	versionPurposeBound                byte    = 2
 )
@@ -78,7 +80,7 @@ func (c *Cipher) aead() (cipher.AEAD, error) {
 }
 
 func validPurpose(purpose Purpose) bool {
-	return purpose == PurposeReportingDatasourcePassword || purpose == PurposeFincloudAuthPassword
+	return purpose == PurposeReportingDatasourcePassword || purpose == PurposeFincloudAuthPassword || purpose == PurposeMFATOTPActive || purpose == PurposeMFATOTPPending
 }
 
 func purposeAAD(purpose Purpose, recordID uint64) []byte {

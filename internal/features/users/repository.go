@@ -234,6 +234,9 @@ func (repository *Repository) SetUserActive(ctx context.Context, requester secur
 		return fmt.Errorf("update user status: %w", err)
 	}
 	if !active {
+		if _, err := transaction.ExecContext(ctx, `DELETE FROM mfa_challenges WHERE user_id = ?`, userID); err != nil {
+			return err
+		}
 		if _, err := transaction.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? OR impersonated_user_id = ?`, userID, userID); err != nil {
 			return fmt.Errorf("revoke deactivated user sessions: %w", err)
 		}
@@ -270,6 +273,9 @@ func (repository *Repository) ResetUserPassword(ctx context.Context, requester s
 	}
 	if _, err := transaction.ExecContext(ctx, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, now, userID); err != nil {
 		return fmt.Errorf("update user password: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM mfa_challenges WHERE user_id = ?`, userID); err != nil {
+		return err
 	}
 	if _, err := transaction.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
 		return fmt.Errorf("revoke reset user sessions: %w", err)

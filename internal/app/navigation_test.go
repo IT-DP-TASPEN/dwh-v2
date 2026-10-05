@@ -65,15 +65,15 @@ func TestPhaseFourNavigation(t *testing.T) {
 
 func TestPermissionAggregation(t *testing.T) {
 	definitions := PermissionDefinitions()
-	if len(definitions) != 42 {
-		t.Fatalf("got %d permissions, want 42", len(definitions))
+	if len(definitions) != 43 {
+		t.Fatalf("got %d permissions, want 43", len(definitions))
 	}
 	if err := access.ValidateRegistry(definitions); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]bool{
 		users.PermissionView: true, users.PermissionCreate: true, users.PermissionUpdate: true,
-		users.PermissionDisable: true, users.PermissionResetPassword: true,
+		users.PermissionDisable: true, users.PermissionResetPassword: true, users.PermissionMFAReset: true,
 		roles.PermissionView: true, roles.PermissionCreate: true, roles.PermissionUpdate: true,
 		roles.PermissionDelete: true, roles.PermissionAssign: true, roles.PermissionManagePermissions: true,
 		auditlogs.PermissionView:        true,

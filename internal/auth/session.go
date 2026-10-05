@@ -10,14 +10,16 @@ type Session struct {
 	RememberMe         bool
 	ExpiresAt          time.Time
 	LastSeenAt         time.Time
+	MFAVerifiedAt      time.Time
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
 
 type CreateSessionParams struct {
-	UserID     uint64
-	TokenHash  [32]byte
-	RememberMe bool
-	ExpiresAt  time.Time
-	LastSeenAt time.Time
+	UserID        uint64
+	TokenHash     [32]byte
+	RememberMe    bool
+	ExpiresAt     time.Time
+	LastSeenAt    time.Time
+	MFAVerifiedAt time.Time
 }

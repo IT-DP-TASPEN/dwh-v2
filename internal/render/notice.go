@@ -7,6 +7,7 @@ type Notice struct {
 }
 
 var notices = map[string]Notice{
+	"mfa-exhausted":                     {Severity: "warning", Title: "Verification ended", Message: "Invalid verification code. Sign in again to restart MFA verification."},
 	"user-created":                      {Severity: "success", Title: "User created", Message: "The user account is ready."},
 	"user-updated":                      {Severity: "success", Title: "User updated", Message: "Profile changes were saved."},
 	"role-assigned":                     {Severity: "success", Title: "Role assigned", Message: "The user's role was updated."},

@@ -28,9 +28,10 @@ var ApplicationVersions = []int64{
 	20260905120000,
 	20260915120000,
 	20260929120000,
+	20261005120000,
 }
 
-const CurrentVersion int64 = 20260929120000
+const CurrentVersion int64 = 20261005120000
 
 type MigrationRecord struct {
 	Version int64 `db:"version_id"`
@@ -140,6 +141,9 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 	}
 
 	for _, required := range []struct{ table, index string }{
+		{"user_totp_enrollments", "PRIMARY"},
+		{"user_mfa_recovery_codes", "PRIMARY"},
+		{"mfa_challenges", "uq_mfa_challenge_token"},
 		{"ingestion_runs", "uq_ingestion_runs_active_job"},
 		{"fixed_report_publications", "PRIMARY"},
 		{"schedule_occurrences", "uq_schedule_occurrences_active"},
@@ -154,7 +158,7 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 			return fmt.Errorf("required runtime safety index %s.%s is missing", required.table, required.index)
 		}
 	}
-	for _, table := range []string{"schedules", "schedule_attempts", "fincloud_auth_profiles", "report_datasources", "report_templates", "report_parameters", "report_parameter_options", "report_template_user_access", "report_export_jobs", "report_user_folders", "report_user_preferences",
+	for _, table := range []string{"user_totp_enrollments", "user_mfa_recovery_codes", "mfa_challenges", "schedules", "schedule_attempts", "fincloud_auth_profiles", "report_datasources", "report_templates", "report_parameters", "report_parameter_options", "report_template_user_access", "report_export_jobs", "report_user_folders", "report_user_preferences",
 		"fincloud_reference_categories", "fincloud_reference_items", "stg_fincloud_reference_categories", "stg_fincloud_reference_items", "fincloud_marketing_master", "stg_fincloud_marketing_master",
 		"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements",
 		"custom_dataset_uploads", "custom_datasets", "custom_dataset_columns", "custom_dataset_imports"} {
@@ -163,6 +167,10 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, table); err != nil || count != 1 {
 			return fmt.Errorf("required runtime table %s is missing", table)
 		}
+	}
+	var mfaColumn int
+	if err := db.GetContext(ctx, &mfaColumn, `SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='sessions' AND COLUMN_NAME='mfa_verified_at' AND DATA_TYPE='datetime' AND DATETIME_PRECISION=6 AND IS_NULLABLE='NO'`); err != nil || mfaColumn != 1 {
+		return fmt.Errorf("required session MFA assurance column is missing")
 	}
 	var stagingForeignKeys int
 	if err := db.GetContext(ctx, &stagingForeignKeys, `SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS

@@ -64,10 +64,16 @@ func (handler *Handler) Index(writer http.ResponseWriter, request *http.Request)
 }
 
 func (handler *Handler) New(writer http.ResponseWriter, request *http.Request) {
+	if !browserauth.RequireRecentMFA(writer, request, "/datasources/new") {
+		return
+	}
 	handler.admin.RenderPage(writer, request, 200, "features/datasources/form", "New report datasource", FormData{Network: "tcp", Port: "3306", TLSPolicy: string(reporting.TLSRequired), Errors: map[string]string{}})
 }
 
 func (handler *Handler) Create(writer http.ResponseWriter, request *http.Request) {
+	if !browserauth.RequireRecentMFA(writer, request, "/datasources/new") {
+		return
+	}
 	form, input, ok := handler.form(writer, request, true)
 	if !ok {
 		return
@@ -122,6 +128,9 @@ func (handler *Handler) Update(writer http.ResponseWriter, request *http.Request
 	if !found {
 		return
 	}
+	if datasourceConnectionChanged(existing, input) && !browserauth.RequireRecentMFA(writer, request, fmt.Sprintf("/datasources/%d/edit", id)) {
+		return
+	}
 	form.OriginalNetwork = existing.Network
 	if form.Network == "tcp" && existing.Network == "unix" && input.Password == "" {
 		form.Errors["password"] = "A new password is required when switching to TCP."
@@ -147,6 +156,9 @@ func (handler *Handler) Test(writer http.ResponseWriter, request *http.Request) 
 		handler.admin.NotFound(writer, request)
 		return
 	}
+	if !browserauth.RequireRecentMFA(writer, request, fmt.Sprintf("/datasources/%d", id)) {
+		return
+	}
 	principal, _ := browserauth.CurrentPrincipal(request.Context())
 	if err := handler.service.TestDatasource(request.Context(), principal.SecurityContext(), id); err != nil {
 		http.Redirect(writer, request, fmt.Sprintf("/datasources/%d?notice=report-datasource-test-failed", id), http.StatusSeeOther)
@@ -162,6 +174,9 @@ func (handler *Handler) State(writer http.ResponseWriter, request *http.Request)
 	}
 	revision, err := strconv.ParseUint(request.PostFormValue("revision"), 10, 64)
 	status := reporting.Status(request.PostFormValue("status"))
+	if status == reporting.StatusActive && !browserauth.RequireRecentMFA(writer, request, fmt.Sprintf("/datasources/%d", id)) {
+		return
+	}
 	if err != nil {
 		http.Error(writer, "Invalid revision.", 422)
 		return
@@ -172,6 +187,31 @@ func (handler *Handler) State(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	http.Redirect(writer, request, fmt.Sprintf("/datasources/%d?notice=report-datasource-state", id), http.StatusSeeOther)
+}
+
+func datasourceConnectionChanged(existing reporting.Datasource, input reporting.DatasourceInput) bool {
+	// Match the repository's transport normalization before comparing persisted fields.
+	input.Network = strings.TrimSpace(input.Network)
+	if input.Network == "" {
+		input.Network = "tcp"
+	}
+	input.Host, input.SocketPath = strings.TrimSpace(input.Host), strings.TrimSpace(input.SocketPath)
+	input.DatabaseName, input.Username = strings.TrimSpace(input.DatabaseName), strings.TrimSpace(input.Username)
+	if input.Network == "unix" {
+		input.Host, input.Port = "", 0
+		if input.TLSPolicy == "" {
+			input.TLSPolicy = reporting.TLSDisabled
+		}
+	} else if input.Network == "tcp" {
+		input.SocketPath = ""
+	}
+	network := existing.Network
+	if network == "" {
+		network = "tcp"
+	}
+	return input.Password != "" || network != input.Network || existing.Host != input.Host ||
+		existing.Port != input.Port || existing.SocketPath != input.SocketPath ||
+		existing.DatabaseName != input.DatabaseName || existing.Username != input.Username || existing.TLSPolicy != input.TLSPolicy
 }
 
 func (handler *Handler) form(writer http.ResponseWriter, request *http.Request, passwordRequired bool) (FormData, reporting.DatasourceInput, bool) {

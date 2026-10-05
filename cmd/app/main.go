@@ -33,6 +33,11 @@ func run(ctx context.Context, arguments []string, input *os.File, output, errorO
 			return usageError()
 		}
 		return app.Run(ctx)
+	case "user":
+		if len(arguments) < 2 || arguments[1] != "mfa-reset" {
+			return usageError()
+		}
+		return runMFAReset(ctx, arguments[2:], input, output, errorOutput)
 	case "admin":
 		if len(arguments) < 2 || arguments[1] != "create" {
 			return usageError()
@@ -51,5 +56,5 @@ func usageError() error {
 }
 
 func usageText() string {
-	return "app [serve|admin create [--username USER] [--name NAME]]"
+	return "app [serve|admin create [--username USER] [--name NAME]|user mfa-reset --username USER]"
 }

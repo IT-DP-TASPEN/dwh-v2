@@ -15,6 +15,15 @@ type Action string
 const MaxMetadataBytes = 64 << 10
 
 const (
+	ActionMFAEnrolled                     Action = "mfa.enrolled"
+	ActionMFAStepUp                       Action = "mfa.step_up"
+	ActionMFARecoveryUsed                 Action = "mfa.recovery_used"
+	ActionMFARecoveryRegenerated          Action = "mfa.recovery_regenerated"
+	ActionMFARotated                      Action = "mfa.rotated"
+	ActionMFAAdminReset                   Action = "mfa.admin_reset"
+	ActionMFAOperatorReset                Action = "mfa.operator_reset"
+	ActionMFAExhausted                    Action = "mfa.challenge_exhausted"
+	ActionMFAFailed                       Action = "mfa.verification_failed"
 	ActionAuthLoginFailed                 Action = "auth.login_failed"
 	ActionAuthLogin                       Action = "auth.login"
 	ActionAuthLogout                      Action = "auth.logout"
@@ -412,7 +421,8 @@ func validateIdentity(label string, identity *Identity) error {
 
 func knownAction(action Action) bool {
 	switch action {
-	case ActionAuthLoginFailed, ActionAuthLogin,
+	case ActionMFAEnrolled, ActionMFAStepUp, ActionMFARecoveryUsed, ActionMFARecoveryRegenerated, ActionMFARotated, ActionMFAAdminReset, ActionMFAOperatorReset, ActionMFAExhausted, ActionMFAFailed,
+		ActionAuthLoginFailed, ActionAuthLogin,
 		ActionAuthLogout,
 		ActionAuthRegistration,
 		ActionImpersonationStarted,

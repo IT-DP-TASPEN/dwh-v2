@@ -25,6 +25,7 @@
                 <p class="truncate text-sm font-medium text-slate-900 dark:text-white">{{.Principal.Name}}</p>
                 <p class="truncate text-xs text-slate-500 dark:text-slate-400">@{{.Principal.Username}} · {{if .Principal.RoleName}}{{.Principal.RoleName}}{{else}}{{.Principal.RoleSlug}}{{end}}</p>
             </div>
+            <a href="/mfa/security" class="block rounded-lg px-3 py-2 text-sm">Security / MFA</a>
             <form method="post" action="/logout" class="border-t border-slate-200 pt-2 dark:border-slate-800">
                 <button type="submit" class="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40">
                     <i data-lucide="log-out" class="size-4" aria-hidden="true"></i>

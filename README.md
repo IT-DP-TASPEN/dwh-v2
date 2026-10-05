@@ -229,3 +229,15 @@ web/                  templates, frontend source, generated assets
 ```
 
 Dependencies are wired explicitly at startup. Feature-local repositories use parameterized SQL; templates never query the database. The result remains reusable infrastructure plus conventional application code—not a generic resource/form/table DSL.
+
+## Mandatory MFA
+
+Every user, including administrators, must complete TOTP MFA before receiving a
+browser session. First password login requires enrollment. Remember Me changes
+session lifetime only. Sensitive datasource and report template changes require
+MFA verified within 10 minutes. Recovery codes appear once.
+
+**Deploying migration `20261005120000_mandatory_totp_mfa.sql` revokes every existing
+browser session.** Deploy migrations, binary, and assets together; users must sign
+in and enroll again where necessary. See [MFA operations and rollout](docs/MFA.md)
+for recovery, encryption-key requirements, protected actions, and test commands.

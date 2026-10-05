@@ -17,6 +17,7 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/auth"
+	"github.com/ibldzn/go-admin/internal/mfa"
 	"github.com/ibldzn/go-admin/internal/render"
 	"github.com/ibldzn/go-admin/internal/user"
 	webfiles "github.com/ibldzn/go-admin/web"
@@ -239,7 +240,7 @@ func TestLoginHandler(t *testing.T) {
 	t.Run("success sets cookie and safe redirect", func(t *testing.T) {
 		now := time.Date(2026, 8, 9, 1, 2, 3, 0, time.UTC)
 		rawToken := mustToken(t)
-		service := &fakeHTTPService{loginResult: LoginResult{RawToken: rawToken, Session: auth.Session{RememberMe: true, CreatedAt: now}}}
+		service := &fakeHTTPService{loginResult: LoginResult{Challenge: mfa.Issued{Token: rawToken, Challenge: mfa.Challenge{ExpiresAt: now.Add(5 * time.Minute)}}}}
 		handler := newTestHTTP(t, service, false)
 		form := url.Values{"username": {"admin"}, "password": {"correct horse battery staple"}, "remember_me": {"on"}, "next": {"https://evil.example"}}
 		request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
@@ -247,7 +248,7 @@ func TestLoginHandler(t *testing.T) {
 		response := httptest.NewRecorder()
 		handler.Login(response, request)
 		cookies := response.Result().Cookies()
-		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/" || len(cookies) != 1 || cookies[0].Value != rawToken || cookies[0].MaxAge <= 0 || !service.loginInput.RememberMe {
+		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/mfa" || len(cookies) != 1 || cookies[0].Name != "test_session_mfa" || cookies[0].Path != "/mfa" || cookies[0].Value != rawToken || cookies[0].MaxAge <= 0 || !service.loginInput.RememberMe {
 			t.Fatalf("unexpected login success: status=%d location=%q cookies=%+v input=%+v", response.Code, response.Header().Get("Location"), cookies, service.loginInput)
 		}
 	})
@@ -479,22 +480,17 @@ func TestAuthenticationAuditAttributionAndBestEffortFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("login uses logged in user", func(t *testing.T) {
+	t.Run("password success has no login audit", func(t *testing.T) {
 		events = nil
 		token := mustToken(t)
-		service := &fakeHTTPService{loginResult: LoginResult{RawToken: token, Session: auth.Session{UserID: 7, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}}}
+		service := &fakeHTTPService{loginResult: LoginResult{Challenge: mfa.Issued{Token: token, Challenge: mfa.Challenge{ExpiresAt: time.Now().Add(5 * time.Minute)}}}}
 		handler := newTestHTTPWithAudit(t, service, false, appendAudit)
-		form := url.Values{"username": {" USER "}, "password": {"password"}}
-		request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+		request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(url.Values{"username": {"user"}, "password": {"password"}}.Encode()))
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		response := httptest.NewRecorder()
 		handler.Login(response, request)
-		if response.Code != http.StatusSeeOther || len(events) != 1 {
-			t.Fatalf("audit failure changed login: status=%d events=%d", response.Code, len(events))
-		}
-		event := events[0]
-		if event.Action != audit.ActionAuthLogin || event.Attribution.Actor == nil || event.Attribution.Effective == nil || *event.Attribution.Actor != (audit.Identity{UserID: 7, Username: "user"}) || *event.Attribution.Effective != *event.Attribution.Actor {
-			t.Fatalf("unexpected login attribution: %+v", event)
+		if response.Code != 303 || len(events) != 0 {
+			t.Fatal("password-only login audited as authenticated")
 		}
 	})
 
@@ -543,7 +539,7 @@ func TestLogoutHandler(t *testing.T) {
 		response := httptest.NewRecorder()
 		handler.Logout(response, request)
 		cookies := response.Result().Cookies()
-		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/login" || service.logoutHash != auth.HashToken(rawToken) || len(cookies) != 1 || cookies[0].MaxAge != -1 {
+		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/login" || service.logoutHash != auth.HashToken(rawToken) || len(cookies) != 2 || cookies[0].MaxAge != -1 {
 			t.Fatalf("unexpected logout: status=%d hash=%x cookies=%+v", response.Code, service.logoutHash, cookies)
 		}
 	})
@@ -566,7 +562,7 @@ func TestLogoutHandler(t *testing.T) {
 		response := httptest.NewRecorder()
 		handler.Logout(response, request)
 		cookies := response.Result().Cookies()
-		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/login" || len(cookies) != 1 || cookies[0].MaxAge != -1 {
+		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/login" || len(cookies) != 2 || cookies[0].MaxAge != -1 {
 			t.Fatalf("unexpected missing-session logout: status=%d cookies=%+v", response.Code, cookies)
 		}
 	})

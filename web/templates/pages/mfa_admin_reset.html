@@ -1,0 +1,10 @@
+{{define "content"}}
+<div class="space-y-6">
+<h1 class="text-2xl font-semibold">Reset MFA</h1>
+<p>Reset user {{.Data.TargetID}} MFA. This deletes the authenticator enrollment and recovery codes, invalidates challenges, and revokes all sessions. The next password login requires new enrollment.</p>
+<form method="post" action="/mfa/users/{{.Data.TargetID}}/reset">
+<button name="confirm" value="reset" class="rounded bg-red-700 px-4 py-2 text-white">Reset MFA and require re-enrollment</button>
+</form>
+<a href="/users/{{.Data.TargetID}}">Cancel</a>
+</div>
+{{end}}

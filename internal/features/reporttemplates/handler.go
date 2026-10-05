@@ -80,6 +80,9 @@ func (handler *Handler) Index(writer http.ResponseWriter, request *http.Request)
 }
 
 func (handler *Handler) New(writer http.ResponseWriter, request *http.Request) {
+	if !browserauth.RequireRecentMFA(writer, request, "/report-templates/new") {
+		return
+	}
 	datasources, err := handler.repository.ListDatasources(request.Context())
 	if err != nil {
 		handler.admin.Internal(writer, request, "list report datasources", err)
@@ -90,6 +93,9 @@ func (handler *Handler) New(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (handler *Handler) Create(writer http.ResponseWriter, request *http.Request) {
+	if !browserauth.RequireRecentMFA(writer, request, "/report-templates/new") {
+		return
+	}
 	form, input, _, ok := handler.form(writer, request)
 	if !ok {
 		return
@@ -141,6 +147,14 @@ func (handler *Handler) Update(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	form.ID = id
+	existing, found := handler.find(writer, request)
+	if !found {
+		return
+	}
+	definitionChanged := existing.DatasourceID != input.DatasourceID || existing.SQLText != input.SQLText || encodeParameters(existing.Parameters) != encodeParameters(input.Parameters)
+	if definitionChanged && !browserauth.RequireRecentMFA(writer, request, fmt.Sprintf("/report-templates/%d/edit", id)) {
+		return
+	}
 	if len(form.Errors) != 0 {
 		handler.renderForm(writer, request, 422, form)
 		return
@@ -159,6 +173,9 @@ func (handler *Handler) Test(writer http.ResponseWriter, request *http.Request) 
 	id, ok := idParam(request)
 	if !ok {
 		handler.admin.NotFound(writer, request)
+		return
+	}
+	if !browserauth.RequireRecentMFA(writer, request, fmt.Sprintf("/report-templates/%d/edit", id)) {
 		return
 	}
 	form, input, values, ok := handler.form(writer, request)
@@ -187,6 +204,9 @@ func (handler *Handler) TestOptions(writer http.ResponseWriter, request *http.Re
 	id, ok := idParam(request)
 	if !ok {
 		handler.admin.NotFound(writer, request)
+		return
+	}
+	if !browserauth.RequireRecentMFA(writer, request, fmt.Sprintf("/report-templates/%d/edit", id)) {
 		return
 	}
 	form, input, values, ok := handler.form(writer, request)
@@ -220,6 +240,9 @@ func (handler *Handler) State(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	revision, err := strconv.ParseUint(request.PostFormValue("revision"), 10, 64)
+	if reporting.Status(request.PostFormValue("status")) == reporting.StatusActive && !browserauth.RequireRecentMFA(writer, request, fmt.Sprintf("/report-templates/%d", id)) {
+		return
+	}
 	if err != nil {
 		http.Error(writer, "Invalid revision.", 422)
 		return

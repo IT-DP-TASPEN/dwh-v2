@@ -10,6 +10,7 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/access"
 	"github.com/ibldzn/go-admin/internal/auth"
+	"github.com/ibldzn/go-admin/internal/mfa"
 	"github.com/ibldzn/go-admin/internal/user"
 )
 
@@ -137,42 +138,49 @@ func (store *fakeSessions) Revoke(_ context.Context, hash [32]byte) error {
 	return store.revokeErr
 }
 
-func TestLoginCreatesFreshHashedSession(t *testing.T) {
-	password := "correct horse battery staple"
-	passwordHash, err := auth.HashPassword(password)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, 8, 9, 10, 11, 12, 0, time.FixedZone("test", 7*60*60))
+type fakeLoginChallenges struct {
+	id       uint64
+	remember bool
+	next     string
+	calls    int
+	purpose  string
+}
 
-	for _, test := range []struct {
-		name     string
-		remember bool
-		lifetime time.Duration
-	}{
-		{name: "normal", lifetime: 24 * time.Hour},
-		{name: "remember", remember: true, lifetime: 30 * 24 * time.Hour},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			users := &fakeUsers{byUsername: user.User{ID: 4, PasswordHash: passwordHash, IsActive: true}, updateLastErr: errors.New("metadata unavailable")}
+func (f *fakeLoginChallenges) BeginLogin(_ context.Context, id uint64, _ string, remember bool, next string, now time.Time) (mfa.Issued, error) {
+	f.id = id
+	f.remember = remember
+	f.next = next
+	f.calls++
+	return mfa.Issued{Token: "challenge", Challenge: mfa.Challenge{UserID: id, RememberMe: remember, Purpose: f.purpose, ExpiresAt: now.Add(mfa.ChallengeLifetime)}}, nil
+}
+func TestLoginRequiresMFAChallengeWithoutSession(t *testing.T) {
+	for _, purpose := range []string{mfa.Enrollment, mfa.Login} {
+		for _, remember := range []bool{false, true} {
+			users := &fakeUsers{byUsername: user.User{ID: 4, IsActive: true, PasswordHash: "hash"}}
 			sessions := &fakeSessions{}
 			service := newTestService(t, users, &fakeRoles{}, sessions)
-
-			result, err := service.Login(context.Background(), LoginInput{Username: "  ADMIN ", Password: password, RememberMe: test.remember}, now)
+			challenges := &fakeLoginChallenges{purpose: purpose}
+			service.mfa = challenges
+			service.verifyPassword = func(string, string) (bool, error) { return true, nil }
+			result, err := service.Login(context.Background(), LoginInput{Username: " ADMIN ", Password: "password", RememberMe: remember, Next: "//evil.example"}, time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
-			if users.findUsernameArg != "admin" || sessions.createParams.UserID != 4 || sessions.createParams.RememberMe != test.remember {
-				t.Fatalf("unexpected login persistence: username=%q params=%+v", users.findUsernameArg, sessions.createParams)
+			if challenges.calls != 1 || challenges.id != 4 || challenges.remember != remember || challenges.next != "/" || result.Challenge.Challenge.Purpose != purpose {
+				t.Fatal("missing limited-purpose challenge")
 			}
-			if sessions.createParams.TokenHash != auth.HashToken(result.RawToken) || result.RawToken == "" {
-				t.Fatal("session repository did not receive only the raw token hash")
+			if sessions.createParams.UserID != 0 || !users.lastLoginAt.IsZero() {
+				t.Fatal("password-only login created session")
 			}
-			wantNow := now.UTC()
-			if !sessions.createParams.ExpiresAt.Equal(wantNow.Add(test.lifetime)) || !sessions.createParams.LastSeenAt.Equal(wantNow) || !users.lastLoginAt.Equal(wantNow) {
-				t.Fatalf("unexpected timestamps: params=%+v last_login=%v", sessions.createParams, users.lastLoginAt)
-			}
-		})
+		}
+	}
+}
+func TestLoginFailsClosedWithoutMFAStore(t *testing.T) {
+	service := newTestService(t, &fakeUsers{byUsername: user.User{ID: 4, IsActive: true}}, &fakeRoles{}, &fakeSessions{})
+	service.mfa = nil
+	service.verifyPassword = func(string, string) (bool, error) { return true, nil }
+	if _, err := service.Login(context.Background(), LoginInput{Username: "user", Password: "password"}, time.Now()); err == nil {
+		t.Fatal("missing MFA store accepted")
 	}
 }
 
@@ -502,6 +510,9 @@ func newTestService(t *testing.T, users userStore, roles roleStore, sessions ses
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if store, ok := sessions.(*fakeSessions); ok {
+		if store.found.MFAVerifiedAt.IsZero() {
+			store.found.MFAVerifiedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		}
 		if store.found.ExpiresAt.IsZero() {
 			store.found.ExpiresAt = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
 		}
@@ -513,5 +524,38 @@ func newTestService(t *testing.T, users userStore, roles roleStore, sessions ses
 	if err != nil {
 		t.Fatal(err)
 	}
+	service.mfa = &fakeLoginChallenges{}
 	return service
+}
+
+func TestSessionWithoutMFAAssuranceIsRevoked(t *testing.T) {
+	now := time.Now().UTC()
+	sessions := &fakeSessions{found: auth.Session{ID: 1, UserID: 4, ExpiresAt: now.Add(time.Hour), LastSeenAt: now}}
+	service := newTestService(t, &fakeUsers{}, &fakeRoles{}, sessions)
+	sessions.found.MFAVerifiedAt = time.Time{}
+	hash := auth.HashToken("legacy")
+	if _, err := service.ResolveSession(context.Background(), hash, now); !errors.Is(err, ErrUnauthenticated) || sessions.revokedHash != hash {
+		t.Fatal("password-only session accepted", err)
+	}
+}
+func TestPasswordFailuresNeverIssueChallengeOrSession(t *testing.T) {
+	for _, kind := range []string{"wrong", "unknown", "inactive"} {
+		t.Run(kind, func(t *testing.T) {
+			users := &fakeUsers{byUsername: user.User{ID: 4, IsActive: kind != "inactive", PasswordHash: "hash"}}
+			if kind == "unknown" {
+				users.findUsernameErr = user.ErrNotFound
+			}
+			sessions := &fakeSessions{}
+			service := newTestService(t, users, &fakeRoles{}, sessions)
+			challenges := &fakeLoginChallenges{}
+			service.mfa = challenges
+			service.verifyPassword = func(string, string) (bool, error) { return kind == "inactive", nil }
+			if _, err := service.Login(context.Background(), LoginInput{Username: "user", Password: "password"}, time.Now()); !errors.Is(err, ErrInvalidCredentials) {
+				t.Fatal(err)
+			}
+			if challenges.calls != 0 || sessions.createParams.UserID != 0 {
+				t.Fatal("password failure issued challenge/session")
+			}
+		})
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/access"
 	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/auth"
+	"github.com/ibldzn/go-admin/internal/mfa"
 	"github.com/ibldzn/go-admin/internal/securityctx"
 	"github.com/ibldzn/go-admin/internal/user"
 )
@@ -27,7 +28,6 @@ type userStore interface {
 	Create(context.Context, user.CreateParams, time.Time) (user.User, error)
 	FindByID(context.Context, uint64) (user.User, error)
 	FindByUsername(context.Context, string) (user.User, error)
-	UpdateLastLoginAt(context.Context, uint64, time.Time) error
 }
 
 type roleStore interface {
@@ -37,13 +37,17 @@ type roleStore interface {
 }
 
 type sessionStore interface {
-	Create(context.Context, auth.CreateSessionParams, time.Time) (auth.Session, error)
 	FindValidByTokenHash(context.Context, [32]byte, time.Time) (auth.Session, error)
 	UpdateLastSeenAt(context.Context, uint64, time.Time) error
 	Revoke(context.Context, [32]byte) error
 }
 
+type loginChallengeStore interface {
+	BeginLogin(context.Context, uint64, string, bool, string, time.Time) (mfa.Issued, error)
+}
+
 type Service struct {
+	mfa              loginChallengeStore
 	users            userStore
 	roles            roleStore
 	sessions         sessionStore
@@ -51,7 +55,6 @@ type Service struct {
 	rememberLifetime time.Duration
 	dummyHash        string
 	verifyPassword   func(string, string) (bool, error)
-	generateToken    func() (string, error)
 	logger           *slog.Logger
 	security         SecurityConfig
 	passwordSlots    chan struct{}
@@ -62,11 +65,11 @@ type LoginInput struct {
 	Username   string
 	Password   string
 	RememberMe bool
+	Next       string
 }
 
 type LoginResult struct {
-	RawToken string
-	Session  auth.Session
+	Challenge mfa.Issued
 }
 
 type RegisterInput struct {
@@ -93,6 +96,7 @@ type Principal struct {
 	RoleName        string
 	RoleSlug        string
 	Permissions     access.PermissionSet
+	MFAVerifiedAt   time.Time
 	SessionID       uint64
 	RememberMe      bool
 	Actor           Identity
@@ -159,7 +163,6 @@ func NewService(
 		rememberLifetime: rememberLifetime,
 		dummyHash:        dummyHash,
 		verifyPassword:   auth.VerifyPassword,
-		generateToken:    auth.GenerateToken,
 		logger:           logger,
 	}, nil
 }
@@ -198,29 +201,17 @@ func (s *Service) Login(ctx context.Context, input LoginInput, now time.Time) (r
 	}
 
 	s.failures.clear(input.Username)
-	rawToken, err := s.generateToken()
+	if s.mfa == nil {
+		return LoginResult{}, fmt.Errorf("mandatory MFA store unavailable")
+	}
+	issued, err := s.mfa.BeginLogin(ctx, found.ID, found.PasswordHash, input.RememberMe, SafeRedirect(input.Next), now.UTC())
+	if errors.Is(err, mfa.ErrInvalid) {
+		return LoginResult{}, ErrInvalidCredentials
+	}
 	if err != nil {
 		return LoginResult{}, err
 	}
-	now = now.UTC()
-	lifetime := s.lifetime
-	if input.RememberMe {
-		lifetime = s.rememberLifetime
-	}
-	session, err := s.sessions.Create(ctx, auth.CreateSessionParams{
-		UserID:     found.ID,
-		TokenHash:  auth.HashToken(rawToken),
-		RememberMe: input.RememberMe,
-		ExpiresAt:  now.Add(lifetime),
-		LastSeenAt: now,
-	}, now)
-	if err != nil {
-		return LoginResult{}, fmt.Errorf("create browser session: %w", err)
-	}
-	if err := s.users.UpdateLastLoginAt(ctx, found.ID, now); err != nil {
-		s.logger.WarnContext(ctx, "update last login", "user_id", found.ID, "error", err)
-	}
-	return LoginResult{RawToken: rawToken, Session: session}, nil
+	return LoginResult{Challenge: issued}, nil
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterInput, now time.Time) (user.User, error) {
@@ -266,7 +257,7 @@ func (s *Service) ResolveSession(ctx context.Context, tokenHash [32]byte, now ti
 		return Principal{}, fmt.Errorf("find browser session: %w", err)
 	}
 
-	if !session.ExpiresAt.After(now) || !session.LastSeenAt.Add(s.security.IdleTimeout).After(now) {
+	if session.MFAVerifiedAt.IsZero() || !session.ExpiresAt.After(now) || !session.LastSeenAt.Add(s.security.IdleTimeout).After(now) {
 		return Principal{}, s.revokeUnauthenticated(ctx, tokenHash)
 	}
 	actor, found, err := s.findIdentity(ctx, session.UserID)
@@ -312,6 +303,7 @@ func (s *Service) ResolveSession(ctx context.Context, tokenHash [32]byte, now ti
 		RoleName:        effective.Role.Name,
 		RoleSlug:        effective.Role.Slug,
 		Permissions:     permissions,
+		MFAVerifiedAt:   session.MFAVerifiedAt,
 		SessionID:       session.ID,
 		RememberMe:      session.RememberMe,
 		Actor:           actor.Identity(),
@@ -361,4 +353,32 @@ func (s *Service) revokeUnauthenticated(ctx context.Context, tokenHash [32]byte)
 		return fmt.Errorf("revoke unusable session: %w", err)
 	}
 	return ErrUnauthenticated
+}
+
+// EnableMFA is required before accepting password logins. Missing configuration fails closed.
+func (s *Service) EnableMFA(store *mfa.Store) {
+	store.Lifetime = s.lifetime
+	store.RememberLifetime = s.rememberLifetime
+	store.IdleTimeout = s.security.IdleTimeout
+	s.mfa = store
+}
+
+// ConfirmPassword uses the same bounded Argon2 verifier as login. The returned
+// hash is rechecked against the locked user row by the MFA transaction.
+func (s *Service) ConfirmPassword(ctx context.Context, id uint64, password string, now time.Time) (string, error) {
+	if password == "" || len(password) > auth.MaxPasswordBytes {
+		return "", ErrInvalidCredentials
+	}
+	u, err := s.users.FindByID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	valid, err := s.verifyBounded(ctx, u.Username, password, u.PasswordHash, now)
+	if err != nil {
+		return "", err
+	}
+	if !valid || !u.IsActive {
+		return "", ErrInvalidCredentials
+	}
+	return u.PasswordHash, nil
 }

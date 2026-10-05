@@ -27,6 +27,7 @@ type sessionRow struct {
 	RememberMe         bool          `db:"remember_me"`
 	ExpiresAt          time.Time     `db:"expires_at"`
 	LastSeenAt         time.Time     `db:"last_seen_at"`
+	MFAVerifiedAt      sql.NullTime  `db:"mfa_verified_at"`
 	CreatedAt          time.Time     `db:"created_at"`
 	UpdatedAt          time.Time     `db:"updated_at"`
 }
@@ -36,6 +37,14 @@ func NewSessionRepository(database *sqlx.DB) *SessionRepository {
 }
 
 func (r *SessionRepository) Create(ctx context.Context, params CreateSessionParams, now time.Time) (Session, error) {
+	return CreateSessionIn(ctx, r.database, params, now)
+}
+
+// CreateSessionIn permits MFA verification and session creation in one transaction.
+func CreateSessionIn(ctx context.Context, database sqlx.ExtContext, params CreateSessionParams, now time.Time) (Session, error) {
+	if params.MFAVerifiedAt.IsZero() {
+		return Session{}, fmt.Errorf("session requires verified MFA")
+	}
 	if params.UserID == 0 {
 		return Session{}, fmt.Errorf("user ID must not be zero")
 	}
@@ -53,14 +62,15 @@ func (r *SessionRepository) Create(ctx context.Context, params CreateSessionPara
 	}
 
 	const query = `
-		INSERT INTO sessions (user_id, token_hash, remember_me, expires_at, last_seen_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`
-	result, err := r.database.ExecContext(ctx, query,
+		INSERT INTO sessions (user_id, token_hash, remember_me, expires_at, last_seen_at, mfa_verified_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := database.ExecContext(ctx, query,
 		params.UserID,
 		params.TokenHash[:],
 		params.RememberMe,
 		params.ExpiresAt,
 		params.LastSeenAt,
+		params.MFAVerifiedAt.UTC(),
 		now,
 		now,
 	)
@@ -72,14 +82,15 @@ func (r *SessionRepository) Create(ctx context.Context, params CreateSessionPara
 		return Session{}, fmt.Errorf("read created session ID: %w", err)
 	}
 	return Session{
-		ID:         uint64(id),
-		UserID:     params.UserID,
-		TokenHash:  params.TokenHash,
-		RememberMe: params.RememberMe,
-		ExpiresAt:  params.ExpiresAt,
-		LastSeenAt: params.LastSeenAt,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:            uint64(id),
+		UserID:        params.UserID,
+		TokenHash:     params.TokenHash,
+		RememberMe:    params.RememberMe,
+		ExpiresAt:     params.ExpiresAt,
+		LastSeenAt:    params.LastSeenAt,
+		MFAVerifiedAt: params.MFAVerifiedAt,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}, nil
 }
 
@@ -110,6 +121,9 @@ func (r *SessionRepository) RevokeAllForUser(ctx context.Context, userID uint64)
 }
 
 func (r *SessionRepository) DeleteExpired(ctx context.Context, now time.Time) (int64, error) {
+	if _, err := r.database.ExecContext(ctx, `DELETE FROM mfa_challenges WHERE expires_at <= ?`, now.UTC()); err != nil {
+		return 0, fmt.Errorf("delete expired MFA challenges: %w", err)
+	}
 	result, err := r.database.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, now.UTC())
 	if err != nil {
 		return 0, fmt.Errorf("delete expired sessions: %w", err)
@@ -135,6 +149,7 @@ func (row sessionRow) session() (Session, error) {
 		RememberMe:         row.RememberMe,
 		ExpiresAt:          row.ExpiresAt,
 		LastSeenAt:         row.LastSeenAt,
+		MFAVerifiedAt:      row.MFAVerifiedAt.Time,
 		CreatedAt:          row.CreatedAt,
 		UpdatedAt:          row.UpdatedAt,
 	}, nil
@@ -142,7 +157,7 @@ func (row sessionRow) session() (Session, error) {
 
 func FindValidSession(ctx context.Context, database sqlx.ExtContext, tokenHash [32]byte, now time.Time, lock bool) (Session, error) {
 	query := `
-		SELECT id, user_id, impersonated_user_id, token_hash, remember_me, expires_at, last_seen_at, created_at, updated_at
+		SELECT id, user_id, impersonated_user_id, token_hash, remember_me, expires_at, last_seen_at, mfa_verified_at, created_at, updated_at
 		FROM sessions
 		WHERE token_hash = ? AND expires_at > ?`
 	if lock {

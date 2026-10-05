@@ -75,7 +75,7 @@ func Reset(t *testing.T, db *sqlx.DB, definitions []access.PermissionDefinition)
 		t.Fatal(err)
 	}
 	defer connection.ExecContext(context.Background(), `SET FOREIGN_KEY_CHECKS = 1`)
-	for _, table := range []string{"custom_dataset_columns", "custom_dataset_imports", "custom_datasets", "custom_dataset_uploads", "report_user_preferences", "report_user_folders", "report_export_jobs", "report_template_user_access", "report_parameter_options", "report_parameters", "report_templates", "report_datasources", "audit_logs", "sessions", "role_permissions", "users", "permissions", "roles"} {
+	for _, table := range []string{"mfa_challenges", "user_mfa_recovery_codes", "user_totp_enrollments", "custom_dataset_columns", "custom_dataset_imports", "custom_datasets", "custom_dataset_uploads", "report_user_preferences", "report_user_folders", "report_export_jobs", "report_template_user_access", "report_parameter_options", "report_parameters", "report_templates", "report_datasources", "audit_logs", "sessions", "role_permissions", "users", "permissions", "roles"} {
 		if _, err := connection.ExecContext(context.Background(), `TRUNCATE TABLE `+table); err != nil {
 			t.Fatalf("truncate integration table %s: %v", table, err)
 		}
@@ -135,7 +135,7 @@ func Session(t *testing.T, repository *auth.SessionRepository, userID uint64, re
 	t.Helper()
 	session, err := repository.Create(context.Background(), auth.CreateSessionParams{
 		UserID: userID, TokenHash: auth.HashToken(token), RememberMe: remember,
-		ExpiresAt: now.Add(12 * time.Hour), LastSeenAt: now,
+		ExpiresAt: now.Add(12 * time.Hour), LastSeenAt: now, MFAVerifiedAt: now,
 	}, now)
 	if err != nil {
 		t.Fatal(err)

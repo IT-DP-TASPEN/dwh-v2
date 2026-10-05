@@ -1,13 +1,24 @@
 package reporttemplates
 
 import (
+	"context"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/go-chi/chi/v5"
+
+	"github.com/ibldzn/go-admin/internal/access"
+	"github.com/ibldzn/go-admin/internal/auth"
+	"github.com/ibldzn/go-admin/internal/browserauth"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
+	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/render"
 	"github.com/ibldzn/go-admin/internal/reporting"
+	"github.com/ibldzn/go-admin/internal/user"
 	webfiles "github.com/ibldzn/go-admin/web"
 )
 
@@ -141,4 +152,138 @@ func TestTemplateDetailKeepsACLControls(t *testing.T) {
 			t.Fatalf("ACL control missing %q: %s", want, body)
 		}
 	}
+}
+
+func TestTemplateCanonicalDefinitionComparison(t *testing.T) {
+	parameters, err := decodeParameters(`[{"key":"city","label":"City","type":"single_option","option_source":"dynamic","dynamic_option_sql":"SELECT city FROM locations","required":false,"default":null},{"key":"region","label":"Region","type":"single_option","required":true,"default":"east","options":[{"value":"east","label":"East"},{"value":"west","label":"West"}]}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := encodeParameters(parameters)
+	for _, test := range []struct {
+		name   string
+		change func([]reporting.Parameter)
+	}{
+		{"dynamic SQL", func(value []reporting.Parameter) { value[0].DynamicOptionSQL = "SELECT city FROM other" }},
+		{"key", func(value []reporting.Parameter) { value[0].Key = "other" }},
+		{"type", func(value []reporting.Parameter) { value[0].Type = reporting.ParameterMultipleOption }},
+		{"required", func(value []reporting.Parameter) { value[0].Required = true }},
+		{"default", func(value []reporting.Parameter) { value[1].DefaultValue = []byte(`"west"`) }},
+		{"option source", func(value []reporting.Parameter) { value[0].OptionSource = reporting.OptionSourceStatic }},
+		{"option value", func(value []reporting.Parameter) { value[1].Options[0].Value = "other" }},
+		{"parameter order", func(value []reporting.Parameter) { value[0], value[1] = value[1], value[0] }},
+		{"option order", func(value []reporting.Parameter) {
+			value[1].Options[0], value[1].Options[1] = value[1].Options[1], value[1].Options[0]
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed, err := decodeParameters(canonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.change(changed)
+			if encodeParameters(changed) == canonical {
+				t.Fatal("query definition change classified as metadata edit")
+			}
+		})
+	}
+	parameters[0].ID, parameters[0].ReportID = 99, 7
+	parameters[1].Options[0].ID, parameters[1].Options[0].ParameterID = 88, 99
+	if encodeParameters(parameters) != canonical {
+		t.Fatal("database IDs changed canonical query definition")
+	}
+}
+
+func TestTemplateRoutesRequireMFAAfterRBAC(t *testing.T) {
+	for _, operation := range []struct {
+		method, path, permission, body, next string
+		freshStatus                          int
+	}{
+		{http.MethodGet, "/report-templates/new", PermissionCreate, "", "/report-templates/new", 0},
+		{http.MethodPost, "/report-templates", PermissionCreate, "sql_text=never-replay&broken=%", "/report-templates/new", http.StatusBadRequest},
+		{http.MethodPost, "/report-templates/7/test", PermissionUpdate, "sql_text=never-replay&broken=%", "/report-templates/7/edit", http.StatusBadRequest},
+		{http.MethodPost, "/report-templates/7/test-options", PermissionUpdate, "sql_text=never-replay&broken=%", "/report-templates/7/edit", http.StatusBadRequest},
+		{http.MethodPost, "/report-templates/7/state", PermissionChangeState, "status=active&revision=bad", "/report-templates/7", http.StatusUnprocessableEntity},
+	} {
+		for _, test := range []struct {
+			name             string
+			permitted, fresh bool
+			want             int
+		}{
+			{"stale", true, false, http.StatusSeeOther},
+			{"RBAC denied stale", false, false, http.StatusForbidden},
+			{"RBAC denied fresh", false, true, http.StatusForbidden},
+			{"fresh", true, true, operation.freshStatus},
+		} {
+			if test.want == 0 {
+				continue
+			}
+			t.Run(operation.path+"/"+test.name, func(t *testing.T) {
+				principal := browserauth.Principal{UserID: 1, RoleSlug: access.UserRoleSlug}
+				if test.permitted {
+					principal.Permissions = access.NewPermissionSet([]string{operation.permission, "reports.execute"})
+				}
+				if test.fresh {
+					principal.MFAVerifiedAt = time.Now().UTC()
+				}
+				router, token := templateMFARouter(t, principal)
+				request := httptest.NewRequest(operation.method, operation.path, strings.NewReader(operation.body))
+				request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				request.AddCookie(&http.Cookie{Name: "session", Value: token})
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, request)
+				if response.Code != test.want {
+					t.Fatalf("status=%d, want %d", response.Code, test.want)
+				}
+				if test.want == http.StatusSeeOther {
+					location, err := url.Parse(response.Header().Get("Location"))
+					if err != nil || location.Path != "/mfa/step-up" || location.Query().Get("next") != operation.next || location.Query().Get("resubmit") != "1" {
+						t.Fatalf("unsafe destination: %q", response.Header().Get("Location"))
+					}
+					if strings.Contains(response.Header().Get("Location"), "never-replay") {
+						t.Fatal("POST SQL persisted in redirect")
+					}
+					if len(response.Result().Cookies()) != 0 {
+						t.Fatal("POST state persisted in cookie")
+					}
+				}
+			})
+		}
+	}
+}
+
+type templateMFAAuthentication struct{ principal browserauth.Principal }
+
+func (*templateMFAAuthentication) Login(context.Context, browserauth.LoginInput, time.Time) (browserauth.LoginResult, error) {
+	return browserauth.LoginResult{}, browserauth.ErrInvalidCredentials
+}
+func (*templateMFAAuthentication) Register(context.Context, browserauth.RegisterInput, time.Time) (user.User, error) {
+	return user.User{}, nil
+}
+func (service *templateMFAAuthentication) ResolveSession(context.Context, [32]byte, time.Time) (browserauth.Principal, error) {
+	return service.principal, nil
+}
+func (*templateMFAAuthentication) Logout(context.Context, [32]byte) error { return nil }
+
+func templateMFARouter(t *testing.T, principal browserauth.Principal) (http.Handler, string) {
+	t.Helper()
+	renderer, err := render.New(webfiles.Files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := navigation.NewRegistry(nil, PermissionDefinitions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	errors := render.NewErrorResponder(renderer, "Test", nil)
+	cookies := browserauth.NewCookieManager("session", false, time.Hour)
+	loader := browserauth.NewHTTP(&templateMFAAuthentication{principal}, renderer, cookies, "Test", false, nil, nil, errors)
+	router := chi.NewRouter()
+	router.Use(loader.LoadPrincipal, loader.RequireAuth)
+	NewHandler(adminshell.New(renderer, registry, "Test", errors), nil, nil).RegisterRoutes(router)
+	token, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return router, token
 }

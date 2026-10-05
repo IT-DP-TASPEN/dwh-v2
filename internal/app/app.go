@@ -22,6 +22,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/dwhschema"
 	"github.com/ibldzn/go-admin/internal/fincloud"
 	"github.com/ibldzn/go-admin/internal/fincloudauth"
+	"github.com/ibldzn/go-admin/internal/mfa"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/render"
@@ -183,6 +184,8 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize browser authentication: %w", err)
 	}
+	mfaStore := &mfa.Store{DB: databaseConnection, Cipher: secretCipher, Lifetime: applicationConfig.Session.Lifetime, RememberLifetime: applicationConfig.Session.RememberLifetime, IdleTimeout: applicationConfig.Session.IdleTimeout}
+	authenticationService.EnableMFA(mfaStore)
 	var contentFiles fs.FS = webfiles.Files
 	reloadTemplates := false
 	if applicationConfig.App.IsDevelopment() {
@@ -217,6 +220,7 @@ func Run(ctx context.Context) error {
 		},
 		errorResponder,
 	)
+	authenticationHTTP.EnableMFA(mfaStore)
 	navigationRegistry, err := navigation.NewRegistry(navigationGroups(), PermissionDefinitions())
 	if err != nil {
 		return fmt.Errorf("initialize admin navigation: %w", err)

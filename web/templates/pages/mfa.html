@@ -1,0 +1,22 @@
+{{define "content"}}
+<div class="space-y-6">
+<h1 class="text-2xl font-semibold">{{if .Data.Enrollment}}{{if .Data.Rotation}}Set up new authenticator{{else}}Mandatory MFA enrollment{{end}}{{else}}Verify MFA{{end}}</h1>
+<p>Use an authenticator verification code or an unused recovery code. Challenges expire after 5 minutes. Five invalid attempts require login again.</p>
+{{if .Data.Enrollment}}
+<p>Scan this QR code with your authenticator. Keep manual setup secret private.</p>
+<img src="/mfa/qr" width="256" height="256" alt="Authenticator setup QR code" class="bg-white p-4">
+<label for="manual-secret">Manual Base32 secret</label>
+<input id="manual-secret" readonly value="{{.Data.Secret}}" class="w-full rounded border p-2 font-mono" autocomplete="off">
+<p>SHA-1, 6 digits, every 30 seconds. Enter a code from this new authenticator to activate enrollment.</p>
+{{else}}
+<p>MFA verification expired or this action requires confirmation. After verification, return to the form and submit again.</p>
+{{end}}
+{{if .Data.Error}}<p role="alert" class="text-red-600">{{.Data.Error}}</p>{{end}}
+<form method="post" action="/mfa" class="space-y-4">
+{{if .Data.Management}}<label class="block">Current password<input type="password" name="password" autocomplete="current-password" required class="block w-full rounded border p-2"></label>{{end}}
+<label class="block">Verification code<input name="code" autocomplete="one-time-code" maxlength="64" required autofocus class="block w-full rounded border p-2 font-mono"></label>
+<button type="submit" class="rounded bg-blue-700 px-4 py-2 text-white">Verify</button>
+</form>
+{{if .Data.Authenticated}}<form method="post" action="/logout"><button type="submit">Sign out and restart password login</button></form>{{else}}<a href="/login">Restart password login</a>{{end}}
+</div>
+{{end}}
