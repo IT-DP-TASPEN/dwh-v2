@@ -5,7 +5,14 @@ module.exports = defineConfig({
   outputDir: "./output/playwright/mfa-results",
   timeout: 60_000,
   workers: 1,
-  use: { baseURL: "http://127.0.0.1:4174", headless: true },
+  use: {
+    // A LAN-style HTTP origin omits Fetch Metadata, unlike trusted localhost.
+    baseURL: "http://mfa-lan.test:4174",
+    headless: true,
+    launchOptions: {
+      args: ["--host-resolver-rules=MAP mfa-lan.test 127.0.0.1", "--no-proxy-server"],
+    },
+  },
   webServer: {
     command: "go run ./internal/browserauth/testdata/browser",
     url: "http://127.0.0.1:4174/health",

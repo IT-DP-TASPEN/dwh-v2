@@ -97,7 +97,7 @@ func TestMandatoryMFAHTTPFlowCacheCSPAndNoPostReplay(t *testing.T) {
 	}
 	setup := request("GET", "/mfa", nil, pre)
 	secretMatch := regexp.MustCompile(`id="manual-secret"[^>]*value="([A-Z2-7]+)"`).FindStringSubmatch(setup.Body.String())
-	if len(secretMatch) != 2 || setup.Header().Get("Cache-Control") != "no-store" || setup.Header().Get("Referrer-Policy") != "no-referrer" {
+	if len(secretMatch) != 2 || setup.Header().Get("Cache-Control") != "no-store" || setup.Header().Get("Referrer-Policy") != "strict-origin" {
 		t.Fatal("setup/cache")
 	}
 	qr := request("GET", "/mfa/qr", nil, pre)

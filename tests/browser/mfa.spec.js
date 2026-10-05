@@ -31,19 +31,28 @@ test("mandatory enrollment, one-time codes, MFA login, stale POST and recovery s
     window.cspViolations = [];
     document.addEventListener("securitypolicyviolation", (event) => window.cspViolations.push(event.violatedDirective));
   });
+  const qrLoaded = page.waitForResponse((response) => new URL(response.url()).pathname === "/mfa/qr");
   await passwordLogin(page);
+  expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
   await expect(page.getByRole("heading", { name: "Mandatory MFA enrollment" })).toBeVisible();
   const secret = await page.locator("#manual-secret").inputValue();
   expect(secret).toMatch(/^[A-Z2-7]{32}$/);
   const image = page.getByAltText("Authenticator setup QR code");
   await expect(image).toBeVisible();
   await expect.poll(() => image.evaluate((node) => node.complete && node.naturalWidth > 0)).toBe(true);
-  const qr = await page.request.get("/mfa/qr");
+  const qr = await qrLoaded;
   expect(qr.headers()["cache-control"]).toBe("no-store");
   expect(qr.headers()["content-type"]).toBe("image/png");
   // Previous counter leaves the current counter available for the next login.
   await page.getByLabel("Verification code", { exact: true }).fill(totp(secret, -1));
+  const origin = new URL(page.url()).origin;
+  const verification = page.waitForRequest((request) =>
+    request.method() === "POST" && new URL(request.url()).pathname === "/mfa");
   await page.getByRole("button", { name: "Verify", exact: true }).click();
+  const verificationHeaders = await (await verification).allHeaders();
+  expect(verificationHeaders["sec-fetch-site"]).toBeUndefined();
+  expect(verificationHeaders.origin).toBe(origin);
+  expect(verificationHeaders.referer).toBe(`${origin}/`);
   await expect(page.getByRole("heading", { name: "Save your recovery codes" })).toBeVisible();
   const codes = (await page.getByLabel("Recovery codes").inputValue()).trim().split(/\s+/);
   expect(codes).toHaveLength(10);
@@ -60,8 +69,8 @@ test("mandatory enrollment, one-time codes, MFA login, stale POST and recovery s
   await page.getByRole("button", { name: "Verify", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Application", exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Sensitive form", exact: true }).click();
-  const stale = await page.request.post("/fixture/stale");
-  expect(stale.status()).toBe(204);
+  const staleStatus = await page.evaluate(async () => (await fetch("/fixture/stale", { method: "POST" })).status);
+  expect(staleStatus).toBe(204);
   await page.getByRole("button", { name: "Submit sensitive action", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Verify MFA", exact: true })).toBeVisible();
   await expect(page.getByText(/submit again/)).toBeVisible();

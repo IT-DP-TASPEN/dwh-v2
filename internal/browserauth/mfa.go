@@ -42,7 +42,9 @@ func RequireRecentMFA(writer http.ResponseWriter, request *http.Request, next st
 func (h *HTTP) EnableMFA(store *mfa.Store) { h.mfa = store }
 func mfaHeaders(writer http.ResponseWriter) {
 	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Referrer-Policy", "no-referrer")
+	// no-referrer makes form POST Origin null on HTTP LAN browsers, which
+	// lack Sec-Fetch-Site. Keep paths/query strings private and Origin usable.
+	writer.Header().Set("Referrer-Policy", "strict-origin")
 }
 func (h *HTTP) challengeCookie(value string) *http.Cookie {
 	return &http.Cookie{Name: h.cookies.name + "_mfa", Value: value, Path: mfaCookiePath, HttpOnly: true, Secure: h.cookies.secure, SameSite: http.SameSiteLaxMode}

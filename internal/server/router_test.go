@@ -104,6 +104,31 @@ func TestStaticAndCrossOriginBoundaries(t *testing.T) {
 	}
 }
 
+func TestMFAOriginFallbackWithoutFetchMetadata(t *testing.T) {
+	router, _ := testRouter(t, &fakeAuthentication{}, nil)
+	for _, test := range []struct {
+		name, origin string
+		status       int
+	}{
+		{"same origin", "http://10.77.88.100:8080", http.StatusSeeOther},
+		{"opaque origin", "null", http.StatusForbidden},
+		{"external origin", "http://attacker.test", http.StatusForbidden},
+		{"different port", "http://10.77.88.100:8081", http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "http://10.77.88.100:8080/mfa", nil)
+			request.Header.Set("Origin", test.origin)
+			// Untrusted forwarded headers must not alter CSRF decisions.
+			request.Header.Set("X-Forwarded-Host", "attacker.test")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.status {
+				t.Fatalf("status=%d want=%d", response.Code, test.status)
+			}
+		})
+	}
+}
+
 func testRouter(t *testing.T, service *fakeAuthentication, register func(chi.Router)) (http.Handler, string) {
 	return testRouterWithReadiness(t, service, register, func(context.Context) error { return nil })
 }

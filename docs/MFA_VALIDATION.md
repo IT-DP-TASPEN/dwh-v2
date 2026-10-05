@@ -183,3 +183,30 @@ response requires authenticated regeneration rather than redisplay. Failed-facto
 audit writes are best effort after committed attempt accounting; successful
 security events are transactional. The 34 matching baseline integration failures
 remain unresolved. The isolated test server was stopped after verification.
+
+## HTTP LAN enrollment follow-up
+
+Validated against base commit `63fa496` after a reported enrollment rejection.
+Chromium on a mapped HTTP LAN hostname reproduced the problem: the MFA page's
+`no-referrer` policy produced `Origin: null`, while `Sec-Fetch-Site` was absent.
+The real enrollment browser regression failed before the fix on that exact
+header mismatch. MFA responses now use `strict-origin`, retaining an origin-only
+referrer and a usable form origin. CSRF middleware and its rejection of null,
+external, and different-port origins remain unchanged.
+
+The dedicated browser config now exercises `http://mfa-lan.test:4174`, mapped
+only inside Chromium to loopback. It verifies an insecure context, absent Fetch
+Metadata, the exact same-origin form header, and an origin-only referrer before
+completing enrollment, login, recovery login, and step-up.
+
+With the same Go/cache and disposable MySQL environment above, these checks passed:
+
+- `go test ./internal/server ./internal/browserauth`
+- `go test -tags=integration ./internal/browserauth -run TestMandatoryMFAHTTPFlowCacheCSPAndNoPostReplay -count=1`
+- `npm run test:browser -- --config=playwright.mfa.config.js --reporter=line`
+  with `MFA_BROWSER_TEST=1` and `TEST_DB_NAME=mfa_browser_test`: one test passed.
+- `gofmt` on the three changed Go files and `git diff --check`.
+
+No schema, proxy trust, trusted-origin exception, CSP, or Fincloud changes were
+needed. Rebuild/restart the application, then restart password login to obtain a
+fresh enrollment challenge. The follow-up remains uncommitted.

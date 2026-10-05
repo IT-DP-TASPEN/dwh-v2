@@ -51,7 +51,11 @@ again. Expired challenge records are cleaned hourly.
 Opaque 256-bit challenge tokens use a distinct HttpOnly cookie under `/mfa`,
 SameSite=Lax, and the same production Secure policy as the session cookie. Only
 SHA-256 token hashes are stored. MFA setup, QR, management, and recovery responses
-use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+use `Cache-Control: no-store` and `Referrer-Policy: strict-origin`. Referrers
+contain only the origin, never the MFA path or query string. This also preserves
+the `Origin` header on same-origin form submissions for HTTP LAN development;
+`no-referrer` makes those form origins `null`, which CSRF protection rejects when
+the browser omits `Sec-Fetch-Site`. Production still requires HTTPS.
 
 ## Recovery codes and self-service management
 
@@ -227,4 +231,7 @@ Supply `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_USER`, and `TEST_DB_PASSWORD` as
 The fixture refuses any schema other than `mfa_browser_test` and resets only its
 fixture user. The ordinary UI-only browser suite skips this one DB-backed test;
 the dedicated command executes it. Fixture-only stale-session controls are not
-registered in the production application.
+registered in the production application. The dedicated browser config maps
+`mfa-lan.test` to loopback in Chromium, exercising an HTTP LAN origin where
+Fetch Metadata headers are absent. It checks that real MFA form submissions
+preserve their origin and send no referrer path/query string.
