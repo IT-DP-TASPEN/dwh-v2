@@ -170,10 +170,10 @@ func fixtureNavigation(operational bool, path string) []navigation.GroupView {
 	if operational {
 		groups = append(groups,
 			navigation.GroupView{Key: "general", Label: "General", Items: []navigation.ItemView{{Key: "dashboard", Label: "Dashboard", Icon: "layout-dashboard", Path: "/", Depth: 1, Active: path == "/"}}},
-			navigation.GroupView{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.ItemView{{Key: "ingestion-overview", Label: "Overview", Icon: "activity", Path: "/ingestion", Depth: 1, Active: path == "/ingestion"}, {Key: "custom-datasets", Label: "Custom Datasets", Icon: "table", Path: "/custom-datasets", Depth: 1, Active: path == "/custom-datasets"}, {Key: "ingestion-runs", Label: "Runs", Icon: "history", Path: "/runs", Depth: 1}, {Key: "schedules", Label: "Schedules", Icon: "calendar-clock", Path: "/schedules", Depth: 1, Active: path == "/schedules"}}},
+			navigation.GroupView{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.ItemView{{Key: "ingestion-overview", Label: "Overview", Icon: "activity", Path: "/ingestion", Depth: 1, Active: path == "/ingestion"}, {Key: "custom-datasets", Label: "Custom Datasets", Icon: "table-2", Path: "/custom-datasets", Depth: 1, Active: path == "/custom-datasets"}, {Key: "ingestion-runs", Label: "Runs", Icon: "history", Path: "/runs", Depth: 1}, {Key: "schedules", Label: "Schedules", Icon: "calendar-clock", Path: "/schedules", Depth: 1, Active: path == "/schedules"}}},
 		)
 	}
-	groups = append(groups, navigation.GroupView{Key: "reporting", Label: "Reporting", Items: []navigation.ItemView{{Key: "reports", Label: "Reports", Icon: "file-chart-column", Path: "/reports", Depth: 1, Active: path == "/reports"}, {Key: "report-exports", Label: "Exports", Icon: "file-down", Path: "/exports", Depth: 1, Active: path == "/exports"}}})
+	groups = append(groups, navigation.GroupView{Key: "reporting", Label: "Reporting", Items: []navigation.ItemView{{Key: "reports", Label: "Reports", Icon: "table-2", Path: "/reports", Depth: 1, Active: path == "/reports"}, {Key: "report-exports", Label: "Exports", Icon: "file-down", Path: "/exports", Depth: 1, Active: path == "/exports"}}})
 	return groups
 }
 

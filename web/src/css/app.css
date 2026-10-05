@@ -48,3 +48,10 @@ html[data-sidebar-disclosure-pending="true"] #admin-sidebar nav { visibility: hi
 
 .htmx-indicator { opacity: 0; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
+
+/* One focus treatment for every text field, so forms that only set border/bg classes still match the auth pages. */
+@layer base {
+  input:not([type="checkbox"], [type="radio"], [type="file"], [type="hidden"]), select, textarea {
+    @apply outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20;
+  }
+}

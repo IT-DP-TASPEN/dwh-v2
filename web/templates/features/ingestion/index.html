@@ -1,6 +1,6 @@
 {{define "content"}}
 <section>
-  <div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><p class="text-sm font-medium text-emerald-600 dark:text-emerald-400">Data Ingestion</p><h1 class="mt-1 text-3xl font-bold">Overview</h1><p class="mt-2 text-slate-600 dark:text-slate-400">Bounded operational state from the application database.</p></div>{{if .Data.CanRunAll}}<a href="/runs/run-all" class="rounded-lg bg-emerald-500 px-4 py-2.5 text-center text-sm font-semibold text-slate-950">Run All</a>{{end}}</div>
+  <div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><p class="text-sm font-medium text-emerald-600 dark:text-emerald-400">Data Ingestion</p><h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-950 dark:text-white">Overview</h1><p class="mt-2 text-slate-600 dark:text-slate-400">Bounded operational state from the application database.</p></div>{{if .Data.CanRunAll}}<a href="/runs/run-all" class="rounded-lg bg-emerald-500 px-4 py-2.5 text-center text-sm font-semibold text-slate-950 hover:bg-emerald-400">Run All</a>{{end}}</div>
   {{template "ingestion-summary" .}}
 </section>
 {{end}}

@@ -1,12 +1,12 @@
 {{define "content"}}
 {{if .Data.Authenticated}}
-<section class="max-w-2xl space-y-6">
+<section class="space-y-6">
     <h1 class="text-3xl font-bold tracking-tight text-slate-950 dark:text-white">{{.Title}}</h1>
     <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8 dark:border-slate-800 dark:bg-slate-900">
 {{else}}
 <main class="grid min-h-screen place-items-center px-4 py-10 sm:px-6">
     <section class="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl shadow-slate-200/60 sm:p-8 dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/30">
-        <p class="text-sm font-semibold uppercase tracking-widest text-emerald-400">{{.AppName}}</p>
+        <p class="text-sm font-semibold uppercase tracking-widest text-emerald-600 dark:text-emerald-400">{{.AppName}}</p>
         <h1 class="mt-3 text-3xl font-bold tracking-tight text-slate-950 dark:text-white">{{.Title}}</h1>
 {{end}}
         <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">{{if .Data.Enrollment}}Scan the QR code with Google Authenticator or another TOTP-compatible app.{{else if .Data.Management}}{{if .Data.Regenerate}}Confirm your password and MFA code to generate new recovery codes.{{else}}Confirm your password and MFA code to replace your authenticator.{{end}}{{else if .Data.Authenticated}}This sensitive action requires recent MFA verification.{{else}}Enter a code from your authenticator or use an unused recovery code to sign in.{{end}}</p>
@@ -15,9 +15,9 @@
         {{if .Data.Error}}<p id="mfa-error" role="alert" class="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/60 dark:text-red-300">{{.Data.Error}}</p>{{end}}
 
         {{if .Data.Enrollment}}
-        <div class="mt-6 space-y-4">
-            <img src="/mfa/qr" width="256" height="256" alt="Authenticator setup QR code" class="mx-auto h-auto max-w-full rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800">
-            <div>
+        <div class="mt-6 space-y-4{{if .Data.Authenticated}} sm:flex sm:items-center sm:gap-6 sm:space-y-0{{end}}">
+            <img src="/mfa/qr" width="256" height="256" alt="Authenticator setup QR code" class="mx-auto h-auto max-w-full{{if .Data.Authenticated}} sm:mx-0 sm:shrink-0{{end}} rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800">
+            <div class="min-w-0 sm:flex-1">
                 <p class="text-sm text-slate-600 dark:text-slate-400">Can't scan it?</p>
                 <label for="manual-secret" class="mt-2 block text-sm font-medium text-slate-700 dark:text-slate-200">Manual setup key</label>
                 <textarea id="manual-secret" rows="2" readonly autocomplete="off" spellcheck="false" class="mt-2 block w-full resize-none rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-mono text-sm text-slate-950 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-white">{{.Data.Secret}}</textarea>
@@ -38,11 +38,17 @@
                 <input id="mfa-code" name="code" autocomplete="one-time-code" maxlength="64" required autofocus {{if .Data.Error}}aria-invalid="true" aria-describedby="mfa-error"{{end}} class="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-mono text-slate-950 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
                 {{if not .Data.Enrollment}}<p class="mt-2 text-xs text-slate-500 dark:text-slate-400">Use the 6-digit code from your authenticator or an unused recovery code.</p>{{end}}
             </div>
+            {{if .Data.Authenticated}}
+            <div class="flex flex-wrap gap-3">
+                <button type="submit" class="rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-slate-900">{{if .Data.Enrollment}}Verify and continue{{else}}Verify{{end}}</button>
+                <a href="{{if or .Data.Management .Data.Rotation}}/mfa/security{{else}}/{{end}}" class="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</a>
+            </div>
+            {{else}}
             <button type="submit" class="w-full rounded-lg bg-emerald-500 px-4 py-2.5 font-semibold text-slate-950 transition hover:bg-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-slate-900">{{if .Data.Enrollment}}Verify and continue{{else}}Verify{{end}}</button>
+            {{end}}
         </form>
         {{if .Data.Authenticated}}
-        <a href="{{if or .Data.Management .Data.Rotation}}/mfa/security{{else}}/{{end}}" class="mt-6 inline-block rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</a>
-        <form method="post" action="/logout" class="mt-4"><button type="submit" class="rounded-lg text-sm font-medium text-slate-600 hover:text-slate-950 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 dark:text-slate-400 dark:hover:text-white">Sign out and restart sign-in</button></form>
+        <form method="post" action="/logout" class="mt-6 border-t border-slate-200 pt-4 dark:border-slate-800"><button type="submit" class="rounded-lg text-sm font-medium text-slate-600 hover:text-slate-950 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 dark:text-slate-400 dark:hover:text-white">Sign out and restart sign-in</button></form>
     </div>
 </section>
         {{else}}

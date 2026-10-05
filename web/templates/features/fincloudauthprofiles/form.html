@@ -1,6 +1,6 @@
 {{define "content"}}
 <section class="max-w-full">
-  <h1 class="mb-6 text-3xl font-bold">{{if .Data.ID}}Edit{{else}}New{{end}} Fincloud Auth Profile</h1>
+  <h1 class="mb-6 text-3xl font-bold tracking-tight text-slate-950 dark:text-white">{{if .Data.ID}}Edit{{else}}New{{end}} Fincloud Auth Profile</h1>
   {{with index .Data.Errors "form"}}<p role="alert" class="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">{{.}}</p>{{end}}
   {{if .Data.OptionsError}}
   <div role="alert" class="rounded-xl border border-red-200 bg-red-50 p-5 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
@@ -17,7 +17,7 @@
       <div><label class="block text-sm font-medium" for="location_id">Location</label>{{$locationID := .Data.LocationID}}<select class="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-950" id="location_id" name="location_id" required><option value="">Choose location</option>{{if .Data.LocationUnavailable}}<option value="{{.Data.LocationID}}" selected>{{.Data.LocationID}} — Currently configured (unavailable)</option>{{end}}{{range .Data.Locations}}<option value="{{.ID}}" {{if eq .ID $locationID}}selected{{end}}>{{.ID}} — {{.Description}}</option>{{end}}</select>{{with index .Data.Errors "location_id"}}<p role="alert" class="mt-1 text-sm text-red-600">{{.}}</p>{{end}}</div>
     </div>
     <div><label class="block text-sm font-medium" for="password">Password {{if .Data.ID}}<span class="font-normal text-slate-500">(leave blank to preserve)</span>{{end}}</label><input class="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-950" id="password" name="password" type="password" autocomplete="new-password" {{if not .Data.ID}}required{{end}}>{{with index .Data.Errors "password"}}<p role="alert" class="mt-1 text-sm text-red-600">{{.}}</p>{{end}}</div>
-    <div class="flex gap-3"><button class="rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950">Save</button><a class="rounded-lg px-4 py-2.5 text-sm" href="{{if .Data.ID}}/fincloud-auth-profiles/{{.Data.ID}}{{else}}/fincloud-auth-profiles{{end}}">Cancel</a></div>
+    <div class="flex gap-3"><button class="rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Save</button><a class="rounded-lg px-4 py-2.5 text-sm" href="{{if .Data.ID}}/fincloud-auth-profiles/{{.Data.ID}}{{else}}/fincloud-auth-profiles{{end}}">Cancel</a></div>
   </form>
   {{end}}
 </section>
