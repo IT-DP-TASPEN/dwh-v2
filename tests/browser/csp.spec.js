@@ -91,3 +91,36 @@ test("CSP preserves report editor, JSON results, and dynamic option fetching", a
   expect(errors).toEqual([]);
   expect(violations).toEqual([]);
 });
+
+for (const lateLoad of [false, true]) {
+  test(`Runs stays CSP-safe when HTMX loads ${lateLoad ? "after page load" : "normally"}`, async ({ page }) => {
+    await page.addInitScript(() => {
+      window.runsCSPViolations = [];
+      document.addEventListener("securitypolicyviolation", (event) => {
+        window.runsCSPViolations.push(event.effectiveDirective);
+      });
+    });
+    if (lateLoad) {
+      // Load the actual bundle after readyState=complete, when HTMX starts
+      // immediately during import, before app.js can configure it.
+      await page.route("**/runs", async (route) => {
+        const response = await route.fetch();
+        await route.fulfill({ response, body: (await response.text()).replace('<script defer src="/static/js/app.js"></script>', "") });
+      });
+    }
+    const response = await page.goto("/runs");
+    expect(response.headers()["content-security-policy"]).toContain("style-src 'self';");
+    if (lateLoad) {
+      expect(await page.evaluate(() => document.readyState)).toBe("complete");
+      await page.addScriptTag({ url: "/static/js/app.js" });
+    }
+    await expect(page.getByRole("heading", { name: "Runs", exact: true })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => window.htmx?.config.includeIndicatorStyles)).toBe(false);
+    await expect(page.locator("head style")).toHaveCount(0);
+    await page.getByRole("button", { name: "Expand Run All #251 children" }).click();
+    await expect(page.locator("#run-all-children-251 [data-child-position='2']")).toBeVisible();
+    await page.getByRole("button", { name: "Filter", exact: true }).click();
+    await expect(page.locator("#runs-table")).toBeVisible();
+    expect(await page.evaluate(() => window.runsCSPViolations)).toEqual([]);
+  });
+}
