@@ -226,6 +226,7 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("initialize admin navigation: %w", err)
 	}
 	adminHTTP := adminshell.New(renderer, navigationRegistry, applicationConfig.App.Name, errorResponder)
+	authenticationHTTP.SetAuthenticatedPageRenderer(adminHTTP)
 	handler := server.NewRouter(server.RouterDependencies{
 		StaticFiles:       staticFiles,
 		AllowRegistration: applicationConfig.App.AllowRegistration,

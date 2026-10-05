@@ -126,3 +126,43 @@ func userHandlerRouter(t *testing.T, principal browserauth.Principal) (http.Hand
 	}
 	return router, token
 }
+
+func TestUserDetailMFAResetAction(t *testing.T) {
+	for _, tc := range []struct {
+		name                               string
+		actor                              uint64
+		permission, impersonating, visible bool
+	}{
+		{name: "permitted other user", actor: 1, permission: true, visible: true},
+		{name: "self reset hidden", actor: 9, permission: true},
+		{name: "permission missing", actor: 1},
+		{name: "impersonating hidden", actor: 1, permission: true, impersonating: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			permissions := []string{PermissionView}
+			if tc.permission {
+				permissions = append(permissions, "users.mfa.reset")
+			}
+			principal := browserauth.Principal{UserID: tc.actor, RoleSlug: access.UserRoleSlug, Actor: browserauth.Identity{UserID: tc.actor}, IsImpersonating: tc.impersonating, Permissions: access.NewPermissionSet(permissions)}
+			router, token := userHandlerRouter(t, principal)
+			request := httptest.NewRequest("GET", "/users/9", nil)
+			request.AddCookie(&http.Cookie{Name: "session", Value: token})
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			body := response.Body.String()
+			if response.Code != 200 {
+				t.Fatalf("status=%d body=%s", response.Code, body)
+			}
+			reset := strings.Index(body, `href="/mfa/users/9/reset"`)
+			if (reset >= 0) != tc.visible {
+				t.Fatalf("reset visibility=%v, want %v", reset >= 0, tc.visible)
+			}
+			if strings.Contains(body, "btn-secondary") {
+				t.Fatal("undefined button class")
+			}
+			if tc.visible && (reset < strings.Index(body, "mt-6 grid gap-4") || !strings.Contains(body, "Multi-factor authentication")) {
+				t.Fatal("MFA reset must be in lower action card grid")
+			}
+		})
+	}
+}

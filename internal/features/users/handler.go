@@ -74,6 +74,7 @@ type UserDetailData struct {
 	CanAssignRole    bool
 	CanChangeStatus  bool
 	CanResetPassword bool
+	CanResetMFA      bool
 	CanImpersonate   bool
 }
 
@@ -381,6 +382,7 @@ func (handler *Handler) renderUserDetail(writer http.ResponseWriter, request *ht
 	data := UserDetailData{
 		User: found, CanEdit: row.CanEdit, CanAssignRole: row.CanAssignRole,
 		CanChangeStatus: row.CanChangeStatus, CanResetPassword: row.CanResetPassword,
+		CanResetMFA:    principal.Can("users.mfa.reset") && !principal.IsImpersonating && principal.Actor.UserID != found.ID,
 		CanImpersonate: handler.canImpersonate != nil && handler.canImpersonate(principal, found.ID, found.RoleSlug, found.IsActive),
 	}
 	if data.CanAssignRole {

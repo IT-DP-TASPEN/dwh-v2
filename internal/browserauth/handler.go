@@ -27,15 +27,16 @@ type authenticationService interface {
 }
 
 type HTTP struct {
-	mfa               *mfa.Store
-	service           authenticationService
-	renderer          *render.Renderer
-	cookies           CookieManager
-	appName           string
-	allowRegistration bool
-	logger            *slog.Logger
-	appendAudit       func(context.Context, audit.Event) error
-	errors            *render.ErrorResponder
+	mfa                *mfa.Store
+	authenticatedPages AuthenticatedPageRenderer
+	service            authenticationService
+	renderer           *render.Renderer
+	cookies            CookieManager
+	appName            string
+	allowRegistration  bool
+	logger             *slog.Logger
+	appendAudit        func(context.Context, audit.Event) error
+	errors             *render.ErrorResponder
 }
 
 type LoginForm struct {

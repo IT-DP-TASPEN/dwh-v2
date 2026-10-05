@@ -21,6 +21,8 @@ import (
 	"github.com/ibldzn/go-admin/internal/config"
 	"github.com/ibldzn/go-admin/internal/database"
 	"github.com/ibldzn/go-admin/internal/mfa"
+	"github.com/ibldzn/go-admin/internal/platform/adminshell"
+	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/render"
 	"github.com/ibldzn/go-admin/internal/secretcrypto"
 	"github.com/ibldzn/go-admin/internal/server"
@@ -95,6 +97,11 @@ func run() error {
 	cookie := browserauth.NewCookieManager("browser_session", false, 30*24*time.Hour)
 	h := browserauth.NewHTTP(service, renderer, cookie, "DWH", false, logger, nil, responder)
 	h.EnableMFA(store)
+	registry, err := navigation.NewRegistry([]navigation.Group{{Key: "app", Label: "Application", Items: []navigation.Item{{Key: "home", Label: "Dashboard", Path: "/", Icon: "layout-dashboard", Permission: "datasources.create", Match: navigation.MatchExact}}}}, []access.PermissionDefinition{{Key: "datasources.create"}})
+	if err != nil {
+		return err
+	}
+	h.SetAuthenticatedPageRenderer(adminshell.New(renderer, registry, "DWH", responder))
 	static, _ := fs.Sub(webfiles.Files, "static")
 	router := server.NewRouter(server.RouterDependencies{Authentication: h, Errors: responder, StaticFiles: static, RegisterAuthenticated: func(r chi.Router) {
 		r.Get("/", func(w http.ResponseWriter, _ *http.Request) {

@@ -34,7 +34,7 @@ test("mandatory enrollment, one-time codes, MFA login, stale POST and recovery s
   const qrLoaded = page.waitForResponse((response) => new URL(response.url()).pathname === "/mfa/qr");
   await passwordLogin(page);
   expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
-  await expect(page.getByRole("heading", { name: "Mandatory MFA enrollment" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Set up authenticator" })).toBeVisible();
   const secret = await page.locator("#manual-secret").inputValue();
   expect(secret).toMatch(/^[A-Z2-7]{32}$/);
   const image = page.getByAltText("Authenticator setup QR code");
@@ -44,18 +44,20 @@ test("mandatory enrollment, one-time codes, MFA login, stale POST and recovery s
   expect(qr.headers()["cache-control"]).toBe("no-store");
   expect(qr.headers()["content-type"]).toBe("image/png");
   // Previous counter leaves the current counter available for the next login.
-  await page.getByLabel("Verification code", { exact: true }).fill(totp(secret, -1));
+  await expect(page.locator("html[data-admin-shell]")).toHaveCount(0);
+  await page.getByLabel("Enter the 6-digit code from your authenticator", { exact: true }).fill(totp(secret, -1));
   const origin = new URL(page.url()).origin;
   const verification = page.waitForRequest((request) =>
     request.method() === "POST" && new URL(request.url()).pathname === "/mfa");
-  await page.getByRole("button", { name: "Verify", exact: true }).click();
+  await page.getByRole("button", { name: "Verify and continue", exact: true }).click();
   const verificationHeaders = await (await verification).allHeaders();
   expect(verificationHeaders["sec-fetch-site"]).toBeUndefined();
   expect(verificationHeaders.origin).toBe(origin);
   expect(verificationHeaders.referer).toBe(`${origin}/`);
   await expect(page.getByRole("heading", { name: "Save your recovery codes" })).toBeVisible();
-  const codes = (await page.getByLabel("Recovery codes").inputValue()).trim().split(/\s+/);
+  const codes = await page.getByRole("list", { name: "Recovery codes" }).locator("code").allTextContents();
   expect(codes).toHaveLength(10);
+  await expect(page.locator("html[data-admin-shell]")).toHaveCount(0);
   expect(await page.evaluate(() => window.cspViolations)).toEqual([]);
   await page.getByRole("link", { name: "Continue", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Application", exact: true })).toBeVisible();
@@ -68,12 +70,20 @@ test("mandatory enrollment, one-time codes, MFA login, stale POST and recovery s
   await page.getByLabel("Verification code", { exact: true }).fill(totp(secret));
   await page.getByRole("button", { name: "Verify", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Application", exact: true })).toBeVisible();
+  const security = await page.goto("/mfa/security");
+  expect(security.headers()["cache-control"]).toBe("no-store");
+  await expect(page.locator("html[data-admin-shell]")).toHaveCount(1);
+  await expect(page.getByText("Enabled", { exact: true })).toBeVisible();
+  await page.goto("/");
   await page.getByRole("link", { name: "Sensitive form", exact: true }).click();
   const staleStatus = await page.evaluate(async () => (await fetch("/fixture/stale", { method: "POST" })).status);
   expect(staleStatus).toBe(204);
   await page.getByRole("button", { name: "Submit sensitive action", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Verify MFA", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Confirm your identity", exact: true })).toBeVisible();
   await expect(page.getByText(/submit again/)).toBeVisible();
+  await expect(page.locator("html[data-admin-shell]")).toHaveCount(1);
+  await expect(page.locator("#admin-sidebar")).toHaveCount(1);
+  await expect(page.locator("header").getByText("Browser MFA", { exact: true }).first()).toBeVisible();
   await page.getByLabel("Verification code", { exact: true }).fill(codes[0]);
   await page.getByRole("button", { name: "Verify", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Sensitive form", exact: true })).toBeVisible();

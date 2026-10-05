@@ -114,6 +114,7 @@ func TestSensitiveReportingRoutesUseStoredSessionMFA(t *testing.T) {
 		t.Fatal(err)
 	}
 	admin := adminshell.New(renderer, registry, "DWH", errors)
+	h.SetAuthenticatedPageRenderer(admin)
 	router := server.NewRouter(server.RouterDependencies{Authentication: h, Errors: errors, StaticFiles: static, RegisterAuthenticated: func(r chi.Router) {
 		datasources.NewHandler(admin, repository, reportingService, pools).RegisterRoutes(r)
 		reporttemplates.NewHandler(admin, repository, reportingService).RegisterRoutes(r)

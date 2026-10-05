@@ -70,6 +70,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.FileServer(http.FS(webfiles.Files)))
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
+	mux.HandleFunc("/fixture/mfa/", fixture.mfaPage)
+	mux.HandleFunc("/mfa/qr", fixture.mfaQR)
 	mux.HandleFunc("/", fixture.dashboardPage)
 	mux.HandleFunc("/case/", fixture.page)
 	mux.HandleFunc("/ingestion", fixture.ingestionOverview)

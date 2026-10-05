@@ -1,6 +1,7 @@
 package browserauth
 
 import (
+	"database/sql"
 	"errors"
 	"image/png"
 	"net/http"
@@ -40,6 +41,17 @@ func RequireRecentMFA(writer http.ResponseWriter, request *http.Request, next st
 }
 
 func (h *HTTP) EnableMFA(store *mfa.Store) { h.mfa = store }
+
+// AuthenticatedPageRenderer preserves the application's shell without making
+// browserauth depend on the adminshell package.
+type AuthenticatedPageRenderer interface {
+	RenderPage(http.ResponseWriter, *http.Request, int, string, string, any)
+}
+
+func (h *HTTP) SetAuthenticatedPageRenderer(renderer AuthenticatedPageRenderer) {
+	h.authenticatedPages = renderer
+}
+
 func mfaHeaders(writer http.ResponseWriter) {
 	writer.Header().Set("Cache-Control", "no-store")
 	// no-referrer makes form POST Origin null on HTTP LAN browsers, which
@@ -70,23 +82,48 @@ func (h *HTTP) readChallenge(request *http.Request) string {
 }
 
 type MFAForm struct {
-	Authenticated bool
-	Secret        string
-	Enrollment    bool
-	Rotation      bool
-	Management    bool
-	Regenerate    bool
-	Error         string
-	Next          string
-	RecoveryCodes []string
-	Logout        bool
-	Status        mfa.Status
-	TargetID      uint64
+	Authenticated  bool
+	Secret         string
+	Enrollment     bool
+	Rotation       bool
+	Management     bool
+	Regenerate     bool
+	Error          string
+	Next           string
+	RecoveryCodes  []string
+	Logout         bool
+	Status         mfa.Status
+	TargetID       uint64
+	TargetName     string
+	TargetUsername string
 }
 
 func (h *HTTP) renderMFA(writer http.ResponseWriter, request *http.Request, status int, page string, form MFAForm) {
 	mfaHeaders(writer)
-	if err := h.renderer.RenderPageWithLayout(writer, status, page, "auth", render.PageData{Title: "Security / MFA", AppName: h.appName, Data: form}); err != nil {
+	title := "Verify your identity"
+	switch {
+	case page == "mfa_security":
+		title = "Security / MFA"
+	case page == "mfa_admin_reset":
+		title = "Reset MFA"
+	case page == "mfa_recovery":
+		title = "Save your recovery codes"
+	case form.Enrollment && form.Rotation:
+		title = "Set up new authenticator"
+	case form.Enrollment:
+		title = "Set up authenticator"
+	case form.Authenticated:
+		title = "Confirm your identity"
+	}
+	if form.Authenticated {
+		if h.authenticatedPages == nil {
+			h.internalError(writer, request, "render authenticated MFA", errors.New("authenticated page renderer unavailable"))
+			return
+		}
+		h.authenticatedPages.RenderPage(writer, request, status, page, title, form)
+		return
+	}
+	if err := h.renderer.RenderPageWithLayout(writer, status, page, "auth", render.PageData{Title: title, AppName: h.appName, Data: form}); err != nil {
 		h.internalError(writer, request, "render MFA", err)
 	}
 }
@@ -276,7 +313,7 @@ func (h *HTTP) Security(writer http.ResponseWriter, request *http.Request) {
 		h.internalError(writer, request, "MFA status", err)
 		return
 	}
-	h.renderMFA(writer, request, 200, "mfa_security", MFAForm{Status: status})
+	h.renderMFA(writer, request, 200, "mfa_security", MFAForm{Authenticated: true, Status: status})
 }
 func (h *HTTP) Manage(writer http.ResponseWriter, request *http.Request) {
 	mfaHeaders(writer)
@@ -310,7 +347,20 @@ func (h *HTTP) AdminResetPage(writer http.ResponseWriter, request *http.Request)
 	if !RequireRecentMFA(writer, request, "/mfa/users/"+strconv.FormatUint(id, 10)+"/reset") {
 		return
 	}
-	h.renderMFA(writer, request, 200, "mfa_admin_reset", MFAForm{TargetID: id})
+	var target struct {
+		Name     string `db:"name"`
+		Username string `db:"username"`
+	}
+	err = h.mfa.DB.GetContext(request.Context(), &target, `SELECT name, username FROM users WHERE id=?`, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		h.errors.NotFound(writer, request)
+		return
+	}
+	if err != nil {
+		h.internalError(writer, request, "MFA reset target", err)
+		return
+	}
+	h.renderMFA(writer, request, 200, "mfa_admin_reset", MFAForm{Authenticated: true, TargetID: id, TargetName: target.Name, TargetUsername: target.Username})
 }
 func (h *HTTP) AdminReset(writer http.ResponseWriter, request *http.Request) {
 	mfaHeaders(writer)
