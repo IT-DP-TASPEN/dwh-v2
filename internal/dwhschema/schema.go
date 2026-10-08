@@ -2,110 +2,6 @@ package dwhschema
 
 import "github.com/ibldzn/go-admin/internal/ingestion"
 
-var BootstrapVersions = []int64{
-	202608090001, 202608090002, 202608090003, 202608090004,
-	202608090005, 202608090006, 202608090007,
-}
-
-var LegacyVersions = []int64{
-	0, 20260614075633, 20260614075705, 20260614075734,
-	20260614080122, 20260614080123, 20260614080124, 20260614080125,
-	20260614080126, 20260614080127, 20260614080128, 20260614080129,
-	20260614090100, 20260614090200, 20260721090000, 20260805090000,
-	20260808090000,
-}
-
-var EmptyBeforeAdoption = []string{
-	"fincloud_cif_opening_reports", "stg_fincloud_cif_opening_reports",
-	"fincloud_journal_transaction_reports", "stg_fincloud_journal_transaction_reports",
-	"fincloud_balance_sheet_reports", "stg_fincloud_balance_sheet_reports",
-	"fincloud_profit_loss_statements", "stg_fincloud_profit_loss_statements",
-	"fincloud_coa_movement_reports", "stg_fincloud_coa_movement_reports",
-	"fincloud_fund_distribution_reports", "stg_fincloud_fund_distribution_reports",
-	"fincloud_vault_mutation_reports", "stg_fincloud_vault_mutation_reports",
-	"fincloud_teller_mutation_reports", "stg_fincloud_teller_mutation_reports",
-	"fincloud_cifs", "stg_fincloud_cif_details",
-	"fincloud_cif_personal_profiles", "stg_fincloud_cif_personal_profiles",
-	"fincloud_cif_ktp", "stg_fincloud_cif_ktp",
-	"fincloud_cif_addresses", "stg_fincloud_cif_addresses",
-	"fincloud_cif_employment", "stg_fincloud_cif_employment",
-	"fincloud_cif_company", "stg_fincloud_cif_company",
-	"fincloud_cif_kyc", "stg_fincloud_cif_kyc",
-	"fincloud_cif_regulatory", "stg_fincloud_cif_regulatory",
-	"fincloud_saving_details", "stg_fincloud_saving_details",
-	"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements",
-	"fincloud_time_deposit_details", "stg_fincloud_time_deposit_details", "fincloud_time_deposit_mutations",
-	"stg_fincloud_time_deposit_mutations",
-	"fincloud_loan_details", "stg_fincloud_loan_details", "fincloud_loan_disbursement_fees",
-	"stg_fincloud_loan_disbursement_fees", "fincloud_loan_repayment_schedule", "stg_fincloud_loan_repayment_schedule",
-	"fincloud_loan_payment_history", "stg_fincloud_loan_payment_history",
-	"dynamic_csv_sources", "dynamic_csv_source_columns",
-	"fixed_report_date_publications", "fixed_report_load_segments",
-	"fixed_report_publications", "fixed_report_load_members", "fixed_report_loads",
-	"maintenance_csv_ingestions", "run_log_events", "ingestion_row_errors", "ingestion_run_steps",
-	"schedule_attempts", "schedule_occurrences", "schedule_executions", "ingestion_run_items", "ingestion_runs", "schedules",
-	"ingestion_run_errors",
-	"custom_dataset_uploads", "custom_datasets", "custom_dataset_columns", "custom_dataset_imports",
-}
-
-type MigrationGroup struct {
-	Suffix string
-	Tables []string
-}
-
-var AdoptionMigrationGroups = []MigrationGroup{
-	{"fixed_report_date_publication.sql", []string{"fixed_report_date_publications", "fixed_report_load_segments", "fixed_report_coverage_backfill", "fixed_report_coverage_state", "fixed_report_publication_locks"}},
-	{"create_custom_datasets.sql", []string{"custom_dataset_uploads", "custom_datasets", "custom_dataset_columns", "custom_dataset_imports"}},
-	{"create_saving_account_statements.sql", []string{"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements"}},
-	{"expand_detail_typed_schema.sql", []string{
-		"stg_fincloud_cif_personal_profiles", "stg_fincloud_cif_ktp", "stg_fincloud_cif_addresses",
-		"stg_fincloud_cif_employment", "stg_fincloud_cif_company", "stg_fincloud_cif_kyc", "stg_fincloud_cif_regulatory",
-		"fincloud_cif_personal_profiles", "fincloud_cif_ktp", "fincloud_cif_addresses",
-		"fincloud_cif_employment", "fincloud_cif_company", "fincloud_cif_kyc", "fincloud_cif_regulatory",
-	}},
-	{"create_ingestion_run_errors.sql", []string{"ingestion_run_errors"}},
-	{"create_ingestion_scheduler.sql", []string{"schedule_attempts", "schedule_occurrences", "schedule_executions", "schedules"}},
-	{"create_ingestion_execution_runtime.sql", []string{
-		"maintenance_csv_ingestions", "run_log_events", "ingestion_row_errors", "ingestion_run_steps",
-		"ingestion_run_items", "ingestion_runs", "ingestion_runtime_settings",
-	}},
-	{"create_fixed_report_load_control.sql", []string{"fixed_report_publications", "fixed_report_load_members", "fixed_report_loads"}},
-	{"create_fixed_report_storage.sql", []string{
-		"stg_fincloud_cif_opening_reports", "stg_fincloud_journal_transaction_reports",
-		"stg_fincloud_balance_sheet_reports", "stg_fincloud_profit_loss_statements",
-		"stg_fincloud_coa_movement_reports", "stg_fincloud_fund_distribution_reports",
-		"stg_fincloud_vault_mutation_reports", "stg_fincloud_teller_mutation_reports",
-		"fincloud_cif_opening_reports", "fincloud_journal_transaction_reports",
-		"fincloud_balance_sheet_reports", "fincloud_profit_loss_statements",
-		"fincloud_coa_movement_reports", "fincloud_fund_distribution_reports",
-		"fincloud_vault_mutation_reports", "fincloud_teller_mutation_reports",
-	}},
-	{"create_detail_snapshot_storage.sql", []string{
-		"stg_fincloud_cif_details", "stg_fincloud_saving_details", "stg_fincloud_time_deposit_details", "stg_fincloud_loan_details",
-		"fincloud_time_deposit_mutations", "stg_fincloud_time_deposit_mutations",
-		"fincloud_loan_disbursement_fees", "stg_fincloud_loan_disbursement_fees",
-		"fincloud_loan_repayment_schedule", "stg_fincloud_loan_repayment_schedule",
-		"fincloud_loan_payment_history", "stg_fincloud_loan_payment_history",
-		"fincloud_cifs", "fincloud_saving_details", "fincloud_time_deposit_details", "fincloud_loan_details",
-	}},
-	{"create_maintenance_dynamic_registry.sql", []string{"dynamic_csv_source_columns", "dynamic_csv_sources"}},
-}
-
-type UserReference struct{ Table, Column, Constraint string }
-
-var UserReferences = []UserReference{
-	{"application_settings", "updated_by_user_id", "fk_application_settings_updated_by"},
-	{"source_settings", "updated_by_user_id", "fk_source_settings_updated_by_user"},
-	{"ingestion_runs", "requested_by_user_id", "fk_ingestion_runs_requested_by_user"},
-	{"schedules", "created_by_user_id", "fk_schedules_created_by_user"},
-	{"fincloud_auth_profiles", "created_by_user_id", "fk_fincloud_auth_profiles_created_by"},
-	{"fincloud_auth_profiles", "updated_by_user_id", "fk_fincloud_auth_profiles_updated_by"},
-	{"custom_dataset_uploads", "created_by_user_id", "fk_custom_dataset_uploads_created_by"},
-	{"custom_datasets", "created_by_user_id", "fk_custom_datasets_created_by"},
-	{"custom_datasets", "updated_by_user_id", "fk_custom_datasets_updated_by"},
-	{"custom_dataset_imports", "submitted_by_user_id", "fk_custom_dataset_imports_submitted_by"},
-}
-
 func CanonicalSourceKeys() ([]string, error) {
 	catalog, err := ingestion.NewCatalog()
 	if err != nil {
@@ -115,20 +11,6 @@ func CanonicalSourceKeys() ([]string, error) {
 	keys := make([]string, len(jobs))
 	for index, job := range jobs {
 		keys[index] = job.Key
-	}
-	return keys, nil
-}
-
-func PreMasterSourceKeys() ([]string, error) {
-	catalog, err := ingestion.NewCatalog()
-	if err != nil {
-		return nil, err
-	}
-	keys := make([]string, 0, ingestion.CanonicalJobCount-5)
-	for _, job := range catalog.Jobs() {
-		if job.Category != ingestion.CategoryMaster {
-			keys = append(keys, job.Key)
-		}
 	}
 	return keys, nil
 }

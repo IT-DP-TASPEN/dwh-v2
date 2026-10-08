@@ -100,8 +100,8 @@ func migrationUsageError() error {
 }
 
 func validateCommandPolicy(applicationConfig config.Config, command, confirmed string) error {
-	if command != "status" && applicationConfig.Database.Name == "dwh2" {
-		return fmt.Errorf("database dwh2 is legacy/reference-only; migration mutation refused")
+	if command != "status" && applicationConfig.Database.Name == "" {
+		return fmt.Errorf("configured database name is required for migration mutation")
 	}
 	if applicationConfig.App.Environment != "production" {
 		return nil

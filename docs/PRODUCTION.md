@@ -4,7 +4,7 @@ The production application is one long-running Go process connected to a clean M
 
 Infrastructure prerequisites are an HTTPS reverse proxy forwarding to the configured loopback address, MySQL 8.4+, and a separate access-controlled backup destination. Provisioning those systems is outside this repository.
 
-Fixed Report date authority requires the migration and bounded historical preparation described in [Fixed Report publication](FIXED_REPORT_PUBLICATION.md). Follow that cutover sequence before enabling ingestion against an existing populated database.
+The application database is created from canonical Goose migrations and is rebuildable: recreate it empty, migrate from zero, bootstrap, and re-ingest. See [Fixed Report publication](FIXED_REPORT_PUBLICATION.md) for Fixed publication semantics.
 
 ## Configuration
 
@@ -111,7 +111,7 @@ make build
 sha256sum bin/app bin/migrate migrations/*.sql
 ```
 
-Copy `bin/app`, `bin/migrate`, the immutable `migrations/` directory, the checksum manifest, and `deploy/new-dwh.service` into the release artifact. Do not include `.env`, frontend source maps, test databases, or the adoption command.
+Copy `bin/app`, `bin/migrate`, the immutable `migrations/` directory, the checksum manifest, and `deploy/new-dwh.service` into the release artifact. Do not include `.env`, frontend source maps, or test databases.
 
 Create an empty database and use a migration account:
 
@@ -120,7 +120,7 @@ APP_ENV=production ./bin/migrate up --confirm-database dwh
 ./bin/app admin create --username admin --name Administrator
 ```
 
-The migration command verifies the selected database name, refuses `dwh2`, rejects unknown Goose history, and accepts only an empty first installation or a canonical migration prefix. It never enables `AllowMissing` or stamps versions. Web startup never runs migrations.
+The migration command requires a nonempty configured database name, verifies that the selected database equals it (and, in production, the `--confirm-database` value), rejects unknown Goose history, and accepts only an empty first installation or a canonical migration prefix. It never enables `AllowMissing` or stamps versions. Web startup never runs migrations.
 
 The Detail current-state migration aborts before schema changes when any dated Detail parent or child table contains rows. Existing dated rows cannot be collapsed safely with `MAX(as_of_date)` because they have no durable complete-run identity. A populated deployment requires a separately approved backup/reset, the migration, then one fresh authoritative Detail synchronization.
 
@@ -128,7 +128,7 @@ Start the application only after `GET /ready` returns `200`. `/health` is proces
 
 ## Database privileges
 
-Use separate migration and runtime accounts when provisioning distinct identities; the local socket example above uses the database-scoped `dwhadmin` account for both. Canonical migrations require DML plus `CREATE`, `ALTER`, `DROP`, `INDEX`, `REFERENCES`, `CREATE ROUTINE`, `ALTER ROUTINE`, and `EXECUTE` on the application database. The routine privileges support the adoption-aware validation procedure inside the canonical source-settings migration; no routine remains after a successful migration. Runtime requires:
+Use separate migration and runtime accounts when provisioning distinct identities; the local socket example above uses the database-scoped `dwhadmin` account for both. Canonical migrations require DML plus `CREATE`, `ALTER`, `DROP`, `INDEX`, `REFERENCES`, `CREATE ROUTINE`, `ALTER ROUTINE`, and `EXECUTE` on the application database. The routine privileges support temporary validation procedures in a few migrations; no routine remains after a successful migration. Runtime requires:
 
 ```text
 SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, CREATE VIEW, SHOW VIEW, DROP

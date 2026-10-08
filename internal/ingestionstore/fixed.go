@@ -15,7 +15,6 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
-	"github.com/ibldzn/go-admin/internal/fixedcoverage"
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 )
@@ -60,10 +59,6 @@ type FixedSegment struct {
 func NewFixedRepository(db *sqlx.DB) *FixedRepository { return &FixedRepository{db: db} }
 
 var ErrFixedStale = errors.New("Fixed publication candidate is stale")
-
-func (repository *FixedRepository) RequireReady(ctx context.Context) error {
-	return fixedcoverage.RequireReady(ctx, repository.db)
-}
 
 // CleanupTerminal deletes at most limit discovered loads, one short transaction per load.
 func (repository *FixedRepository) CleanupTerminal(ctx context.Context, limit int) (FixedCleanupResult, error) {
@@ -170,9 +165,6 @@ func (repository *FixedRepository) BeginLoad(ctx context.Context, ingestionRunID
 }
 
 func (repository *FixedRepository) beginLoadTransaction(ctx context.Context, tx *sqlx.Tx, ingestionRunID uint64, definition ingestion.FixedDefinition, plan ingestion.FixedPlan, manifest [32]byte) (uint64, error) {
-	if err := fixedcoverage.RequireReady(ctx, tx); err != nil {
-		return 0, err
-	}
 	if err := validateSourceVariants(definition, plan.SourceVariants); err != nil {
 		return 0, err
 	}
@@ -240,9 +232,6 @@ func (repository *FixedRepository) StageMemberSegment(ctx context.Context, defin
 }
 
 func (repository *FixedRepository) stageMemberSegmentTransaction(ctx context.Context, tx *sqlx.Tx, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segment FixedSegment) error {
-	if err := fixedcoverage.RequireReady(ctx, tx); err != nil {
-		return err
-	}
 	var member fixedLoadMember
 	if err := tx.GetContext(ctx, &member, fixedMembersSelect+` WHERE load_id=? AND member_key=? FOR UPDATE`, loadID, descriptor.MemberKey); err != nil {
 		return fmt.Errorf("lock fixed member: %w", err)
@@ -417,9 +406,6 @@ func (repository *FixedRepository) promoteTransaction(ctx context.Context, tx *s
 	var lockedJob string
 	if err := tx.GetContext(ctx, &lockedJob, `SELECT job_key FROM fixed_report_publication_locks WHERE job_key=? FOR UPDATE`, definition.Key); err != nil {
 		return fmt.Errorf("lock Fixed publication job: %w", err)
-	}
-	if err := fixedcoverage.RequireReady(ctx, tx); err != nil {
-		return err
 	}
 	load, err := readFixedLoad(ctx, tx, loadID, true)
 	if err != nil {

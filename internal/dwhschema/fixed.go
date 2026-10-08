@@ -10,8 +10,7 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// Preparation may be pending: only Fixed execution is fenced until backfill is
-// complete. General runtime verification checks the durable contract, not readiness.
+// verifyFixedPublicationSchema checks the current Fixed publication contract.
 func verifyFixedPublicationSchema(ctx context.Context, db *sqlx.DB) error {
 	type column struct {
 		Table    string `db:"TABLE_NAME"`
@@ -74,7 +73,7 @@ func verifyFixedPublicationSchema(ctx context.Context, db *sqlx.DB) error {
 		}
 		for _, storage := range []string{table, "stg_" + table} {
 			if definition.PublicationMode == ingestion.DateAddressable {
-				if err := requireColumn(storage, "coverage_date", "date", "", 0); err != nil {
+				if err := requireColumn(storage, "coverage_date", "date", "NO", 0); err != nil {
 					return err
 				}
 			} else if _, found := byColumn[storage+".coverage_date"]; found {
@@ -92,8 +91,6 @@ func verifyFixedPublicationSchema(ctx context.Context, db *sqlx.DB) error {
 		{"fixed_report_date_publications", "job_key,coverage_date"},
 		{"fixed_report_publication_locks", "job_key"},
 		{"fixed_report_load_segments", "load_id,member_key,segment_index"},
-		{"fixed_report_coverage_state", "id"},
-		{"fixed_report_coverage_backfill", "job_key"},
 	} {
 		if err := requireIndex(required.table, "PRIMARY", required.columns, true); err != nil {
 			return err
@@ -117,11 +114,7 @@ func verifyFixedPublicationSchema(ctx context.Context, db *sqlx.DB) error {
 		{"fixed_report_load_segments", "row_count", "bigint", "NO", 0},
 		{"fixed_report_load_segments", "request_variant", "varchar", "YES", 191},
 		{"fixed_report_load_segments", "segment_checksum", "binary", "NO", 32},
-		{"fixed_report_coverage_state", "id", "tinyint", "NO", 0},
-		{"fixed_report_coverage_state", "ready", "tinyint", "NO", 0},
-		{"fixed_report_coverage_backfill", "job_key", "varchar", "NO", 128},
-		{"fixed_report_coverage_backfill", "last_id", "bigint", "NO", 0},
-		{"fixed_report_coverage_backfill", "complete", "tinyint", "NO", 0},
+		{"fixed_report_load_members", "staged_segment_count", "int", "NO", 0},
 		{"fixed_report_load_members", "source_location_id", "varchar", "YES", 191},
 		{"fixed_report_load_members", "account_code", "varchar", "YES", 191},
 		{"fixed_report_load_members", "source_period_from", "date", "YES", 0},
@@ -144,11 +137,6 @@ func verifyFixedPublicationSchema(ctx context.Context, db *sqlx.DB) error {
 	sort.Strings(wantLocks)
 	if strings.Join(gotLocks, "\x00") != strings.Join(wantLocks, "\x00") {
 		return fmt.Errorf("Fixed publication mutex rows do not match the canonical eight jobs")
-	}
-	var stateRows, validStateRows int
-	if err := db.QueryRowxContext(ctx, `SELECT COUNT(*),COALESCE(SUM(id=1 AND ready IN (0,1)),0)
-		FROM fixed_report_coverage_state`).Scan(&stateRows, &validStateRows); err != nil || stateRows != 1 || validStateRows != 1 {
-		return fmt.Errorf("Fixed coverage preparation singleton is invalid")
 	}
 	for _, required := range []struct{ table, columns, reference, referenceColumns string }{
 		{"fixed_report_date_publications", "active_load_id", "fixed_report_loads", "id"},

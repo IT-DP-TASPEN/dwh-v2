@@ -62,9 +62,11 @@ Open <http://localhost:8080> after creating the initial administrator.
 
 Frontend source under `web/src/` is authoritative. Generated `web/static/css/app.css` and `web/static/js/app.js` are committed; do not edit them manually.
 
-## Database lineage
+## Database
 
-Production starts from a clean application database and applies the canonical migrations from zero. `dwh2` is legacy/reference-only and the migration command refuses to mutate it. Migrations never run from web startup.
+The application database is created from canonical Goose migrations. It is disposable: recreate an empty database, run `migrate up` from zero, bootstrap the administrator, and re-ingest source data. There is no in-place upgrade path for older schemas. The migration command operates only on the configured `DB_NAME`, verifies that the selected database matches it, and in production requires `--confirm-database <DB_NAME>`. Migrations never run from web startup.
+
+Fixed source data is rebuildable. Seven Fixed reports publish authoritative calendar-date slices, so overlapping date ranges replace the overlap; P&L is an exact interval result. No historical backfill or cutover layer exists. See [Fixed Report publication](docs/FIXED_REPORT_PUBLICATION.md).
 
 ## Configuration
 
@@ -181,9 +183,9 @@ set -a; . ./.env.test.local; set +a
 make test-integration
 ```
 
-All five `TEST_DB_*` variables must be explicitly present. The password may be empty. The complete test host/port/database selection must not match the normal runtime connection, and the database may never be `dwh2` or `dwh3`. With a Unix runtime connection, tests must use a different database name: a TCP endpoint may reach the same MySQL server. A disposable database may legitimately be named `dwh` when it is isolated from a TCP runtime connection. Tests apply real migrations and truncate application tables there; they never fall back to runtime credentials.
+All five `TEST_DB_*` variables must be explicitly present. The password may be empty. The complete test host/port/database selection must not match the normal runtime connection,. With a Unix runtime connection, tests must use a different database name: a TCP endpoint may reach the same MySQL server. A disposable database may legitimately be named `dwh` when it is isolated from a TCP runtime connection. Tests apply real migrations and truncate application tables there; they never fall back to runtime credentials.
 
-Integration coverage also exercises the real Goose adoption topology, snapshot transactions, member-complete fixed-report promotion, runtime additive DDL, schema-lock races, and physical disposal of a connection with uncertain named-lock release.
+Integration coverage also exercises migration from zero, snapshot transactions, member-complete fixed-report promotion, runtime additive DDL, schema-lock races, and physical disposal of a connection with uncertain named-lock release.
 
 Datasource integration tests cover migration defaults, credential preservation, mode switching, audit metadata, and guarded rollback. Optional `TEST_DB_SOCKET` enables a real passwordless `auth_socket` check for both the production primary connection and a report datasource; provision the current test process's OS username as a MySQL socket account on the disposable database. `TEST_DB_SOCKET_MISMATCH_USER` additionally checks that a separately provisioned socket account with a different OS identity fails authentication. Never point these variables at production.
 
@@ -203,7 +205,6 @@ The stdlib-only tool validates a conservative module path, edits the exact `go.m
 
 ```text
 cmd/app/              server and administrator CLI
-cmd/adopt-dwh2/       explicit one-time dwh2 adoption administration
 cmd/migrate/          operator-controlled Goose wrapper
 cmd/rename-module/    safe starter module renaming
 cmd/feature/          minimal feature scaffolder
@@ -217,8 +218,7 @@ internal/features/    dashboard, users, roles, impersonation, and audit viewer
 internal/fincloud/    lazy authenticated Fincloud source client and active DTOs
 internal/ingestion/   DWH source contracts, catalog, planning, and parsers
 internal/ingestionstore/ fixed/detail/maintenance persistence and dynamic DDL
-internal/adoption/    fail-closed dwh2 preflight and adoption engine
-internal/dwhschema/   canonical DWH schema/adoption metadata
+internal/dwhschema/   canonical migration list and runtime schema verification
 internal/render/      templates, notices, and safe error responses
 internal/server/      Chi routes, middleware, and graceful server
 internal/reporting/   report templates, parameters, ACL, pools, and bounded MySQL execution

@@ -296,9 +296,6 @@ func (executor *Executor) persistProgress(ctx context.Context, run ingestionrun.
 func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
 	progressWrites := true
 	definition := *job.Fixed
-	if err := executor.fixed.RequireReady(ctx); err != nil {
-		return failed("configuration", "Fixed coverage preparation is required", "fixed_coverage_readiness", err)
-	}
 	var locations ingestion.FrozenLocations
 	var accounts ingestion.FrozenAccountCodes
 	var journalTransactionTypes []journalTransactionType

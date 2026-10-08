@@ -13,20 +13,8 @@ import (
 func TestFixedPublicationRuntimeSchemaContract(t *testing.T) {
 	db := integrationdb.Open(t)
 	ctx := context.Background()
-	var wasReady bool
-	if err := db.Get(&wasReady, `SELECT ready FROM fixed_report_coverage_state WHERE id=1`); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if _, err := db.Exec(`UPDATE fixed_report_coverage_state SET ready=? WHERE id=1`, wasReady); err != nil {
-			t.Errorf("restore coverage readiness: %v", err)
-		}
-	})
-	if _, err := db.Exec(`UPDATE fixed_report_coverage_state SET ready=FALSE WHERE id=1`); err != nil {
-		t.Fatal(err)
-	}
 	if err := VerifyRuntime(ctx, db); err != nil {
-		t.Fatalf("valid schema with pending preparation rejected: %v", err)
+		t.Fatalf("canonical schema rejected: %v", err)
 	}
 
 	for _, test := range []struct {
@@ -40,9 +28,21 @@ func TestFixedPublicationRuntimeSchemaContract(t *testing.T) {
 		},
 		{
 			"wrong coverage column type",
-			`ALTER TABLE stg_fincloud_cif_opening_reports MODIFY coverage_date DATETIME NULL`,
-			`ALTER TABLE stg_fincloud_cif_opening_reports MODIFY coverage_date DATE NULL`,
+			`ALTER TABLE stg_fincloud_cif_opening_reports MODIFY coverage_date DATETIME NOT NULL`,
+			`ALTER TABLE stg_fincloud_cif_opening_reports MODIFY coverage_date DATE NOT NULL`,
 			"stg_fincloud_cif_opening_reports.coverage_date",
+		},
+		{
+			"nullable final coverage column",
+			`ALTER TABLE fincloud_teller_mutation_reports MODIFY coverage_date DATE NULL`,
+			`ALTER TABLE fincloud_teller_mutation_reports MODIFY coverage_date DATE NOT NULL`,
+			"fincloud_teller_mutation_reports.coverage_date",
+		},
+		{
+			"interval result with coverage column",
+			`ALTER TABLE fincloud_profit_loss_statements ADD COLUMN coverage_date DATE NULL`,
+			`ALTER TABLE fincloud_profit_loss_statements DROP COLUMN coverage_date`,
+			"fincloud_profit_loss_statements must not have coverage_date",
 		},
 		{
 			"missing publication mutex",

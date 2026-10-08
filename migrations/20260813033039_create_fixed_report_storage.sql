@@ -1,4 +1,6 @@
 -- +goose Up
+-- Seven date-addressable reports carry coverage_date; staging copies the column via LIKE.
+-- Profit & Loss is an exact interval result and has no coverage_date.
 CREATE TABLE fincloud_cif_opening_reports (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     load_id BIGINT UNSIGNED NOT NULL,
@@ -9,7 +11,7 @@ CREATE TABLE fincloud_cif_opening_reports (
     source_file_name VARCHAR(255) NULL,
     period_from DATE NOT NULL,
     period_to DATE NOT NULL,
-    as_of_date DATE NOT NULL,
+    as_of_date DATE NOT NULL, coverage_date DATE NOT NULL,
     cif_no TEXT NULL, cif_alt_no TEXT NULL, customer_name TEXT NULL, alias_name TEXT NULL,
     mobile_phone TEXT NULL, home_phone TEXT NULL, religion TEXT NULL, formal_education TEXT NULL,
     employee_id_retired_id TEXT NULL, age TEXT NULL, customer_type TEXT NULL, occupation TEXT NULL,
@@ -39,7 +41,7 @@ CREATE TABLE fincloud_journal_transaction_reports (
     load_id BIGINT UNSIGNED NOT NULL, row_ordinal BIGINT UNSIGNED NOT NULL,
     source_segment_index INT UNSIGNED NOT NULL, source_row_number BIGINT UNSIGNED NOT NULL,
     source_row_checksum CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL,
+    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL, coverage_date DATE NOT NULL,
     branch TEXT NULL, journal_id TEXT NULL, transaction_date TEXT NULL, transaction_type TEXT NULL,
     reference_number TEXT NULL, description TEXT NULL, officer_create TEXT NULL, account_no TEXT NULL,
     customer_name TEXT NULL, customer_no TEXT NULL, account_alternate_no TEXT NULL, currency TEXT NULL,
@@ -63,7 +65,7 @@ CREATE TABLE fincloud_balance_sheet_reports (
     load_id BIGINT UNSIGNED NOT NULL, row_ordinal BIGINT UNSIGNED NOT NULL,
     source_segment_index INT UNSIGNED NOT NULL, source_row_number BIGINT UNSIGNED NOT NULL,
     source_row_checksum CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL,
+    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL, coverage_date DATE NOT NULL,
     source_location_id VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL,
     branch TEXT NULL, co_a_no TEXT NULL, chart_of_account TEXT NULL, beginning_balance TEXT NULL,
     debit_transaction TEXT NULL, credit_transaction TEXT NULL, last_balance TEXT NULL,
@@ -107,7 +109,7 @@ CREATE TABLE fincloud_coa_movement_reports (
     load_id BIGINT UNSIGNED NOT NULL, row_ordinal BIGINT UNSIGNED NOT NULL,
     source_segment_index INT UNSIGNED NOT NULL, source_row_number BIGINT UNSIGNED NOT NULL,
     source_row_checksum CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL,
+    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL, coverage_date DATE NOT NULL,
     co_a_no TEXT NULL, branch TEXT NULL, `date` TEXT NULL, journal_id TEXT NULL, beginning_balance TEXT NULL,
     debit TEXT NULL, credit TEXT NULL, last_balance TEXT NULL, reference_no TEXT NULL, transaction_type TEXT NULL,
     description TEXT NULL, officer_create TEXT NULL, user_authorize TEXT NULL, create_date TEXT NULL,
@@ -129,7 +131,7 @@ CREATE TABLE fincloud_fund_distribution_reports (
     load_id BIGINT UNSIGNED NOT NULL, row_ordinal BIGINT UNSIGNED NOT NULL,
     source_segment_index INT UNSIGNED NOT NULL, source_row_number BIGINT UNSIGNED NOT NULL,
     source_row_checksum CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL,
+    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL, coverage_date DATE NOT NULL,
     savings_alt_no TEXT NULL, journal_date TEXT NULL, fund_distribution_name TEXT NULL, transaction_no TEXT NULL,
     cif_no TEXT NULL, customer_name TEXT NULL, savings_no TEXT NULL, savings_product TEXT NULL,
     transaction_type TEXT NULL, transaction_amount TEXT NULL, branch TEXT NULL, description TEXT NULL,
@@ -151,7 +153,7 @@ CREATE TABLE fincloud_vault_mutation_reports (
     load_id BIGINT UNSIGNED NOT NULL, row_ordinal BIGINT UNSIGNED NOT NULL,
     source_segment_index INT UNSIGNED NOT NULL, source_row_number BIGINT UNSIGNED NOT NULL,
     source_row_checksum CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL,
+    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL, coverage_date DATE NOT NULL,
     branch TEXT NULL, tellername TEXT NULL, transactiontype TEXT NULL, currency TEXT NULL,
     beginningbalance TEXT NULL, lastbalance TEXT NULL, debit TEXT NULL, credit TEXT NULL, officer TEXT NULL, datetime TEXT NULL,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -172,7 +174,7 @@ CREATE TABLE fincloud_teller_mutation_reports (
     load_id BIGINT UNSIGNED NOT NULL, row_ordinal BIGINT UNSIGNED NOT NULL,
     source_segment_index INT UNSIGNED NOT NULL, source_row_number BIGINT UNSIGNED NOT NULL,
     source_row_checksum CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL,
+    source_file_name VARCHAR(255) NULL, period_from DATE NOT NULL, period_to DATE NOT NULL, as_of_date DATE NOT NULL, coverage_date DATE NOT NULL,
     referencenumber TEXT NULL, accountnumber TEXT NULL, customername TEXT NULL, transactiontype TEXT NULL,
     beginningbalance TEXT NULL, debit TEXT NULL, credit TEXT NULL, lastbalance TEXT NULL, branch TEXT NULL,
     tellerid TEXT NULL, userauthorization TEXT NULL, useroverride TEXT NULL, transactiondate TEXT NULL,
@@ -188,6 +190,22 @@ ALTER TABLE stg_fincloud_teller_mutation_reports
     ADD UNIQUE KEY uq_stg_teller_mutation_source_row (load_id, member_key, source_segment_index, source_row_number),
     ADD CONSTRAINT fk_stg_teller_mutation_member FOREIGN KEY (load_id, member_key)
         REFERENCES fixed_report_load_members (load_id, member_key) ON DELETE CASCADE;
+
+-- Final-table-only indexes, added after staging was cloned via LIKE.
+ALTER TABLE fincloud_cif_opening_reports ADD KEY idx_fixed_coverage_date (coverage_date);
+ALTER TABLE fincloud_journal_transaction_reports
+    ADD KEY idx_fixed_coverage_date (coverage_date),
+    ADD KEY idx_journal_coa_no (co_a_no(64)),
+    ADD KEY idx_journal_coa_name (co_a_name(128)),
+    ADD KEY idx_journal_transaction_date_coa_no (transaction_date(10), co_a_no(64));
+ALTER TABLE fincloud_balance_sheet_reports ADD KEY idx_fixed_coverage_date (coverage_date);
+ALTER TABLE fincloud_coa_movement_reports
+    ADD KEY idx_fixed_coverage_date (coverage_date),
+    ADD KEY idx_coa_movement_coa_no (co_a_no(64)),
+    ADD KEY idx_coa_movement_date_coa_no (`date`(10), co_a_no(64));
+ALTER TABLE fincloud_fund_distribution_reports ADD KEY idx_fixed_coverage_date (coverage_date);
+ALTER TABLE fincloud_vault_mutation_reports ADD KEY idx_fixed_coverage_date (coverage_date);
+ALTER TABLE fincloud_teller_mutation_reports ADD KEY idx_fixed_coverage_date (coverage_date);
 
 -- +goose Down
 SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'irreversible: fixed report storage may contain business data';

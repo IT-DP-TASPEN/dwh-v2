@@ -170,9 +170,6 @@ func testConfig(t *testing.T, root string) config.DatabaseConfig {
 	if values["TEST_DB_NAME"] == "" {
 		t.Fatal("TEST_DB_NAME must not be empty")
 	}
-	if values["TEST_DB_NAME"] == "dwh2" || values["TEST_DB_NAME"] == "dwh3" {
-		t.Fatalf("TEST_DB_NAME %q is reserved; refusing destructive integration tests", values["TEST_DB_NAME"])
-	}
 	port, err := strconv.Atoi(values["TEST_DB_PORT"])
 	if err != nil || port < 1 || port > 65535 {
 		t.Fatal("TEST_DB_PORT must be an integer between 1 and 65535")

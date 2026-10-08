@@ -2,7 +2,7 @@
 
 This matrix is a runbook, not evidence that live Fincloud behavior has been re-tested. For every approved smoke execution record the selected date, frozen member count, request count, duration, row count, database growth, safe error classification, and final publication/snapshot status. Never record credentials, sessions, customer payloads, or sensitive row values.
 
-Before Fixed execution, follow the [coverage cutover and remediation runbook](FIXED_REPORT_PUBLICATION.md). Seven Fixed reports replace calendar-date coverage, including empty dates; P&L replaces only an exact interval and makes one source request per frozen location without chunking.
+See [Fixed Report publication](FIXED_REPORT_PUBLICATION.md). Seven Fixed reports replace calendar-date coverage, including empty dates; P&L replaces only an exact interval and makes one source request per frozen location without chunking.
 
 | Job key | Category | Contract | Validation focus |
 | --- | --- | --- | --- |

@@ -1,5 +1,5 @@
 -- +goose Up
-CREATE TABLE IF NOT EXISTS source_settings (
+CREATE TABLE source_settings (
     source_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     updated_by_user_id BIGINT UNSIGNED NULL,
@@ -10,43 +10,6 @@ CREATE TABLE IF NOT EXISTS source_settings (
     CONSTRAINT fk_source_settings_updated_by_user
         FOREIGN KEY (updated_by_user_id) REFERENCES users (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-DROP PROCEDURE IF EXISTS phase3_validate_source_settings;
--- +goose StatementBegin
-CREATE PROCEDURE phase3_validate_source_settings()
-BEGIN
-    DECLARE compatible_columns INT DEFAULT 0;
-    DECLARE primary_columns TEXT;
-    SELECT COUNT(*) INTO compatible_columns
-    FROM information_schema.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'source_settings'
-      AND (
-        (COLUMN_NAME = 'source_id' AND COLUMN_TYPE = 'varchar(128)' AND IS_NULLABLE = 'NO'
-          AND COLLATION_NAME IN ('utf8mb4_unicode_ci', 'utf8mb4_0900_bin')) OR
-        (COLUMN_NAME = 'enabled' AND COLUMN_TYPE = 'tinyint(1)' AND IS_NULLABLE = 'NO') OR
-        (COLUMN_NAME = 'updated_by_user_id' AND COLUMN_TYPE = 'bigint unsigned' AND IS_NULLABLE = 'YES') OR
-        (COLUMN_NAME = 'created_at' AND COLUMN_TYPE = 'datetime(6)' AND IS_NULLABLE = 'NO') OR
-        (COLUMN_NAME = 'updated_at' AND COLUMN_TYPE = 'datetime(6)' AND IS_NULLABLE = 'NO')
-      );
-    IF compatible_columns <> 5 OR
-       (SELECT COUNT(*) FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'source_settings') <> 5 THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'source_settings schema is incompatible with the canonical target';
-    END IF;
-    SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)
-      INTO primary_columns
-      FROM information_schema.STATISTICS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'source_settings' AND INDEX_NAME = 'PRIMARY';
-    IF primary_columns <> 'source_id' THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'source_settings primary key is incompatible with the canonical target';
-    END IF;
-END;
--- +goose StatementEnd
-CALL phase3_validate_source_settings();
-DROP PROCEDURE phase3_validate_source_settings;
-
-ALTER TABLE source_settings
-    MODIFY source_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;
 
 INSERT INTO source_settings (source_id, enabled, updated_by_user_id) VALUES
     ('cif_opening_report', TRUE, NULL),
@@ -84,8 +47,7 @@ INSERT INTO source_settings (source_id, enabled, updated_by_user_id) VALUES
     ('cif_detail', TRUE, NULL),
     ('saving_detail', TRUE, NULL),
     ('time_deposit_detail', TRUE, NULL),
-    ('loan_detail', TRUE, NULL)
-ON DUPLICATE KEY UPDATE source_id = VALUES(source_id);
+    ('loan_detail', TRUE, NULL);
 
 -- +goose Down
 SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'irreversible: source_settings may contain operator state';

@@ -33,7 +33,7 @@ func TestMigrationMutationPolicy(t *testing.T) {
 		{"missing confirmation", "up", "", production, "--confirm-database dwh"},
 		{"wrong confirmation", "up", "other", production, "--confirm-database dwh"},
 		{"production down", "down", "", production, "down is disabled"},
-		{"legacy mutation", "up", "dwh2", config.Config{App: config.AppConfig{Environment: "development"}, Database: config.DatabaseConfig{Name: "dwh2"}}, "legacy/reference-only"},
+		{"empty configured database", "up", "", config.Config{App: config.AppConfig{Environment: "development"}}, "configured database name is required"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := validateCommandPolicy(test.config, test.command, test.confirmed)

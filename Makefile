@@ -27,7 +27,6 @@ build: frontend-build
 	mkdir -p bin
 	go build -trimpath -o bin/app ./cmd/app
 	go build -trimpath -o bin/migrate ./cmd/migrate
-	go build -trimpath -o bin/fixed-coverage-backfill ./cmd/fixed-coverage-backfill
 
 test:
 	go test ./...
