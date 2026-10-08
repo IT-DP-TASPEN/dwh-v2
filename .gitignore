@@ -8,3 +8,4 @@ tmp/
 *.log
 web/static/js/*.map
 var/
+tools/reportcatalog/work/
