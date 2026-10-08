@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"reflect"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
+	"github.com/ibldzn/go-admin/internal/fixedcoverage"
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 )
@@ -45,13 +48,22 @@ type fixedCleanupCandidate struct {
 }
 
 type FixedSegment struct {
-	Index      int
-	FileName   string
-	AsOfDate   ingestion.CalendarDate
-	SourceRows []ingestion.FixedCSVRow
+	Index            int
+	SourcePeriodFrom ingestion.CalendarDate
+	SourcePeriodTo   ingestion.CalendarDate
+	RequestVariant   string
+	FileName         string
+	AsOfDate         ingestion.CalendarDate
+	SourceRows       []ingestion.FixedCSVRow
 }
 
 func NewFixedRepository(db *sqlx.DB) *FixedRepository { return &FixedRepository{db: db} }
+
+var ErrFixedStale = errors.New("Fixed publication candidate is stale")
+
+func (repository *FixedRepository) RequireReady(ctx context.Context) error {
+	return fixedcoverage.RequireReady(ctx, repository.db)
+}
 
 // CleanupTerminal deletes at most limit discovered loads, one short transaction per load.
 func (repository *FixedRepository) CleanupTerminal(ctx context.Context, limit int) (FixedCleanupResult, error) {
@@ -151,31 +163,62 @@ func (repository *FixedRepository) BeginLoad(ctx context.Context, ingestionRunID
 	var loadID uint64
 	err = retryReplaySafeTx(ctx, repository.db, "begin_fixed_load", func(tx *sqlx.Tx) error {
 		var transactionErr error
-		loadID, transactionErr = repository.beginLoadTransaction(ctx, tx, ingestionRunID, plan, manifest)
+		loadID, transactionErr = repository.beginLoadTransaction(ctx, tx, ingestionRunID, definition, plan, manifest)
 		return wrapDatabaseError(transactionErr, "begin_fixed_load", "create_fixed_load", "fixed_report_loads", 0, 0)
 	})
 	return loadID, wrapDatabaseError(err, "begin_fixed_load", "create_fixed_load", "fixed_report_loads", 0, 0)
 }
 
-func (repository *FixedRepository) beginLoadTransaction(ctx context.Context, tx *sqlx.Tx, ingestionRunID uint64, plan ingestion.FixedPlan, manifest [32]byte) (uint64, error) {
+func (repository *FixedRepository) beginLoadTransaction(ctx context.Context, tx *sqlx.Tx, ingestionRunID uint64, definition ingestion.FixedDefinition, plan ingestion.FixedPlan, manifest [32]byte) (uint64, error) {
+	if err := fixedcoverage.RequireReady(ctx, tx); err != nil {
+		return 0, err
+	}
+	if err := validateSourceVariants(definition, plan.SourceVariants); err != nil {
+		return 0, err
+	}
+	variants, _ := json.Marshal(append([]string{}, plan.SourceVariants...))
 	result, err := tx.ExecContext(ctx, `INSERT INTO fixed_report_loads
-		(ingestion_run_id, job_key, period_from, period_to, status, expected_member_count, manifest_checksum)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, ingestionRunID, plan.JobKey, plan.Range.From.String(), plan.Range.To.String(), fixedLoadPending, len(plan.Members), manifest[:])
+ (ingestion_run_id,job_key,period_from,period_to,status,expected_member_count,manifest_checksum,contract_version,publication_mode,source_request_mode,source_max_chunk_days,source_variants)
+ VALUES (?,?,?,?,?,?,?,2,?,?,?,?)`, ingestionRunID, plan.JobKey, plan.Range.From.String(), plan.Range.To.String(), fixedLoadPending, len(plan.Members), manifest[:], definition.PublicationMode, definition.SourceRequestMode, definition.MaxChunkDays, variants)
 	if err != nil {
 		return 0, fmt.Errorf("create fixed load: %w", err)
 	}
 	loadID, err := result.LastInsertId()
 	if err != nil {
-		return 0, fmt.Errorf("read fixed load id: %w", err)
+		return 0, err
 	}
-	memberRows := make([][]any, len(plan.Members))
-	for index, member := range plan.Members {
-		memberRows[index] = []any{loadID, member.MemberKey, fixedMemberPending}
+	var memberRows [][]any
+	for _, member := range plan.Members {
+		if member.RequestedFrom.String() < plan.Range.From.String() || member.RequestedTo.String() > plan.Range.To.String() {
+			return 0, fmt.Errorf("member source range is outside its load")
+		}
+		chunks, err := ingestion.FixedSourceChunks(definition, member.RequestedFrom, member.RequestedTo)
+		if err != nil {
+			return 0, err
+		}
+		partitions := max(1, len(plan.SourceVariants))
+		memberRows = append(memberRows, []any{loadID, member.MemberKey, fixedMemberPending, nullableFixedDimension(member.SourceLocationID), nullableFixedDimension(member.AccountCode), member.RequestedFrom.String(), member.RequestedTo.String(), len(chunks) * partitions})
 	}
-	if err := insertRows(ctx, tx, "fixed_report_load_members", []string{"load_id", "member_key", "status"}, memberRows); err != nil {
+	if err := insertRows(ctx, tx, "fixed_report_load_members", []string{"load_id", "member_key", "status", "source_location_id", "account_code", "source_period_from", "source_period_to", "expected_segment_count"}, memberRows); err != nil {
 		return 0, err
 	}
 	return uint64(loadID), nil
+}
+
+func validateSourceVariants(def ingestion.FixedDefinition, variants []string) error {
+	if def.Key == "journal_transaction_report" {
+		if len(variants) == 0 {
+			return fmt.Errorf("frozen Journal transaction types are required")
+		}
+		for i, v := range variants {
+			if v == "" || v == "%" || strings.TrimSpace(v) != v || (i > 0 && variants[i-1] >= v) {
+				return fmt.Errorf("canonical exact Journal source variants are required")
+			}
+		}
+	} else if len(variants) != 0 {
+		return fmt.Errorf("unexpected Fixed source variants")
+	}
+	return nil
 }
 
 func (repository *FixedRepository) StageMemberSegment(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segment FixedSegment) error {
@@ -197,69 +240,80 @@ func (repository *FixedRepository) StageMemberSegment(ctx context.Context, defin
 }
 
 func (repository *FixedRepository) stageMemberSegmentTransaction(ctx context.Context, tx *sqlx.Tx, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, segment FixedSegment) error {
-	memberKey := descriptor.MemberKey
-	var member struct {
-		Status       string `db:"status"`
-		RowCount     uint64 `db:"row_count"`
-		SegmentCount uint64 `db:"staged_segment_count"`
+	if err := fixedcoverage.RequireReady(ctx, tx); err != nil {
+		return err
 	}
-	if err := tx.GetContext(ctx, &member, `SELECT status,row_count,staged_segment_count FROM fixed_report_load_members WHERE load_id = ? AND member_key = ? FOR UPDATE`, loadID, memberKey); err != nil {
+	var member fixedLoadMember
+	if err := tx.GetContext(ctx, &member, fixedMembersSelect+` WHERE load_id=? AND member_key=? FOR UPDATE`, loadID, descriptor.MemberKey); err != nil {
 		return fmt.Errorf("lock fixed member: %w", err)
 	}
 	if member.Status != fixedMemberPending {
 		return fmt.Errorf("fixed member status %q cannot stage", member.Status)
 	}
-	if segment.Index < 0 || uint64(segment.Index) != member.SegmentCount || segment.AsOfDate.IsZero() {
-		return fmt.Errorf("invalid or out-of-order fixed source segment %d; want %d", segment.Index, member.SegmentCount)
+	if segment.Index < 0 || uint64(segment.Index) != member.StagedSegments {
+		return fmt.Errorf("invalid or out-of-order fixed source segment %d; want %d", segment.Index, member.StagedSegments)
 	}
-	var loadRange struct {
-		JobKey string `db:"job_key"`
-		From   string `db:"period_from"`
-		To     string `db:"period_to"`
-		Status string `db:"status"`
+	load, err := readFixedLoad(ctx, tx, loadID, false)
+	if err != nil {
+		return err
 	}
-	// Promote is the only parent transition, and the executor joins every
-	// member call before invoking it. This consistent read therefore cannot
-	// overlap a parent status change for the same load.
-	if err := tx.GetContext(ctx, &loadRange, `SELECT job_key, DATE_FORMAT(period_from, '%Y-%m-%d') period_from,
-		DATE_FORMAT(period_to, '%Y-%m-%d') period_to, status FROM fixed_report_loads WHERE id = ?`, loadID); err != nil {
-		return fmt.Errorf("read fixed load range: %w", err)
+	if err := load.validate(definition); err != nil {
+		return err
 	}
-	if loadRange.JobKey != definition.Key || loadRange.Status != fixedLoadPending {
-		return fmt.Errorf("fixed load is not pending for job %s", definition.Key)
+	if load.Status != fixedLoadPending {
+		return fmt.Errorf("fixed load is not pending")
 	}
-	columns := append([]string{"load_id", "member_key", "row_ordinal", "source_segment_index", "source_row_number", "source_row_checksum", "source_file_name", "period_from", "period_to", "as_of_date"}, specification.columns...)
+	if descriptor.RequestedFrom.String() != member.From || descriptor.RequestedTo.String() != member.To || descriptor.SourceLocationID != member.Location || descriptor.AccountCode != member.Account {
+		return fmt.Errorf("Fixed descriptor differs from its frozen member")
+	}
+	if err := validateFixedSegment(definition, load, member, segment); err != nil {
+		return err
+	}
+	if err := ingestion.ValidateFixedCoverage(definition, segment.SourcePeriodFrom, segment.SourcePeriodTo, segment.SourceRows); err != nil {
+		return err
+	}
+	columns := []string{"load_id", "member_key", "row_ordinal", "source_segment_index", "source_row_number", "source_row_checksum", "source_file_name", "period_from", "period_to", "as_of_date"}
 	if specification.sourceLocation {
-		columns = append(columns[:10], append([]string{"source_location_id"}, columns[10:]...)...)
+		columns = append(columns, "source_location_id")
 	}
-	rows := make([][]any, 0, len(segment.SourceRows))
+	if definition.PublicationMode == ingestion.DateAddressable {
+		columns = append(columns, "coverage_date")
+	}
+	columns = append(columns, specification.columns...)
+	var rows [][]any
+	segmentHash := sha256.New()
 	for index, row := range segment.SourceRows {
 		if row.SourceRowNumber < 2 || len(row.SourceRowChecksum) != 64 {
 			return fmt.Errorf("invalid fixed source row")
 		}
-		ordinal := member.RowCount + uint64(index) + 1
-		values := []any{loadID, memberKey, ordinal, segment.Index, row.SourceRowNumber, row.SourceRowChecksum, segment.FileName}
-		values = append(values, loadRange.From, loadRange.To, segment.AsOfDate.String())
+		values := []any{loadID, descriptor.MemberKey, member.Count + uint64(index) + 1, segment.Index, row.SourceRowNumber, row.SourceRowChecksum, segment.FileName, load.From, load.To, segment.AsOfDate.String()}
 		if specification.sourceLocation {
 			if descriptor.SourceLocationID == "" || row.SourceLocationID != descriptor.SourceLocationID {
-				return fmt.Errorf("source location %q does not match descriptor %q", row.SourceLocationID, descriptor.SourceLocationID)
+				return fmt.Errorf("source location does not match frozen descriptor")
 			}
 			values = append(values, row.SourceLocationID)
+		}
+		if definition.PublicationMode == ingestion.DateAddressable {
+			if row.CoverageDate.IsZero() {
+				return fmt.Errorf("validated coverage date required")
+			}
+			values = append(values, row.CoverageDate.String())
 		}
 		for _, header := range definition.RequiredHeaders {
 			values = append(values, row.Values[header])
 		}
 		rows = append(rows, values)
+		ingestion.WriteFixedMemberChecksumPart(segmentHash, row.SourceRowChecksum)
 	}
 	if err := insertRows(ctx, tx, specification.stagingTable, columns, rows); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE fixed_report_load_members
-		SET row_count = ?, staged_segment_count = ?
-		WHERE load_id = ? AND member_key = ?`, member.RowCount+uint64(len(rows)), member.SegmentCount+1, loadID, memberKey); err != nil {
-		return fmt.Errorf("advance fixed member staging: %w", err)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO fixed_report_load_segments
+ (load_id,member_key,segment_index,source_period_from,source_period_to,as_of_date,row_count,request_variant,segment_checksum) VALUES (?,?,?,?,?,?,?,?,?)`, loadID, descriptor.MemberKey, segment.Index, segment.SourcePeriodFrom.String(), segment.SourcePeriodTo.String(), segment.AsOfDate.String(), len(rows), nullableFixedDimension(segment.RequestVariant), segmentHash.Sum(nil)); err != nil {
+		return err
 	}
-	return nil
+	_, err = tx.ExecContext(ctx, `UPDATE fixed_report_load_members SET row_count=?,staged_segment_count=? WHERE load_id=? AND member_key=?`, member.Count+uint64(len(rows)), member.StagedSegments+1, loadID, descriptor.MemberKey)
+	return err
 }
 
 func (repository *FixedRepository) FinalizeMemberCandidate(ctx context.Context, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, expectedSegments int, rowCount uint64, checksum [sha256.Size]byte) error {
@@ -280,17 +334,18 @@ func (repository *FixedRepository) FinalizeMemberCandidate(ctx context.Context, 
 
 func (repository *FixedRepository) finalizeMemberCandidateTransaction(ctx context.Context, tx *sqlx.Tx, definition ingestion.FixedDefinition, loadID uint64, descriptor ingestion.RequestDescriptor, expectedSegments int, rowCount uint64, checksum [sha256.Size]byte) error {
 	var member struct {
-		Status       string `db:"status"`
-		RowCount     uint64 `db:"row_count"`
-		SegmentCount uint64 `db:"staged_segment_count"`
-		Checksum     []byte `db:"member_checksum"`
+		Status           string `db:"status"`
+		RowCount         uint64 `db:"row_count"`
+		SegmentCount     uint64 `db:"staged_segment_count"`
+		ExpectedSegments uint64 `db:"expected_segment_count"`
+		Checksum         []byte `db:"member_checksum"`
 	}
-	if err := tx.GetContext(ctx, &member, `SELECT status,row_count,staged_segment_count,member_checksum
+	if err := tx.GetContext(ctx, &member, `SELECT status,row_count,staged_segment_count,member_checksum,COALESCE(expected_segment_count,0) expected_segment_count
 		FROM fixed_report_load_members WHERE load_id=? AND member_key=? FOR UPDATE`, loadID, descriptor.MemberKey); err != nil {
 		return fmt.Errorf("lock fixed member: %w", err)
 	}
 	if member.Status == fixedMemberSuccess {
-		if member.SegmentCount == uint64(expectedSegments) && member.RowCount == rowCount && bytes.Equal(member.Checksum, checksum[:]) {
+		if member.ExpectedSegments == uint64(expectedSegments) && member.SegmentCount == uint64(expectedSegments) && member.RowCount == rowCount && bytes.Equal(member.Checksum, checksum[:]) {
 			return nil
 		}
 		return fmt.Errorf("completed fixed member metadata does not match")
@@ -308,7 +363,7 @@ func (repository *FixedRepository) finalizeMemberCandidateTransaction(ctx contex
 	if load.JobKey != definition.Key || load.Status != fixedLoadPending {
 		return fmt.Errorf("fixed load is not pending for job %s", definition.Key)
 	}
-	if member.SegmentCount != uint64(expectedSegments) || member.RowCount != rowCount {
+	if member.ExpectedSegments != uint64(expectedSegments) || member.SegmentCount != uint64(expectedSegments) || member.RowCount != rowCount {
 		return fmt.Errorf("fixed member staged count does not match completed candidate")
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE fixed_report_load_members SET status=?,member_checksum=?
@@ -343,12 +398,14 @@ func (repository *FixedRepository) promote(ctx context.Context, runID uint64, ow
 		return wrapDatabaseError(repository.promoteTransaction(ctx, tx, runID, ownerID, specification, definition, loadID, fenced),
 			"promote_fixed_load", "promote_fixed_load", specification.finalTable, 0, 0)
 	})
-	if err != nil && fenced {
-		var status string
+	if err != nil && fenced && !errors.Is(err, ErrFixedStale) {
+		var committed bool
 		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		checkErr := repository.db.GetContext(checkCtx, &status, `SELECT status FROM ingestion_runs WHERE id=?`, runID)
+		checkErr := repository.db.GetContext(checkCtx, &committed, `SELECT EXISTS(
+ SELECT 1 FROM ingestion_runs r JOIN fixed_report_loads l ON l.ingestion_run_id=r.id
+ WHERE r.id=? AND r.status='succeeded' AND l.id=? AND l.status='published')`, runID, loadID)
 		cancel()
-		if checkErr == nil && status == string(ingestionrun.StatusSucceeded) {
+		if checkErr == nil && committed {
 			return nil
 		}
 	}
@@ -356,121 +413,180 @@ func (repository *FixedRepository) promote(ctx context.Context, runID uint64, ow
 }
 
 func (repository *FixedRepository) promoteTransaction(ctx context.Context, tx *sqlx.Tx, runID uint64, ownerID string, specification fixedStorage, definition ingestion.FixedDefinition, loadID uint64, fenced bool) error {
-	var load struct {
-		IngestionRunID      uint64 `db:"ingestion_run_id"`
-		JobKey              string `db:"job_key"`
-		From                string `db:"period_from"`
-		To                  string `db:"period_to"`
-		Status              string `db:"status"`
-		ExpectedMemberCount int    `db:"expected_member_count"`
-		Manifest            []byte `db:"manifest_checksum"`
+	// One durable job row serializes both first publication and existing coverage.
+	var lockedJob string
+	if err := tx.GetContext(ctx, &lockedJob, `SELECT job_key FROM fixed_report_publication_locks WHERE job_key=? FOR UPDATE`, definition.Key); err != nil {
+		return fmt.Errorf("lock Fixed publication job: %w", err)
 	}
-	if err := tx.GetContext(ctx, &load, `SELECT l.ingestion_run_id,l.job_key,
-		DATE_FORMAT(l.period_from, '%Y-%m-%d') period_from,
-		DATE_FORMAT(l.period_to, '%Y-%m-%d') period_to,
-		l.status, l.expected_member_count, l.manifest_checksum
-		FROM fixed_report_loads l WHERE l.id = ? FOR UPDATE`, loadID); err != nil {
-		return fmt.Errorf("lock fixed load: %w", err)
+	if err := fixedcoverage.RequireReady(ctx, tx); err != nil {
+		return err
+	}
+	load, err := readFixedLoad(ctx, tx, loadID, true)
+	if err != nil {
+		return err
+	}
+	if err := load.validate(definition); err != nil {
+		return err
 	}
 	members := []fixedLoadMember{}
-	if err := tx.SelectContext(ctx, &members, `SELECT member_key,status,row_count,member_checksum
-		FROM fixed_report_load_members WHERE load_id = ? ORDER BY member_key FOR UPDATE`, loadID); err != nil {
-		return fmt.Errorf("lock fixed load members: %w", err)
+	if err := tx.SelectContext(ctx, &members, fixedMembersSelect+` WHERE load_id=? ORDER BY member_key FOR UPDATE`, loadID); err != nil {
+		return err
 	}
-	if load.JobKey != definition.Key || load.ExpectedMemberCount != len(members) {
-		return fmt.Errorf("fixed load is incomplete or belongs to another job")
-	}
-	if fenced && load.IngestionRunID != runID {
-		return fmt.Errorf("fixed load belongs to another ingestion run")
+	if load.ExpectedMemberCount != len(members) || (fenced && load.IngestionRunID != runID) {
+		return fmt.Errorf("fixed load is incomplete or belongs to another run")
 	}
 	for _, member := range members {
 		if member.Status != fixedMemberSuccess {
-			return fmt.Errorf("fixed load is incomplete or belongs to another job")
+			return fmt.Errorf("fixed load member is incomplete")
 		}
 	}
 	if load.Status != fixedLoadPending && load.Status != fixedLoadPublished {
-		return fmt.Errorf("fixed load status %q cannot publish", load.Status)
+		return fmt.Errorf("fixed load cannot publish")
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO fixed_report_publications
-		(job_key, period_from, period_to, active_load_id, published_at)
-		VALUES (?, ?, ?, NULL, NULL)
-		ON DUPLICATE KEY UPDATE active_load_id = active_load_id`, load.JobKey, load.From, load.To); err != nil {
-		return fmt.Errorf("establish fixed publication scope: %w", err)
-	}
-	var active sql.NullInt64
-	if err := tx.GetContext(ctx, &active, `SELECT active_load_id FROM fixed_report_publications
-		WHERE job_key = ? AND period_from = ? AND period_to = ? FOR UPDATE`, load.JobKey, load.From, load.To); err != nil {
-		return fmt.Errorf("lock fixed publication: %w", err)
-	}
-	if active.Valid {
-		activeLoadID := uint64(active.Int64)
-		if activeLoadID == loadID {
-			if fenced {
-				if err := ingestionrun.FinishSucceededInTx(ctx, tx, runID, ownerID); err != nil {
-					return err
-				}
+	replay := false
+	if definition.PublicationMode == ingestion.DateAddressable {
+		type publication struct {
+			Date   string `db:"coverage_date"`
+			LoadID uint64 `db:"active_load_id"`
+		}
+		var publications []publication
+		if err := tx.SelectContext(ctx, &publications, `SELECT DATE_FORMAT(coverage_date,'%Y-%m-%d') coverage_date,active_load_id FROM fixed_report_date_publications WHERE job_key=? AND coverage_date BETWEEN ? AND ? ORDER BY coverage_date FOR UPDATE`, definition.Key, load.From, load.To); err != nil {
+			return err
+		}
+		equal := 0
+		for _, pub := range publications {
+			if pub.LoadID > loadID {
+				return fmt.Errorf("%w: load %d behind %d on %s", ErrFixedStale, loadID, pub.LoadID, pub.Date)
 			}
-			return nil
+			if pub.LoadID == loadID {
+				equal++
+			}
 		}
-		if activeLoadID > loadID {
-			return fmt.Errorf("fixed load %d is stale behind published load %d", loadID, activeLoadID)
+		dateCount := 0
+		for d := mustDate(load.From); d.String() <= load.To; d = d.AddDays(1) {
+			dateCount++
+			if d.String() == load.To {
+				break
+			}
 		}
+		replay = load.Status == fixedLoadPublished && equal == dateCount
+	} else {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO fixed_report_publications (job_key,period_from,period_to,active_load_id,published_at) VALUES (?,?,?,NULL,NULL) ON DUPLICATE KEY UPDATE active_load_id=active_load_id`, definition.Key, load.From, load.To); err != nil {
+			return err
+		}
+		var active sql.NullInt64
+		if err := tx.GetContext(ctx, &active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=? FOR UPDATE`, definition.Key, load.From, load.To); err != nil {
+			return err
+		}
+		if active.Valid && uint64(active.Int64) > loadID {
+			return fmt.Errorf("%w: load %d behind %d", ErrFixedStale, loadID, active.Int64)
+		}
+		replay = active.Valid && uint64(active.Int64) == loadID && load.Status == fixedLoadPublished
 	}
-	memberKeys := make([]string, len(members))
-	for index := range members {
-		memberKeys[index] = members[index].Key
+	if replay {
+		if fenced {
+			return ingestionrun.FinishSucceededInTx(ctx, tx, runID, ownerID)
+		}
+		return nil
 	}
-	plan := ingestion.FixedPlan{JobKey: load.JobKey, Range: ingestion.FixedDateRangeParams{From: mustDate(load.From), To: mustDate(load.To)}, RequireAllMembers: true}
-	for _, memberKey := range memberKeys {
-		plan.Members = append(plan.Members, ingestion.RequestDescriptor{MemberKey: memberKey})
+	plan := ingestion.FixedPlan{JobKey: load.JobKey, Range: ingestion.FixedDateRangeParams{From: mustDate(load.From), To: mustDate(load.To)}, SourceVariants: load.Variants, RequireAllMembers: true}
+	for _, m := range members {
+		plan.Members = append(plan.Members, ingestion.RequestDescriptor{MemberKey: m.Key, RequestedFrom: mustDate(m.From), RequestedTo: mustDate(m.To), SourceLocationID: m.Location, AccountCode: m.Account})
 	}
 	manifest, err := ingestion.FixedManifestChecksum(definition, plan)
 	if err != nil || !bytes.Equal(manifest[:], load.Manifest) {
-		return fmt.Errorf("fixed load manifest does not match frozen members")
+		return fmt.Errorf("fixed load manifest differs from frozen requests")
 	}
-	if err := validateStagedMembers(ctx, tx, specification.stagingTable, loadID, members); err != nil {
+	segments, err := validateFixedSegments(ctx, tx, definition, loadID, load, members)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM `"+specification.finalTable+"` WHERE period_from = ? AND period_to = ?", load.From, load.To); err != nil {
-		return fmt.Errorf("delete fixed publication scope: %w", err)
+	if err := validateStagedMembers(ctx, tx, specification.stagingTable, definition, loadID, members, segments); err != nil {
+		return err
 	}
-	finalColumns := append([]string{"load_id", "row_ordinal", "source_segment_index", "source_row_number", "source_row_checksum", "source_file_name", "period_from", "period_to", "as_of_date"}, specification.columns...)
+	if definition.PublicationMode == ingestion.DateAddressable {
+		if _, err := tx.ExecContext(ctx, "DELETE target FROM `"+specification.finalTable+"` target FORCE INDEX (idx_fixed_coverage_date) WHERE coverage_date BETWEEN ? AND ?", load.From, load.To); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM `"+specification.finalTable+"` WHERE period_from=? AND period_to=?", load.From, load.To); err != nil {
+			return err
+		}
+	}
+	columns := []string{"load_id", "row_ordinal", "source_segment_index", "source_row_number", "source_row_checksum", "source_file_name", "period_from", "period_to", "as_of_date"}
 	if specification.sourceLocation {
-		finalColumns = append(finalColumns[:9], append([]string{"source_location_id"}, finalColumns[9:]...)...)
+		columns = append(columns, "source_location_id")
 	}
-	quoted := make([]string, len(finalColumns))
-	for index, column := range finalColumns {
-		quoted[index], _ = quoteIdentifier(column)
+	if definition.PublicationMode == ingestion.DateAddressable {
+		columns = append(columns, "coverage_date")
 	}
-	query := "INSERT INTO `" + specification.finalTable + "` (" + strings.Join(quoted, ",") + ") SELECT " + strings.Join(quoted, ",") + " FROM `" + specification.stagingTable + "` WHERE load_id = ? ORDER BY member_key, row_ordinal"
-	if _, err := tx.ExecContext(ctx, query, loadID); err != nil {
-		return fmt.Errorf("promote fixed report: %w", err)
+	columns = append(columns, specification.columns...)
+	var quoted []string
+	for _, column := range columns {
+		value, _ := quoteIdentifier(column)
+		quoted = append(quoted, value)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE fixed_report_publications SET active_load_id = ?, published_at = CURRENT_TIMESTAMP(6)
-		WHERE job_key = ? AND period_from = ? AND period_to = ?`, loadID, load.JobKey, load.From, load.To); err != nil {
+	list := strings.Join(quoted, ",")
+	if _, err := tx.ExecContext(ctx, "INSERT INTO `"+specification.finalTable+"` ("+list+") SELECT "+list+" FROM `"+specification.stagingTable+"` WHERE load_id=? ORDER BY member_key,row_ordinal", loadID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE fixed_report_loads SET status = ?, published_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, fixedLoadPublished, loadID); err != nil {
+	if definition.PublicationMode == ingestion.DateAddressable {
+		if err := publishFixedDates(ctx, tx, loadID, load); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `UPDATE fixed_report_publications SET active_load_id=?,published_at=CURRENT_TIMESTAMP(6) WHERE job_key=? AND period_from=? AND period_to=?`, loadID, definition.Key, load.From, load.To); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE fixed_report_loads SET status=?,published_at=CURRENT_TIMESTAMP(6) WHERE id=?`, fixedLoadPublished, loadID); err != nil {
 		return err
 	}
 	if fenced {
-		if err := ingestionrun.FinishSucceededInTx(ctx, tx, runID, ownerID); err != nil {
-			return err
-		}
+		return ingestionrun.FinishSucceededInTx(ctx, tx, runID, ownerID)
 	}
 	return nil
 }
 
-type stagedMember struct {
-	Count    uint64 `db:"row_count"`
-	Checksum []byte `db:"member_checksum"`
+func publishFixedDates(ctx context.Context, tx *sqlx.Tx, loadID uint64, load fixedLoadContract) error {
+	var values []string
+	var args []any
+	flush := func() error {
+		if len(values) == 0 {
+			return nil
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO fixed_report_date_publications (job_key,coverage_date,active_load_id,published_at) VALUES `+strings.Join(values, ",")+` ON DUPLICATE KEY UPDATE active_load_id=VALUES(active_load_id),published_at=CURRENT_TIMESTAMP(6)`, args...)
+		values = nil
+		args = nil
+		return err
+	}
+	for date := mustDate(load.From); date.String() <= load.To; date = date.AddDays(1) {
+		values = append(values, "(?,?,?,CURRENT_TIMESTAMP(6))")
+		args = append(args, load.JobKey, date.String(), loadID)
+		if len(values) == 500 {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		if date.String() == load.To {
+			break
+		}
+	}
+	return flush()
 }
 
 type fixedLoadMember struct {
-	Key      string `db:"member_key"`
-	Status   string `db:"status"`
-	Count    uint64 `db:"row_count"`
-	Checksum []byte `db:"member_checksum"`
+	Key    string `db:"member_key"`
+	Status string `db:"status"`
+
+	Count            uint64 `db:"row_count"`
+	Checksum         []byte `db:"member_checksum"`
+	StagedSegments   uint64 `db:"staged_segment_count"`
+	ExpectedSegments uint64 `db:"expected_segment_count"`
+	Location         string `db:"source_location_id"`
+	Account          string `db:"account_code"`
+	From             string `db:"source_period_from"`
+	To               string `db:"source_period_to"`
 }
 
 type stagedAggregate struct {
@@ -478,38 +594,70 @@ type stagedAggregate struct {
 	hash  hash.Hash
 }
 
-func validateStagedMembers(ctx context.Context, tx *sqlx.Tx, stagingTable string, loadID uint64, members []fixedLoadMember) error {
-	expected := make(map[string]stagedMember, len(members))
-	aggregates := make(map[string]*stagedAggregate, len(members))
-	for _, member := range members {
-		expected[member.Key] = stagedMember{Count: member.Count, Checksum: member.Checksum}
-		aggregates[member.Key] = &stagedAggregate{hash: sha256.New()}
+func validateStagedMembers(ctx context.Context, tx *sqlx.Tx, table string, def ingestion.FixedDefinition, loadID uint64, members []fixedLoadMember, segments map[fixedSegmentIdentity]fixedStoredSegment) error {
+	memberAggregates := map[string]*stagedAggregate{}
+	segmentAggregates := map[fixedSegmentIdentity]*stagedAggregate{}
+	for _, m := range members {
+		memberAggregates[m.Key] = &stagedAggregate{hash: sha256.New()}
 	}
-	queryRows, err := tx.QueryxContext(ctx, "SELECT member_key, source_row_checksum FROM `"+stagingTable+"` WHERE load_id = ? ORDER BY member_key, row_ordinal", loadID)
+	for key := range segments {
+		segmentAggregates[key] = &stagedAggregate{hash: sha256.New()}
+	}
+	extra := ""
+	if def.PublicationMode == ingestion.DateAddressable {
+		raw := "`" + ingestion.FixedColumnName(def.CoverageDateHeader) + "`"
+		if def.SnapshotDate {
+			raw = "DATE_FORMAT(as_of_date,'%Y-%m-%d')"
+		}
+		extra = ",DATE_FORMAT(coverage_date,'%Y-%m-%d')," + raw
+	}
+	queryRows, err := tx.QueryxContext(ctx, "SELECT member_key,source_segment_index,source_row_checksum,DATE_FORMAT(as_of_date,'%Y-%m-%d')"+extra+" FROM `"+table+"` WHERE load_id=? ORDER BY member_key,row_ordinal", loadID)
 	if err != nil {
 		return err
 	}
+	defer queryRows.Close()
 	for queryRows.Next() {
-		var key, checksum string
-		if err := queryRows.Scan(&key, &checksum); err != nil {
-			queryRows.Close()
+		var key, checksum, asof string
+		var index int
+		var coverage, raw sql.NullString
+		args := []any{&key, &index, &checksum, &asof}
+		if def.PublicationMode == ingestion.DateAddressable {
+			args = append(args, &coverage, &raw)
+		}
+		if err := queryRows.Scan(args...); err != nil {
 			return err
 		}
-		aggregate := aggregates[key]
-		if aggregate == nil {
-			queryRows.Close()
-			return fmt.Errorf("staging contains unknown fixed member %q", key)
+		identity := fixedSegmentIdentity{key, index}
+		member := memberAggregates[key]
+		segment := segmentAggregates[identity]
+		source, ok := segments[identity]
+		if member == nil || segment == nil || !ok || asof != source.AsOf {
+			return fmt.Errorf("staging contains unknown or mismatched source segment")
 		}
-		aggregate.count++
-		ingestion.WriteFixedMemberChecksumPart(aggregate.hash, checksum)
+		if def.PublicationMode == ingestion.DateAddressable {
+			date, err := ingestion.ParseFixedCoverageDate(def, raw.String, mustDate(asof))
+			if err != nil || !raw.Valid || !coverage.Valid || date.String() != coverage.String || coverage.String < source.From || coverage.String > source.To {
+				return fmt.Errorf("staged row has invalid source coverage date")
+			}
+		}
+		member.count++
+		segment.count++
+		ingestion.WriteFixedMemberChecksumPart(member.hash, checksum)
+		ingestion.WriteFixedMemberChecksumPart(segment.hash, checksum)
 	}
-	if err := queryRows.Close(); err != nil {
+	if err := queryRows.Err(); err != nil {
 		return err
 	}
-	for key, aggregate := range aggregates {
-		member := expected[key]
-		if aggregate.count != member.Count || !bytes.Equal(aggregate.hash.Sum(nil), member.Checksum) {
-			return fmt.Errorf("fixed member %q staged count/checksum mismatch", key)
+	for _, m := range members {
+		a := memberAggregates[m.Key]
+		if a.count != m.Count || !bytes.Equal(a.hash.Sum(nil), m.Checksum) {
+			return fmt.Errorf("Fixed member staged count/checksum mismatch")
+		}
+	}
+	for key, s := range segments {
+		a := segmentAggregates[key]
+		if a.count != s.Count || !bytes.Equal(a.hash.Sum(nil), s.Checksum) {
+			return fmt.Errorf("Fixed segment staged count/checksum mismatch")
 		}
 	}
 	return nil
@@ -545,15 +693,9 @@ func fixedStorageFor(definition ingestion.FixedDefinition) (fixedStorage, error)
 	if !canonical {
 		return fixedStorage{}, fmt.Errorf("fixed report definition %q is not canonical", definition.Key)
 	}
-	tables := map[string]string{
-		"cif_opening_report": "fincloud_cif_opening_reports", "journal_transaction_report": "fincloud_journal_transaction_reports",
-		"balance_sheet_report": "fincloud_balance_sheet_reports", "profit_loss_statement": "fincloud_profit_loss_statements",
-		"coa_movement_report": "fincloud_coa_movement_reports", "fund_distribution_report": "fincloud_fund_distribution_reports",
-		"vault_mutation_report": "fincloud_vault_mutation_reports", "teller_mutation_report": "fincloud_teller_mutation_reports",
-	}
-	table := tables[definition.Key]
-	if table == "" {
-		return fixedStorage{}, fmt.Errorf("unsupported fixed report %q", definition.Key)
+	table, err := ingestion.FixedTableName(definition.Key)
+	if err != nil {
+		return fixedStorage{}, err
 	}
 	columns := make([]string, len(definition.RequiredHeaders))
 	for index, header := range definition.RequiredHeaders {
@@ -565,4 +707,11 @@ func fixedStorageFor(definition ingestion.FixedDefinition) (fixedStorage, error)
 func mustDate(value string) ingestion.CalendarDate {
 	date, _ := ingestion.ParseCalendarDate(value)
 	return date
+}
+
+func nullableFixedDimension(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

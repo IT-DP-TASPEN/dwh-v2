@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +37,11 @@ func stageMemberFixture(repository *FixedRepository, ctx context.Context, defini
 	hash := sha256.New()
 	var rows uint64
 	for _, segment := range segments {
+		var err error
+		segment, err = prepareFixedFixtureSegment(definition, descriptor, segment)
+		if err != nil {
+			return err
+		}
 		if err := repository.StageMemberSegment(ctx, definition, loadID, descriptor, segment); err != nil {
 			return err
 		}
@@ -47,6 +53,44 @@ func stageMemberFixture(repository *FixedRepository, ctx context.Context, defini
 	var checksum [sha256.Size]byte
 	copy(checksum[:], hash.Sum(nil))
 	return repository.FinalizeMemberCandidate(ctx, definition, loadID, descriptor, len(segments), rows, checksum)
+}
+
+// prepareFixedFixtureSegment adds the source contract that older fixtures omitted.
+// Rows retain their original source row numbers, including intentional collisions.
+func prepareFixedFixtureSegment(definition ingestion.FixedDefinition, descriptor ingestion.RequestDescriptor, segment FixedSegment) (FixedSegment, error) {
+	chunks, err := ingestion.FixedSourceChunks(definition, descriptor.RequestedFrom, descriptor.RequestedTo)
+	if err != nil {
+		return segment, err
+	}
+	if segment.Index < 0 || segment.Index >= len(chunks) {
+		return segment, fmt.Errorf("invalid fixture segment index %d", segment.Index)
+	}
+	if segment.SourcePeriodFrom.IsZero() {
+		segment.SourcePeriodFrom = chunks[segment.Index].From
+	}
+	if segment.SourcePeriodTo.IsZero() {
+		segment.SourcePeriodTo = chunks[segment.Index].To
+	}
+	if segment.AsOfDate.IsZero() {
+		segment.AsOfDate = segment.SourcePeriodTo
+	}
+	for index := range segment.SourceRows {
+		row := &segment.SourceRows[index]
+		if definition.CoverageDateHeader != "" && row.Values[definition.CoverageDateHeader] == "" {
+			date, err := time.Parse("2006-01-02", segment.SourcePeriodFrom.String())
+			if err != nil {
+				return segment, err
+			}
+			row.Values[definition.CoverageDateHeader] = date.Format(definition.CoverageDateLayout)
+		}
+		values := make([]string, len(definition.RequiredHeaders))
+		for index, header := range definition.RequiredHeaders {
+			values[index] = row.Values[header]
+		}
+		sum := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+		row.SourceRowChecksum = hex.EncodeToString(sum[:])
+	}
+	return segment, nil
 }
 
 func TestFixedSegmentsStageIncrementallyAndFinalizeExplicitly(t *testing.T) {
@@ -68,6 +112,12 @@ func TestFixedSegmentsStageIncrementallyAndFinalizeExplicitly(t *testing.T) {
 	first := FixedSegment{Index: 0, AsOfDate: from.AddDays(29), SourceRows: fixedRowsN(t, definition, 2, "first")}
 	empty := FixedSegment{Index: 1, AsOfDate: from.AddDays(59)}
 	last := FixedSegment{Index: 2, AsOfDate: to, SourceRows: fixedRowsN(t, definition, 1, "last")}
+	for _, segment := range []*FixedSegment{&first, &empty, &last} {
+		*segment, err = prepareFixedFixtureSegment(definition, member, *segment)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := repository.StageMemberSegment(context.Background(), definition, loadID, member, first); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +229,7 @@ func TestFixedCompleteSetPromotionAndStaleOrdering(t *testing.T) {
 		t.Fatal("partial location set promoted")
 	}
 	var active uint64
-	if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, date.String(), date.String()); err != nil || active != load1 {
+	if err := db.Get(&active, `SELECT MIN(active_load_id) FROM fixed_report_date_publications WHERE job_key=? AND coverage_date BETWEEN ? AND ?`, definition.Key, date.String(), date.String()); err != nil || active != load1 {
 		t.Fatalf("active load=%d want=%d error=%v", active, load1, err)
 	}
 	load3, err := repository.BeginLoad(context.Background(), fixedRunID(t, db.DB, definition.Key), definition, plan)
@@ -238,7 +288,7 @@ func TestFixedFirstPublicationRaceUsesMonotonicLoadID(t *testing.T) {
 		t.Fatalf("newer load failed: %v", errorsByLoad[1])
 	}
 	var active uint64
-	if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, from.String(), to.String()); err != nil || active != loads[1] {
+	if err := db.Get(&active, `SELECT MIN(active_load_id) FROM fixed_report_date_publications WHERE job_key=? AND coverage_date BETWEEN ? AND ?`, definition.Key, from.String(), to.String()); err != nil || active != loads[1] {
 		t.Fatalf("race active load=%d want=%d errors=%v", active, loads[1], errorsByLoad)
 	}
 }
@@ -283,7 +333,7 @@ func TestFixedConcurrentStagingJoinsBeforeAtomicPromotion(t *testing.T) {
 	if err := db.Get(&status, `SELECT status FROM fixed_report_loads WHERE id=?`, loadID); err != nil || status != fixedLoadPublished {
 		t.Fatalf("status=%q error=%v", status, err)
 	}
-	if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, date.String(), date.String()); err != nil || active != loadID {
+	if err := db.Get(&active, `SELECT MIN(active_load_id) FROM fixed_report_date_publications WHERE job_key=? AND coverage_date BETWEEN ? AND ?`, definition.Key, date.String(), date.String()); err != nil || active != loadID {
 		t.Fatalf("active=%d want=%d error=%v", active, loadID, err)
 	}
 	if err := db.Get(&rows, `SELECT COUNT(*) FROM fincloud_balance_sheet_reports WHERE load_id=?`, loadID); err != nil || rows != len(plan.Members) {
@@ -308,7 +358,7 @@ func TestFixedConcurrentStagingJoinsBeforeAtomicPromotion(t *testing.T) {
 		if err := db.Get(&status, `SELECT status FROM fixed_report_loads WHERE id=?`, candidate); err != nil || status != fixedLoadPending {
 			t.Fatalf("%s status=%q error=%v", mode, status, err)
 		}
-		if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, date.String(), date.String()); err != nil || active != loadID {
+		if err := db.Get(&active, `SELECT MIN(active_load_id) FROM fixed_report_date_publications WHERE job_key=? AND coverage_date BETWEEN ? AND ?`, definition.Key, date.String(), date.String()); err != nil || active != loadID {
 			t.Fatalf("%s changed publication to %d error=%v", mode, active, err)
 		}
 	}
@@ -368,7 +418,7 @@ func TestCoAConcurrentStagingUsesPendingMemberInvariant(t *testing.T) {
 			t.Fatal(err)
 		}
 		var active uint64
-		if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, from.String(), to.String()); err != nil || active != loadID {
+		if err := db.Get(&active, `SELECT MIN(active_load_id) FROM fixed_report_date_publications WHERE job_key=? AND coverage_date BETWEEN ? AND ?`, definition.Key, from.String(), to.String()); err != nil || active != loadID {
 			t.Fatalf("active load=%d want=%d error=%v", active, loadID, err)
 		}
 		if err := db.Get(&stagedRows, `SELECT COUNT(*) FROM fincloud_coa_movement_reports WHERE load_id=?`, loadID); err != nil || stagedRows != wantRows {
@@ -1398,7 +1448,7 @@ func resetFixed(t *testing.T, db *sql.DB) {
 		"stg_fincloud_coa_movement_reports", "stg_fincloud_fund_distribution_reports", "stg_fincloud_vault_mutation_reports", "stg_fincloud_teller_mutation_reports",
 		"fincloud_cif_opening_reports", "fincloud_journal_transaction_reports", "fincloud_balance_sheet_reports", "fincloud_profit_loss_statements",
 		"fincloud_coa_movement_reports", "fincloud_fund_distribution_reports", "fincloud_vault_mutation_reports", "fincloud_teller_mutation_reports",
-		"fixed_report_publications", "fixed_report_load_members", "fixed_report_loads",
+		"fixed_report_date_publications", "fixed_report_publications", "fixed_report_load_segments", "fixed_report_load_members", "fixed_report_loads",
 	} {
 		if _, err := db.Exec("DELETE FROM `" + table + "`"); err != nil {
 			t.Fatal(err)

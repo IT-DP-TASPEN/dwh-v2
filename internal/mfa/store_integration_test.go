@@ -406,11 +406,38 @@ func TestMigrationHardCutoverRevokesPasswordOnlySessions(t *testing.T) {
 	s, id, now := fixture(t)
 	ctx := context.Background()
 	directory := filepath.Join(integrationdb.Root(t), "migrations")
-	if err := goose.DownContext(ctx, s.DB.DB, directory); err != nil {
+	// Exercise the MFA cutover itself; newer migrations may be irreversible.
+	const mfaVersion = 20261005120000
+	migrations, err := goose.CollectMigrations(directory, mfaVersion-1, mfaVersion)
+	if err != nil || len(migrations) != 1 {
+		t.Fatalf("collect MFA migration: count=%d error=%v", len(migrations), err)
+	}
+	var originalID int64
+	if err := s.DB.Get(&originalID, `SELECT id FROM goose_db_version WHERE version_id=?`, mfaVersion); err != nil {
 		t.Fatal(err)
 	}
+	version, err := goose.GetDBVersionContext(ctx, s.DB.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations[0].DownContext(ctx, s.DB.DB); err != nil {
+		t.Fatal(err)
+	}
+	applied := false
+	restore := func() error {
+		if !applied {
+			if err := migrations[0].UpContext(ctx, s.DB.DB); err != nil {
+				return err
+			}
+			applied = true
+		}
+		// Goose chooses current version by ledger ID. Restore this older
+		// migration's position without touching newer migration records.
+		_, err := s.DB.Exec(`UPDATE goose_db_version SET id=? WHERE version_id=?`, originalID, mfaVersion)
+		return err
+	}
 	defer func() {
-		if err := goose.UpContext(ctx, s.DB.DB, directory); err != nil {
+		if err := restore(); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -418,8 +445,11 @@ func TestMigrationHardCutoverRevokesPasswordOnlySessions(t *testing.T) {
 	if _, err := s.DB.Exec(`INSERT INTO sessions(user_id,token_hash,remember_me,expires_at,last_seen_at,created_at,updated_at) VALUES(?,?,FALSE,?,?,?,?)`, id, token[:], now.Add(time.Hour), now, now, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := goose.UpContext(ctx, s.DB.DB, directory); err != nil {
+	if err := restore(); err != nil {
 		t.Fatal(err)
+	}
+	if current, err := goose.GetDBVersionContext(ctx, s.DB.DB); err != nil || current != version {
+		t.Fatalf("newer migration version changed: before=%d after=%d error=%v", version, current, err)
 	}
 	if count(t, s.DB, "sessions") != 0 {
 		t.Fatal("pre-feature session survives rollout")

@@ -167,7 +167,7 @@ func TestFixedManifestCanonicalGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "00c5ca8db9364afbcec149515f30f98353d879c33d8e254dad2f0a30cc109e3b"
+	const want = "1d460ea18a0fd6be429d516787ea9ed8f352f7a2a05b2508d19d6e5044a376bb"
 	if got := hex.EncodeToString(checksum[:]); got != want {
 		t.Fatalf("manifest checksum = %s", got)
 	}

@@ -132,7 +132,7 @@ func TestFixedPublicationRollsBackWhenFinalOwnershipFenceMisses(t *testing.T) {
 		t.Fatal("stale fixed worker published")
 	}
 	var publications, rows int
-	if err := db.Get(&publications, `SELECT COUNT(*) FROM fixed_report_publications WHERE active_load_id=?`, loadID); err != nil {
+	if err := db.Get(&publications, `SELECT COUNT(*) FROM fixed_report_date_publications WHERE active_load_id=?`, loadID); err != nil {
 		t.Fatal(err)
 	}
 	storage, _ := fixedStorageFor(definition)
@@ -171,6 +171,10 @@ func TestRecoveredFixedRunUsesFreshLoadWithoutSegmentResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	segment := FixedSegment{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, "")}
+	segment, err = prepareFixedFixtureSegment(definition, plan.Members[0], segment)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := repository.StageMemberSegment(context.Background(), definition, oldLoad, plan.Members[0], segment); err != nil {
 		t.Fatal(err)
 	}

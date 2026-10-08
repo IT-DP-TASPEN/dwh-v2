@@ -136,9 +136,20 @@ func validateFixedDefinitions(definitions []FixedDefinition) error {
 		return fmt.Errorf("fixed catalog has %d definitions, want 8", len(definitions))
 	}
 	seen := map[string]struct{}{}
+	canonical := make(map[string]FixedDefinition, 8)
+	for _, definition := range FixedDefinitions() {
+		canonical[definition.Key] = definition
+	}
 	for _, definition := range definitions {
-		if definition.Key == "" || definition.Name == "" || definition.FincloudReportName == "" || len(definition.RequiredHeaders) == 0 || definition.MaxChunkDays != 30 {
+		if definition.Key == "" || definition.Name == "" || definition.FincloudReportName == "" || len(definition.RequiredHeaders) == 0 {
 			return fmt.Errorf("fixed definition %q is incomplete", definition.Key)
+		}
+		expected, known := canonical[definition.Key]
+		if !known || definition.PublicationMode != expected.PublicationMode ||
+			definition.SourceRequestMode != expected.SourceRequestMode || definition.MaxChunkDays != expected.MaxChunkDays ||
+			definition.SnapshotDate != expected.SnapshotDate || definition.CoverageDateHeader != expected.CoverageDateHeader ||
+			definition.CoverageDateLayout != expected.CoverageDateLayout {
+			return fmt.Errorf("%s has invalid canonical publication/source/date semantics", definition.Key)
 		}
 		if _, duplicate := seen[definition.Key]; duplicate {
 			return fmt.Errorf("duplicate fixed definition %q", definition.Key)
@@ -172,23 +183,50 @@ func (catalog Catalog) Find(key string) (JobDefinition, bool) {
 
 func FixedDefinitions() []FixedDefinition {
 	return []FixedDefinition{
-		fixed("cif_opening_report", "CIF Opening Report", "CIF Opening Report", SingleRequestAllLocationsEmpty, NoAccountCodeStrategy, cifOpeningHeaders()),
-		fixed("journal_transaction_report", "Journal Transaction Report", "Journal Transaction csv", SingleRequestAllLocationsEmpty, NoAccountCodeStrategy, journalHeaders()),
+		fixed("cif_opening_report", "CIF Opening Report", "CIF Opening Report", SingleRequestAllLocationsEmpty, NoAccountCodeStrategy, cifOpeningHeaders(), "Register Date", dateLayout),
+		fixed("journal_transaction_report", "Journal Transaction Report", "Journal Transaction csv", SingleRequestAllLocationsEmpty, NoAccountCodeStrategy, journalHeaders(), "Transaction Date", dateLayout),
 		fixedSnapshot("balance_sheet_report", "Balance Sheet Report", "Balance Sheet Report csv", PerLocation, balanceSheetHeaders(), true),
-		fixed("profit_loss_statement", "Profit and Loss Statement", "Profit and Loss Statement csv", PerLocation, NoAccountCodeStrategy, profitLossHeaders(), true),
-		fixed("coa_movement_report", "CoA Movement Report", "CoA Movement Report csv", SingleRequestAllLocationsEmpty, AllAccountCodes, coaMovementHeaders()),
-		fixed("fund_distribution_report", "Fund Distribution Report", "Fund Distribution Report csv", SingleRequestAllLocationsEmpty, NoAccountCodeStrategy, fundDistributionHeaders()),
-		fixed("vault_mutation_report", "Vault Mutation Report", "Vault Mutation Report csv", SingleRequestAllLocationsEmpty, NoAccountCodeStrategy, vaultMutationHeaders()),
-		fixed("teller_mutation_report", "Teller Mutation Report", "Teller Mutation Report (Teller's Blotter) csv", SingleRequestAllLocationsEmpty, NoAccountCodeStrategy, tellerMutationHeaders()),
+		fixedInterval("profit_loss_statement", "Profit and Loss Statement", "Profit and Loss Statement csv", PerLocation, profitLossHeaders()),
+		fixed("coa_movement_report", "CoA Movement Report", "CoA Movement Report csv", SingleRequestAllLocationsEmpty, AllAccountCodes, coaMovementHeaders(), "Date", dateLayout),
+		fixed("fund_distribution_report", "Fund Distribution Report", "Fund Distribution Report csv", SingleRequestAllLocationsEmpty, NoAccountCodeStrategy, fundDistributionHeaders(), "Journal Date", dateLayout),
+		fixed("vault_mutation_report", "Vault Mutation Report", "Vault Mutation Report csv", SingleRequestAllLocationsEmpty, NoAccountCodeStrategy, vaultMutationHeaders(), "datetime", "2006 -01-0215:04:05"),
+		fixed("teller_mutation_report", "Teller Mutation Report", "Teller Mutation Report (Teller's Blotter) csv", SingleRequestAllLocationsEmpty, NoAccountCodeStrategy, tellerMutationHeaders(), "transactiondate", "2006-01-02 15:04:05"),
 	}
 }
 
-func fixed(key, name, report string, location LocationStrategy, account AccountCodeStrategy, headers []string, sourceLocation ...bool) FixedDefinition {
-	return FixedDefinition{Key: key, Name: name, FincloudReportName: report, RequiredHeaders: headers, LocationStrategy: location, AccountCodeStrategy: account, SourceLocationID: len(sourceLocation) > 0 && sourceLocation[0], MaxChunkDays: 30}
+// FixedTableName is the canonical migration-owned final table for a Fixed job.
+func FixedTableName(jobKey string) (string, error) {
+	table, found := map[string]string{
+		"cif_opening_report":         "fincloud_cif_opening_reports",
+		"journal_transaction_report": "fincloud_journal_transaction_reports",
+		"balance_sheet_report":       "fincloud_balance_sheet_reports",
+		"profit_loss_statement":      "fincloud_profit_loss_statements",
+		"coa_movement_report":        "fincloud_coa_movement_reports",
+		"fund_distribution_report":   "fincloud_fund_distribution_reports",
+		"vault_mutation_report":      "fincloud_vault_mutation_reports",
+		"teller_mutation_report":     "fincloud_teller_mutation_reports",
+	}[jobKey]
+	if !found {
+		return "", fmt.Errorf("unknown fixed report %q", jobKey)
+	}
+	return table, nil
+}
+
+func fixed(key, name, report string, location LocationStrategy, account AccountCodeStrategy, headers []string, coverageHeader, coverageLayout string, sourceLocation ...bool) FixedDefinition {
+	return FixedDefinition{Key: key, Name: name, FincloudReportName: report, RequiredHeaders: headers, LocationStrategy: location, AccountCodeStrategy: account, SourceLocationID: len(sourceLocation) > 0 && sourceLocation[0], MaxChunkDays: 30,
+		PublicationMode: DateAddressable, SourceRequestMode: BoundedDateChunks, CoverageDateHeader: coverageHeader, CoverageDateLayout: coverageLayout}
+}
+
+func fixedInterval(key, name, report string, location LocationStrategy, headers []string) FixedDefinition {
+	definition := fixed(key, name, report, location, NoAccountCodeStrategy, headers, "", "", true)
+	definition.PublicationMode = IntervalResult
+	definition.SourceRequestMode = ExactInterval
+	definition.MaxChunkDays = 0
+	return definition
 }
 
 func fixedSnapshot(key, name, report string, location LocationStrategy, headers []string, sourceLocation bool) FixedDefinition {
-	definition := fixed(key, name, report, location, NoAccountCodeStrategy, headers, sourceLocation)
+	definition := fixed(key, name, report, location, NoAccountCodeStrategy, headers, "", "", sourceLocation)
 	definition.SnapshotDate = true
 	return definition
 }

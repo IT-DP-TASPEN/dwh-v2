@@ -29,9 +29,10 @@ var ApplicationVersions = []int64{
 	20260915120000,
 	20260929120000,
 	20261005120000,
+	20261008120000,
 }
 
-const CurrentVersion int64 = 20261005120000
+const CurrentVersion int64 = 20261008120000
 
 type MigrationRecord struct {
 	Version int64 `db:"version_id"`
@@ -221,7 +222,7 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 		WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='fk_ingestion_run_errors_run'`); err != nil || diagnosticDeleteRule != "CASCADE" {
 		return fmt.Errorf("required runtime diagnostic run cascade is missing")
 	}
-	return nil
+	return verifyFixedPublicationSchema(ctx, db)
 }
 
 func validRuntimeLimit(value uint) bool { return value >= 1 && value <= 64 }

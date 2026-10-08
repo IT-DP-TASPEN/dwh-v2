@@ -4,6 +4,8 @@ The production application is one long-running Go process connected to a clean M
 
 Infrastructure prerequisites are an HTTPS reverse proxy forwarding to the configured loopback address, MySQL 8.4+, and a separate access-controlled backup destination. Provisioning those systems is outside this repository.
 
+Fixed Report date authority requires the migration and bounded historical preparation described in [Fixed Report publication](FIXED_REPORT_PUBLICATION.md). Follow that cutover sequence before enabling ingestion against an existing populated database.
+
 ## Configuration
 
 ```dotenv

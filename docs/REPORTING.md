@@ -1,5 +1,7 @@
 # Report Template Engine V1
 
+Fixed date reports physically replace authoritative calendar-date coverage, so source-date queries need no publication join. P&L results have exact interval identity: filter both `period_from` and `period_to` by equality; overlapping intervals may coexist and `as_of_date` is provenance. See [Fixed Report publication](FIXED_REPORT_PUBLICATION.md) for source contracts and historical remediation. Custom SQL is not automatically rewritten.
+
 Production reporting credentials MUST be SELECT-only/read-only. Deny INSERT/UPDATE/DELETE, CREATE/ALTER/DROP, FILE, and privilege to invoke dangerous stored routines (normally deny EXECUTE). Use separately configured reporting accounts, not application runtime or migration credentials. Do not infer safety by parsing SHOW GRANTS: inherited roles and stored programs make effective privileges difficult to prove.
 
 The application accepts only lexical SELECT or WITH ... SELECT query forms. The shared MySQL-mode-aware scanner ignores strings, quoted identifiers, and ordinary comments; executable comments, multiple statements, output-file clauses, locking reads, assignments, and session named-lock functions are rejected without rewriting SQL. The policy applies to report and dynamic option templates, activation, active updates, test queries/options, interactive execution, and background exports.

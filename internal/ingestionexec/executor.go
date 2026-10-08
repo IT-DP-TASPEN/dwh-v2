@@ -296,6 +296,9 @@ func (executor *Executor) persistProgress(ctx context.Context, run ingestionrun.
 func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run, job ingestion.JobDefinition) Result {
 	progressWrites := true
 	definition := *job.Fixed
+	if err := executor.fixed.RequireReady(ctx); err != nil {
+		return failed("configuration", "Fixed coverage preparation is required", "fixed_coverage_readiness", err)
+	}
 	var locations ingestion.FrozenLocations
 	var accounts ingestion.FrozenAccountCodes
 	var journalTransactionTypes []journalTransactionType
@@ -361,6 +364,9 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	}
 	if err != nil {
 		return failed("contract", "could not build fixed execution plan", "plan", err)
+	}
+	for _, variant := range journalTransactionTypes {
+		plan.SourceVariants = append(plan.SourceVariants, variant.ID)
 	}
 	loadID, err := executor.fixed.BeginLoad(diagnosticScope(ctx, "persistence", "begin_fixed_load", "begin_fixed_load", "", ""), run.ID, definition, plan)
 	if err != nil {
@@ -449,7 +455,7 @@ func (executor *Executor) fetchAndStageFixedMember(ctx context.Context, definiti
 }
 
 func (executor *Executor) fetchFixedMemberSegments(ctx context.Context, definition ingestion.FixedDefinition, descriptor ingestion.RequestDescriptor, journalTransactionTypes []journalTransactionType, stage func(context.Context, ingestionstore.FixedSegment) error) fixedMemberResult {
-	chunks, err := ingestion.ChunkDateRange(descriptor.RequestedFrom, descriptor.RequestedTo, definition.MaxChunkDays)
+	chunks, err := ingestion.FixedSourceChunks(definition, descriptor.RequestedFrom, descriptor.RequestedTo)
 	if err != nil {
 		return fixedMemberResult{layer: fixedLayerContract, step: "plan_fixed_member", err: err}
 	}
@@ -488,7 +494,10 @@ func (executor *Executor) fetchFixedMemberSegments(ctx context.Context, definiti
 			if err != nil {
 				return fixedMemberResult{layer: fixedLayerSourceContract, step: "parse_fixed_csv", item: item, err: err}
 			}
-			segment := ingestionstore.FixedSegment{Index: chunkIndex*len(transactionTypes) + typeIndex, AsOfDate: chunk.To, SourceRows: parsed}
+			if err := ingestion.ValidateFixedCoverage(definition, chunk.From, chunk.To, parsed); err != nil {
+				return fixedMemberResult{layer: fixedLayerSourceContract, step: "validate_fixed_coverage", item: item, err: err}
+			}
+			segment := ingestionstore.FixedSegment{Index: chunkIndex*len(transactionTypes) + typeIndex, SourcePeriodFrom: chunk.From, SourcePeriodTo: chunk.To, RequestVariant: transactionType.ID, AsOfDate: chunk.To, SourceRows: parsed}
 			persistCtx := diagnosticScope(ctx, "persistence", "stage_fixed_member_segment", "stage_fixed_member_segment", item, descriptor.MemberKey)
 			if err := stage(persistCtx, segment); err != nil {
 				return fixedMemberResult{layer: fixedLayerPersistence, step: "stage_fixed_member_segment", item: item, err: err}

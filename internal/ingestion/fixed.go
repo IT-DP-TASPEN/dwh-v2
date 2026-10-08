@@ -11,10 +11,13 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 )
 
 type LocationStrategy string
 type AccountCodeStrategy string
+type PublicationMode string
+type SourceRequestMode string
 
 const (
 	SingleFixedMemberKey = "__single__"
@@ -24,6 +27,12 @@ const (
 
 	NoAccountCodeStrategy AccountCodeStrategy = "none"
 	AllAccountCodes       AccountCodeStrategy = "all_account_codes"
+
+	DateAddressable PublicationMode = "date_addressable"
+	IntervalResult  PublicationMode = "interval_result"
+
+	BoundedDateChunks SourceRequestMode = "bounded_date_chunks"
+	ExactInterval     SourceRequestMode = "exact_interval"
 )
 
 type FixedDefinition struct {
@@ -36,6 +45,10 @@ type FixedDefinition struct {
 	SnapshotDate        bool
 	SourceLocationID    bool
 	MaxChunkDays        int
+	PublicationMode     PublicationMode
+	SourceRequestMode   SourceRequestMode
+	CoverageDateHeader  string
+	CoverageDateLayout  string
 }
 
 type RequestDescriptor struct {
@@ -52,9 +65,9 @@ func FixedManifestChecksum(definition FixedDefinition, plan FixedPlan) ([32]byte
 	if plan.JobKey != definition.Key || len(plan.Members) == 0 || !plan.RequireAllMembers {
 		return [32]byte{}, fmt.Errorf("complete fixed plan for %s is required", definition.Key)
 	}
-	members := make([]string, len(plan.Members))
+	members := append([]RequestDescriptor(nil), plan.Members...)
 	seen := make(map[string]struct{}, len(members))
-	for index, member := range plan.Members {
+	for _, member := range members {
 		if member.MemberKey == "" {
 			return [32]byte{}, fmt.Errorf("fixed plan member key is required")
 		}
@@ -62,18 +75,26 @@ func FixedManifestChecksum(definition FixedDefinition, plan FixedPlan) ([32]byte
 			return [32]byte{}, fmt.Errorf("duplicate fixed plan member %q", member.MemberKey)
 		}
 		seen[member.MemberKey] = struct{}{}
-		members[index] = member.MemberKey
 	}
-	sort.Strings(members)
+	sort.Slice(members, func(i, j int) bool { return members[i].MemberKey < members[j].MemberKey })
 	var encoded bytes.Buffer
 	encoded.WriteString("DWH-FIXED-MANIFEST\x00")
-	_ = binary.Write(&encoded, binary.BigEndian, uint16(1))
-	for _, value := range []string{plan.JobKey, string(definition.LocationStrategy), string(definition.AccountCodeStrategy), plan.Range.From.String(), plan.Range.To.String()} {
+	_ = binary.Write(&encoded, binary.BigEndian, uint16(2))
+	for _, value := range []string{plan.JobKey, string(definition.LocationStrategy), string(definition.AccountCodeStrategy),
+		plan.Range.From.String(), plan.Range.To.String(), string(definition.PublicationMode), string(definition.SourceRequestMode),
+		definition.FincloudReportName, definition.CoverageDateHeader, definition.CoverageDateLayout} {
 		writeManifestString(&encoded, value)
+	}
+	_ = binary.Write(&encoded, binary.BigEndian, uint32(definition.MaxChunkDays))
+	_ = binary.Write(&encoded, binary.BigEndian, uint32(len(plan.SourceVariants)))
+	for _, variant := range plan.SourceVariants {
+		writeManifestString(&encoded, variant)
 	}
 	_ = binary.Write(&encoded, binary.BigEndian, uint32(len(members)))
 	for _, member := range members {
-		writeManifestString(&encoded, member)
+		for _, value := range []string{member.MemberKey, member.RequestedFrom.String(), member.RequestedTo.String(), member.SourceLocationID, member.AccountCode} {
+			writeManifestString(&encoded, value)
+		}
 	}
 	return sha256.Sum256(encoded.Bytes()), nil
 }
@@ -96,6 +117,7 @@ type FixedPlan struct {
 	Range             FixedDateRangeParams
 	ReplacementScope  ReplacementScope
 	Members           []RequestDescriptor
+	SourceVariants    []string // Frozen, canonical-order Journal transaction-type IDs.
 	RequireAllMembers bool
 }
 
@@ -268,6 +290,28 @@ func FixedColumnName(header string) string { return toSnakeCase(header) }
 
 type DateChunk struct{ From, To CalendarDate }
 
+// FixedSourceChunks describes source requests, independently of publication
+// authority. An interval result must never be concatenated from shorter results.
+func FixedSourceChunks(definition FixedDefinition, from, to CalendarDate) ([]DateChunk, error) {
+	if from.year < 1000 || from.year > 9999 || to.year < 1000 || to.year > 9999 || from.String() > to.String() {
+		return nil, fmt.Errorf("valid fixed source date range is required")
+	}
+	if definition.SnapshotDate && from != to {
+		return nil, fmt.Errorf("%s requires an exact snapshot source request", definition.Key)
+	}
+	switch definition.SourceRequestMode {
+	case ExactInterval:
+		return []DateChunk{{From: from, To: to}}, nil
+	case BoundedDateChunks:
+		if definition.MaxChunkDays < 1 || definition.MaxChunkDays > 30 {
+			return nil, fmt.Errorf("%s has invalid bounded source chunk size", definition.Key)
+		}
+		return ChunkDateRange(from, to, definition.MaxChunkDays)
+	default:
+		return nil, fmt.Errorf("%s has invalid source request mode", definition.Key)
+	}
+}
+
 func ChunkDateRange(from, to CalendarDate, maxDays int) ([]DateChunk, error) {
 	if from.IsZero() || to.IsZero() || from.String() > to.String() {
 		return nil, fmt.Errorf("valid date range is required")
@@ -278,10 +322,13 @@ func ChunkDateRange(from, to CalendarDate, maxDays int) ([]DateChunk, error) {
 	var chunks []DateChunk
 	for start := from; start.String() <= to.String(); {
 		end := start.AddDays(maxDays - 1)
-		if end.String() > to.String() {
+		if end.year > to.year || end.String() > to.String() {
 			end = to
 		}
 		chunks = append(chunks, DateChunk{From: start, To: end})
+		if end == to {
+			break
+		}
 		start = end.AddDays(1)
 	}
 	return chunks, nil
@@ -291,7 +338,68 @@ type FixedCSVRow struct {
 	SourceRowNumber   int
 	SourceRowChecksum string
 	SourceLocationID  string
+	CoverageDate      CalendarDate
 	Values            map[string]string
+}
+
+// ParseFixedCoverageDate preserves the source's stated calendar date. In
+// particular Vault has a deliberate non-ISO layout; neither datetime contract
+// performs timezone conversion or accepts whitespace/format variations.
+func ParseFixedCoverageDate(definition FixedDefinition, raw string, snapshot CalendarDate) (CalendarDate, error) {
+	if definition.PublicationMode != DateAddressable {
+		return CalendarDate{}, fmt.Errorf("%s has no source business-date contract", definition.Key)
+	}
+	if definition.SnapshotDate {
+		if snapshot.IsZero() {
+			return CalendarDate{}, fmt.Errorf("%s requires a snapshot coverage date", definition.Key)
+		}
+		return snapshot, nil
+	}
+	if definition.CoverageDateHeader == "" || definition.CoverageDateLayout == "" || raw == "" {
+		return CalendarDate{}, fmt.Errorf("%s requires a valid source business date", definition.Key)
+	}
+	parsed, err := time.Parse(definition.CoverageDateLayout, raw)
+	if err != nil || parsed.Format(definition.CoverageDateLayout) != raw || parsed.Year() < 1000 {
+		return CalendarDate{}, fmt.Errorf("%s has an invalid or unsupported source business date", definition.Key)
+	}
+	return CalendarDateFromTime(parsed), nil
+}
+
+// ValidateFixedCoverage assigns normalized dates only after the complete segment
+// validates. The boundaries are the actual source request, never the parent load.
+func ValidateFixedCoverage(definition FixedDefinition, from, to CalendarDate, rows []FixedCSVRow) error {
+	if from.IsZero() || to.IsZero() || from.String() > to.String() {
+		return fmt.Errorf("valid fixed source segment is required")
+	}
+	if definition.PublicationMode == IntervalResult {
+		for _, row := range rows {
+			if !row.CoverageDate.IsZero() {
+				return fmt.Errorf("%s interval rows must not have coverage dates", definition.Key)
+			}
+		}
+		return nil
+	}
+	if definition.PublicationMode != DateAddressable {
+		return fmt.Errorf("%s has invalid publication mode", definition.Key)
+	}
+	if definition.SnapshotDate && from != to {
+		return fmt.Errorf("%s requires one snapshot coverage date", definition.Key)
+	}
+	dates := make([]CalendarDate, len(rows))
+	for index, row := range rows {
+		date, err := ParseFixedCoverageDate(definition, row.Values[definition.CoverageDateHeader], to)
+		if err != nil {
+			return fmt.Errorf("%s source row %d: %w", definition.Key, row.SourceRowNumber, err)
+		}
+		if date.String() < from.String() || date.String() > to.String() {
+			return fmt.Errorf("%s source row %d business date is outside its source segment", definition.Key, row.SourceRowNumber)
+		}
+		dates[index] = date
+	}
+	for index := range rows {
+		rows[index].CoverageDate = dates[index]
+	}
+	return nil
 }
 
 type FixedHeaderError struct {

@@ -2,12 +2,14 @@
 
 This matrix is a runbook, not evidence that live Fincloud behavior has been re-tested. For every approved smoke execution record the selected date, frozen member count, request count, duration, row count, database growth, safe error classification, and final publication/snapshot status. Never record credentials, sessions, customer payloads, or sensitive row values.
 
+Before Fixed execution, follow the [coverage cutover and remediation runbook](FIXED_REPORT_PUBLICATION.md). Seven Fixed reports replace calendar-date coverage, including empty dates; P&L replaces only an exact interval and makes one source request per frozen location without chunking.
+
 | Job key | Category | Contract | Validation focus |
 | --- | --- | --- | --- |
 | `cif_opening_report` | Fixed | Range; one all-location-empty member | chunks, rows, atomic promotion |
-| `journal_transaction_report` | Fixed | Range; one all-location-empty member | chunks, rows, atomic promotion |
+| `journal_transaction_report` | Fixed | Range; one all-location-empty member × frozen transaction types | chunks, exact variants, date authority, atomic promotion |
 | `balance_sheet_report` | Fixed | Date series × frozen locations | location provenance, all-member promotion |
-| `profit_loss_statement` | Fixed | Range × frozen locations | location provenance, all-member promotion |
+| `profit_loss_statement` | Fixed | Exact interval × frozen locations | one full-interval request/location, no fallback, exact replacement |
 | `coa_movement_report` | Fixed | Range × frozen account codes | explicit empty location, zero-row members, load |
 | `fund_distribution_report` | Fixed | Range; one all-location-empty member | chunks, rows, atomic promotion |
 | `vault_mutation_report` | Fixed | Range; one all-location-empty member | chunks, rows, atomic promotion |

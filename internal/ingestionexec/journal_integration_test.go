@@ -77,7 +77,7 @@ func TestJournalTransactionPartitionsPublishAtomically(t *testing.T) {
 				response.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
-			_, _ = io.WriteString(response, journalTestCSV(definition, parameters[2]+"-"+parameters[1], false, false))
+			_, _ = io.WriteString(response, journalTestCSV(definition, parameters[2]+"-"+parameters[1], false, false, parameters[2]))
 		default:
 			http.NotFound(response, request)
 		}
@@ -129,8 +129,32 @@ func TestJournalTransactionPartitionsPublishAtomically(t *testing.T) {
 	}
 
 	var activeLoadID uint64
-	if err := db.Get(&activeLoadID, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, from.String(), to.String()); err != nil {
+	if err := db.Get(&activeLoadID, `SELECT active_load_id FROM fixed_report_date_publications WHERE job_key=? AND coverage_date=?`, definition.Key, from.String()); err != nil {
 		t.Fatal(err)
+	}
+	var coverageDates, wrongAuthority int
+	if err := db.QueryRowx(`SELECT COUNT(*),COALESCE(SUM(active_load_id<>?),0)
+		FROM fixed_report_date_publications WHERE job_key=? AND coverage_date BETWEEN ? AND ?`, activeLoadID, definition.Key, from.String(), to.String()).Scan(&coverageDates, &wrongAuthority); err != nil || coverageDates != 32 || wrongAuthority != 0 {
+		t.Fatalf("date authority: dates=%d wrong=%d error=%v", coverageDates, wrongAuthority, err)
+	}
+	var sourceSegments []struct {
+		From    string `db:"source_period_from"`
+		To      string `db:"source_period_to"`
+		Variant string `db:"request_variant"`
+		Rows    uint64 `db:"row_count"`
+	}
+	if err := db.Select(&sourceSegments, `SELECT CAST(source_period_from AS CHAR) AS source_period_from,
+		CAST(source_period_to AS CHAR) AS source_period_to,request_variant,row_count
+		FROM fixed_report_load_segments WHERE load_id=? ORDER BY segment_index`, activeLoadID); err != nil {
+		t.Fatal(err)
+	}
+	if len(sourceSegments) != len(wantFirstRequests) {
+		t.Fatalf("persisted journal segments=%+v", sourceSegments)
+	}
+	for index, segment := range sourceSegments {
+		if segment.From+"/"+segment.To+"/"+segment.Variant != wantFirstRequests[index] || segment.Rows != 1 {
+			t.Fatalf("persisted journal segment[%d]=%+v", index, segment)
+		}
 	}
 	var load struct {
 		Status, MemberStatus string
@@ -172,7 +196,7 @@ func TestJournalTransactionPartitionsPublishAtomically(t *testing.T) {
 		t.Fatalf("enumerations=%d requests=%v", secondEnumerationCount, secondRequests)
 	}
 	var stillActive uint64
-	if err := db.Get(&stillActive, `SELECT active_load_id FROM fixed_report_publications WHERE job_key=? AND period_from=? AND period_to=?`, definition.Key, from.String(), to.String()); err != nil || stillActive != activeLoadID {
+	if err := db.Get(&stillActive, `SELECT active_load_id FROM fixed_report_date_publications WHERE job_key=? AND coverage_date=?`, definition.Key, from.String()); err != nil || stillActive != activeLoadID {
 		t.Fatalf("active load=%d want=%d error=%v", stillActive, activeLoadID, err)
 	}
 	var failedLoadID, failedSegments, failedStaged uint64
@@ -231,7 +255,8 @@ func cleanupJournalIntegration(t *testing.T, db *sqlx.DB, runIDs []uint64) {
 			for _, query := range []string{
 				`DELETE FROM stg_fincloud_journal_transaction_reports WHERE load_id=?`,
 				`DELETE FROM fincloud_journal_transaction_reports WHERE load_id=?`,
-				`DELETE FROM fixed_report_publications WHERE active_load_id=?`,
+				`DELETE FROM fixed_report_date_publications WHERE active_load_id=?`,
+				`DELETE FROM fixed_report_load_segments WHERE load_id=?`,
 				`DELETE FROM fixed_report_loads WHERE id=?`,
 			} {
 				if _, err := db.Exec(query, loadID); err != nil {

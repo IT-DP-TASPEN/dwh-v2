@@ -54,7 +54,7 @@ func TestFixedCleanupPreservesSuccessfulPublicationAndHistory(t *testing.T) {
 	}
 	assertFixedCleanupHistory(t, db, fixture, "succeeded")
 	var active uint64
-	if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_publications WHERE active_load_id=?`, fixture.LoadID); err != nil || active != fixture.LoadID {
+	if err := db.Get(&active, `SELECT active_load_id FROM fixed_report_date_publications WHERE active_load_id=?`, fixture.LoadID); err != nil || active != fixture.LoadID {
 		t.Fatalf("active load=%d error=%v", active, err)
 	}
 }
@@ -233,6 +233,9 @@ func newFixedCleanupFixture(t *testing.T, db *sqlx.DB, repository *FixedReposito
 	if err != nil {
 		t.Fatal(err)
 	}
+	if definition.Key == "journal_transaction_report" {
+		plan.SourceVariants = []string{"fixture"}
+	}
 	owner := strings.Repeat("c", 64)
 	runResult, err := db.Exec(`INSERT INTO ingestion_runs
 		(kind,job_key,status,parameter_kind,parameter_version,parameters_json,parameter_checksum,trigger_type,
@@ -249,6 +252,9 @@ func newFixedCleanupFixture(t *testing.T, db *sqlx.DB, repository *FixedReposito
 	}
 	for _, member := range plan.Members {
 		segment := FixedSegment{Index: 0, AsOfDate: date, SourceRows: fixedRows(t, definition, member.SourceLocationID)}
+		if definition.Key == "journal_transaction_report" {
+			segment.RequestVariant = "fixture"
+		}
 		if err := stageMemberFixture(repository, context.Background(), definition, loadID, member, []FixedSegment{segment}); err != nil {
 			t.Fatal(err)
 		}
@@ -292,6 +298,10 @@ func assertFixedCleanupHistory(t *testing.T, db *sqlx.DB, fixture fixedCleanupFi
 	var status string
 	if err := db.Get(&status, `SELECT status FROM ingestion_runs WHERE id=?`, fixture.RunID); err != nil || status != wantStatus {
 		t.Fatalf("run %d status=%q want=%q error=%v", fixture.RunID, status, wantStatus, err)
+	}
+	var segments int
+	if err := db.Get(&segments, `SELECT COUNT(*) FROM fixed_report_load_segments WHERE load_id=?`, fixture.LoadID); err != nil || segments != len(fixture.Plan.Members) {
+		t.Fatalf("persistent segment history=%d want=%d error=%v", segments, len(fixture.Plan.Members), err)
 	}
 	var loads, members int
 	if err := db.Get(&loads, `SELECT COUNT(*) FROM fixed_report_loads WHERE id=? AND ingestion_run_id=?`, fixture.LoadID, fixture.RunID); err != nil || loads != 1 {

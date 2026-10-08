@@ -40,6 +40,7 @@ var EmptyBeforeAdoption = []string{
 	"stg_fincloud_loan_disbursement_fees", "fincloud_loan_repayment_schedule", "stg_fincloud_loan_repayment_schedule",
 	"fincloud_loan_payment_history", "stg_fincloud_loan_payment_history",
 	"dynamic_csv_sources", "dynamic_csv_source_columns",
+	"fixed_report_date_publications", "fixed_report_load_segments",
 	"fixed_report_publications", "fixed_report_load_members", "fixed_report_loads",
 	"maintenance_csv_ingestions", "run_log_events", "ingestion_row_errors", "ingestion_run_steps",
 	"schedule_attempts", "schedule_occurrences", "schedule_executions", "ingestion_run_items", "ingestion_runs", "schedules",
@@ -53,6 +54,7 @@ type MigrationGroup struct {
 }
 
 var AdoptionMigrationGroups = []MigrationGroup{
+	{"fixed_report_date_publication.sql", []string{"fixed_report_date_publications", "fixed_report_load_segments", "fixed_report_coverage_backfill", "fixed_report_coverage_state", "fixed_report_publication_locks"}},
 	{"create_custom_datasets.sql", []string{"custom_dataset_uploads", "custom_datasets", "custom_dataset_columns", "custom_dataset_imports"}},
 	{"create_saving_account_statements.sql", []string{"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements"}},
 	{"expand_detail_typed_schema.sql", []string{

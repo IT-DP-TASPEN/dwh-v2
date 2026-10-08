@@ -537,9 +537,9 @@ func TestJournalTransactionPartitionsAreSequentialAndAggregateOneCandidate(t *te
 	executor, requests := journalPartitionTestExecutor(t, func(parameters []string) (int, string) {
 		transactionType := parameters[1]
 		if transactionType == "B" {
-			return http.StatusOK, journalTestCSV(definition, "", true, false)
+			return http.StatusOK, journalTestCSV(definition, "", true, false, parameters[2])
 		}
-		return http.StatusOK, journalTestCSV(definition, "same-row", false, false)
+		return http.StatusOK, journalTestCSV(definition, "same-row", false, false, parameters[2])
 	})
 	from, _ := ingestion.ParseCalendarDate("2026-01-01")
 	to, _ := ingestion.ParseCalendarDate("2026-03-31")
@@ -566,6 +566,9 @@ func TestJournalTransactionPartitionsAreSequentialAndAggregateOneCandidate(t *te
 	}
 	var checksum string
 	for index, segment := range segments {
+		if index%3 == 0 {
+			checksum = ""
+		}
 		if segment.Index != index {
 			t.Fatalf("segment[%d].Index=%d", index, segment.Index)
 		}
@@ -593,7 +596,7 @@ func TestJournalTransactionPartitionsAreSequentialAndAggregateOneCandidate(t *te
 func TestJournalTransactionPartitionsAcceptCompatibleCanonicalSchema(t *testing.T) {
 	definition := ingestion.FixedDefinitions()[1]
 	executor, _ := journalPartitionTestExecutor(t, func(parameters []string) (int, string) {
-		return http.StatusOK, journalTestCSV(definition, "same-row", false, parameters[1] == "B")
+		return http.StatusOK, journalTestCSV(definition, "same-row", false, parameters[1] == "B", parameters[2])
 	})
 	date, _ := ingestion.ParseCalendarDate("2026-01-01")
 	plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: date, To: date}, ingestion.FrozenLocations{}, ingestion.FrozenAccountCodes{})
@@ -626,7 +629,7 @@ func TestJournalTransactionPartitionFailureStopsRemainingWork(t *testing.T) {
 				if parameters[1] == "C" {
 					return http.StatusServiceUnavailable, ""
 				}
-				return http.StatusOK, journalTestCSV(definition, "same-row", false, false)
+				return http.StatusOK, journalTestCSV(definition, "same-row", false, false, parameters[2])
 			},
 			wantRequests: []string{"2026-01-01/2026-01-01/A", "2026-01-01/2026-01-01/B", "2026-01-01/2026-01-01/C"}, wantLayer: fixedLayerSource,
 		},
@@ -637,7 +640,7 @@ func TestJournalTransactionPartitionFailureStopsRemainingWork(t *testing.T) {
 				if parameters[1] == "A" && parameters[2] == "2026-01-31" {
 					return http.StatusServiceUnavailable, ""
 				}
-				return http.StatusOK, journalTestCSV(definition, "same-row", false, false)
+				return http.StatusOK, journalTestCSV(definition, "same-row", false, false, parameters[2])
 			},
 			wantRequests: []string{"2026-01-01/2026-01-30/A", "2026-01-01/2026-01-30/B", "2026-01-31/2026-02-01/A"}, wantLayer: fixedLayerSource,
 		},
@@ -648,7 +651,7 @@ func TestJournalTransactionPartitionFailureStopsRemainingWork(t *testing.T) {
 				if parameters[1] == "B" {
 					return http.StatusOK, "Wrong Header\n"
 				}
-				return http.StatusOK, journalTestCSV(definition, "same-row", false, false)
+				return http.StatusOK, journalTestCSV(definition, "same-row", false, false, parameters[2])
 			},
 			wantRequests: []string{"2026-01-01/2026-01-01/A", "2026-01-01/2026-01-01/B"}, wantLayer: fixedLayerSourceContract,
 		},
@@ -676,8 +679,8 @@ func TestJournalTransactionPartitionFailureStopsRemainingWork(t *testing.T) {
 
 func TestFixedSegmentStageFailureStopsBeforeNextFetch(t *testing.T) {
 	definition := ingestion.FixedDefinitions()[1]
-	executor, requests := journalPartitionTestExecutor(t, func([]string) (int, string) {
-		return http.StatusOK, journalTestCSV(definition, "row", false, false)
+	executor, requests := journalPartitionTestExecutor(t, func(parameters []string) (int, string) {
+		return http.StatusOK, journalTestCSV(definition, "row", false, false, parameters[2])
 	})
 	date, _ := ingestion.ParseCalendarDate("2026-01-01")
 	plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: date, To: date}, ingestion.FrozenLocations{}, ingestion.FrozenAccountCodes{})
@@ -720,6 +723,11 @@ func TestGenericFixedSegmentsStageIncrementallyAndSingleSegmentStaysEquivalent(t
 			requests = append(requests, parameters[4]+"/"+parameters[5])
 			mutex.Unlock()
 			values := make([]string, len(definition.RequiredHeaders))
+			for index, header := range definition.RequiredHeaders {
+				if header == "Journal Date" {
+					values[index] = parameters[4]
+				}
+			}
 			_, _ = io.WriteString(response, strings.Join(definition.RequiredHeaders, "|")+"\n"+strings.Join(values, "|")+"\n")
 		default:
 			http.NotFound(response, request)
@@ -804,13 +812,20 @@ func journalPartitionTestExecutor(t *testing.T, respond func([]string) (int, str
 	}
 }
 
-func journalTestCSV(definition ingestion.FixedDefinition, marker string, empty, reordered bool) string {
+func journalTestCSV(definition ingestion.FixedDefinition, marker string, empty, reordered bool, sourceDate ...string) string {
 	headers := append([]string(nil), definition.RequiredHeaders...)
 	if empty {
 		return strings.Join(headers, "|") + "\n"
 	}
 	values := make([]string, len(headers))
+	date := "2026-01-01"
+	if len(sourceDate) > 0 {
+		date = sourceDate[0]
+	}
 	for index, header := range headers {
+		if header == "Transaction Date" {
+			values[index] = date
+		}
 		if header == "Journal ID" || header == "Transaction Type" {
 			values[index] = marker
 		}
@@ -831,4 +846,159 @@ func testMapperFailure(t *testing.T) error {
 		t.Fatalf("expected structured mapper error: %v", err)
 	}
 	return err
+}
+
+func TestProfitLossRequestsExactIntervalPerLocationWithoutConsolidation(t *testing.T) {
+	definition := ingestion.FixedDefinitions()[3]
+	var requests [][]string
+	reject := false
+	executor := fixedReportTestExecutor(t, func(name string, parameters []string) (int, string) {
+		if name != definition.FincloudReportName {
+			t.Errorf("report=%s", name)
+		}
+		requests = append(requests, append([]string(nil), parameters...))
+		if reject {
+			return http.StatusBadRequest, "unsupported interval"
+		}
+		values := make([]string, len(definition.RequiredHeaders))
+		values[0] = "same-coa"
+		row := strings.Join(values, "|") + "\n"
+		return http.StatusOK, strings.Join(definition.RequiredHeaders, "|") + "\n" + row + row
+	})
+	from, _ := ingestion.ParseCalendarDate("2026-08-01")
+	to, _ := ingestion.ParseCalendarDate("2026-09-30")
+	locations, _ := ingestion.FreezeLocations([]string{"000", "001", "002", "003", "004", "005", "006", "007", "008"})
+	plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: from, To: to}, locations, ingestion.FrozenAccountCodes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range plan.Members {
+		staged := 0
+		result := executor.fetchFixedMemberSegments(context.Background(), definition, member, nil, func(_ context.Context, segment ingestionstore.FixedSegment) error {
+			staged++
+			if segment.Index != 0 || segment.SourcePeriodFrom != from || segment.SourcePeriodTo != to || segment.AsOfDate != to || segment.RequestVariant != "" || len(segment.SourceRows) != 2 {
+				t.Fatalf("exact P&L segment=%+v", segment)
+			}
+			for _, row := range segment.SourceRows {
+				if !row.CoverageDate.IsZero() || row.SourceLocationID != member.SourceLocationID || row.Values["CoA No"] != "same-coa" {
+					t.Fatalf("P&L row=%+v", row)
+				}
+			}
+			return nil
+		})
+		if result.err != nil || result.segments != 1 || result.rows != 2 || staged != 1 {
+			t.Fatalf("result=%+v staged=%d", result, staged)
+		}
+	}
+	if len(requests) != 9 {
+		t.Fatalf("P&L source requests=%d want=9", len(requests))
+	}
+	for index, request := range requests {
+		want := []string{plan.Members[index].SourceLocationID, from.String(), to.String()}
+		if !reflect.DeepEqual(request, want) {
+			t.Fatalf("request=%v want=%v", request, want)
+		}
+	}
+	reject, requests = true, nil
+	result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], nil, func(context.Context, ingestionstore.FixedSegment) error {
+		t.Fatal("rejected P&L interval staged")
+		return nil
+	})
+	if result.err == nil || result.layer != fixedLayerSource || len(requests) != 1 || !reflect.DeepEqual(requests[0], []string{plan.Members[0].SourceLocationID, from.String(), to.String()}) {
+		t.Fatalf("P&L rejection/fallback: result=%+v requests=%v", result, requests)
+	}
+}
+
+func TestFixedBusinessDatesFailSourceContractBeforeStaging(t *testing.T) {
+	from, _ := ingestion.ParseCalendarDate("2026-08-01")
+	to, _ := ingestion.ParseCalendarDate("2026-09-30")
+	for _, definition := range ingestion.FixedDefinitions() {
+		if definition.CoverageDateHeader == "" {
+			continue
+		}
+		t.Run(definition.Key, func(t *testing.T) {
+			raw := ""
+			executor := fixedReportTestExecutor(t, func(_ string, _ []string) (int, string) {
+				values := make([]string, len(definition.RequiredHeaders))
+				for index, header := range definition.RequiredHeaders {
+					if header == definition.CoverageDateHeader {
+						values[index] = raw
+					}
+				}
+				return http.StatusOK, strings.Join(definition.RequiredHeaders, "|") + "\n" + strings.Join(values, "|") + "\n"
+			})
+			accounts, _ := ingestion.FreezeAccountCodes([]string{"10101"})
+			plan, err := ingestion.BuildFixedPlan(definition, ingestion.FixedDateRangeParams{From: from, To: to}, ingestion.FrozenLocations{}, accounts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			format := func(value string) string {
+				date, err := time.Parse("2006-01-02", value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return date.Format(definition.CoverageDateLayout)
+			}
+			raw = format("2026-08-01")
+			oneDayMember := plan.Members[0]
+			oneDayMember.RequestedTo = from
+			staged := 0
+			valid := executor.fetchFixedMemberSegments(context.Background(), definition, oneDayMember, []journalTransactionType{{ID: "A"}}, func(_ context.Context, segment ingestionstore.FixedSegment) error {
+				staged++
+				if len(segment.SourceRows) != 1 || segment.SourceRows[0].CoverageDate != from || segment.SourceRows[0].Values[definition.CoverageDateHeader] != raw {
+					t.Fatalf("valid source date changed: %+v", segment)
+				}
+				return nil
+			})
+			if valid.err != nil || staged != 1 {
+				t.Fatalf("valid source date: result=%+v staged=%d", valid, staged)
+			}
+			for _, test := range []struct{ name, date string }{
+				{"blank", ""}, {"invalid", "2026-02-30"}, {"unsupported", "08/01/2026"},
+				{"before segment", format("2026-07-31")},
+				// This date is within the parent range but outside the first source chunk.
+				{"after segment", format("2026-08-31")},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					raw = test.date
+					result := executor.fetchFixedMemberSegments(context.Background(), definition, plan.Members[0], []journalTransactionType{{ID: "A"}}, func(context.Context, ingestionstore.FixedSegment) error {
+						t.Fatal("invalid source business date staged")
+						return nil
+					})
+					failure := fixedFailure(context.Background(), result)
+					if result.err == nil || result.layer != fixedLayerSourceContract || failure.Error.Class != "source_contract" {
+						t.Fatalf("result=%+v failure=%+v", result, failure)
+					}
+				})
+			}
+		})
+	}
+}
+
+func fixedReportTestExecutor(t *testing.T, respond func(string, []string) (int, string)) *Executor {
+	t.Helper()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/admin/access/login":
+			_, _ = io.WriteString(response, `{"status":"ok","data":{"result":{"sessionid":"session"}}}`)
+		case "/system/laporanUmum/data/lap":
+			var parameters []string
+			if err := json.Unmarshal([]byte(request.URL.Query().Get("p")), &parameters); err != nil {
+				t.Error(err)
+				response.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			status, content := respond(request.URL.Query().Get("nm"), parameters)
+			response.WriteHeader(status)
+			_, _ = io.WriteString(response, content)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := fincloud.NewClient(fincloud.Config{BaseURL: server.URL, Username: "user", Password: "pass", LocationID: "001", RoleID: "role", HTTPTimeout: time.Second, InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Executor{client: client}
 }
