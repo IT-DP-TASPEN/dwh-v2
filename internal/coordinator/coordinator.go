@@ -19,14 +19,18 @@ import (
 	"github.com/ibldzn/go-admin/internal/securityctx"
 )
 
+// runExecutor is the narrow execution seam the dispatcher depends on.
+type runExecutor interface {
+	Execute(context.Context, ingestionrun.Run, string) ingestionexec.Result
+}
+
 type Coordinator struct {
 	runs     *ingestionrun.Repository
-	executor *ingestionexec.Executor
+	executor runExecutor
 	fixed    *ingestionstore.FixedRepository
 	details  *ingestionstore.DetailRepository
 	masters  *ingestionstore.MasterRepository
 	ownerID  string
-	workers  int
 	logger   *slog.Logger
 
 	mu      sync.Mutex
@@ -41,7 +45,7 @@ const (
 	ingestionRecoveryBatch     = 256
 )
 
-func New(ctx context.Context, db *sqlx.DB, sessions *fincloud.SessionCoordinator, authProfiles *fincloudauth.Repository, logger *slog.Logger) (*Coordinator, error) {
+func New(db *sqlx.DB, sessions *fincloud.SessionCoordinator, authProfiles *fincloudauth.Repository, logger *slog.Logger) (*Coordinator, error) {
 	if db == nil || sessions == nil || authProfiles == nil || logger == nil {
 		return nil, fmt.Errorf("database, Fincloud sessions, Auth Profiles, and logger are required")
 	}
@@ -53,10 +57,6 @@ func New(ctx context.Context, db *sqlx.DB, sessions *fincloud.SessionCoordinator
 	if err != nil {
 		return nil, err
 	}
-	settings, err := runs.RuntimeSettings(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("load ingestion runtime settings: %w", err)
-	}
 	ownerID, err := ingestionrun.NewOwnerID()
 	if err != nil {
 		return nil, err
@@ -65,11 +65,11 @@ func New(ctx context.Context, db *sqlx.DB, sessions *fincloud.SessionCoordinator
 	details := ingestionstore.NewDetailRepository(db)
 	masters := ingestionstore.NewMasterRepository(db)
 	executor, err := ingestionexec.New(sessions, authProfiles, fixed, details, masters,
-		ingestionstore.NewMaintenanceRepository(db), runs, catalog, settings.FixedMemberConcurrency, settings.DetailConcurrency, logger)
+		ingestionstore.NewMaintenanceRepository(db), runs, catalog, logger)
 	if err != nil {
 		return nil, err
 	}
-	return &Coordinator{runs: runs, executor: executor, fixed: fixed, details: details, masters: masters, ownerID: ownerID, workers: settings.MaxRunningJobs, logger: logger,
+	return &Coordinator{runs: runs, executor: executor, fixed: fixed, details: details, masters: masters, ownerID: ownerID, logger: logger,
 		local: map[uint64]context.CancelCauseFunc{}, parents: map[uint64]string{}}, nil
 }
 
@@ -122,19 +122,31 @@ func (coordinator *Coordinator) Cancel(ctx context.Context, runID uint64, reason
 	return err
 }
 
+func (coordinator *Coordinator) RuntimeSettings(ctx context.Context) (ingestionrun.RuntimeSettings, error) {
+	return coordinator.runs.RuntimeSettings(ctx)
+}
+
+func (coordinator *Coordinator) UpdateRuntimeSettings(ctx context.Context, expected, target ingestionrun.RuntimeSettings, requester securityctx.Requester) (bool, error) {
+	return coordinator.runs.UpdateRuntimeSettings(ctx, expected, target, requester)
+}
+
+func (coordinator *Coordinator) RunningJobs(ctx context.Context) (int, error) {
+	return coordinator.runs.RunningJobs(ctx)
+}
+
 func (coordinator *Coordinator) RecoverAbandoned(ctx context.Context, runID uint64, expectedOwner string, expectedHeartbeat time.Time, reason string, requester securityctx.Requester) error {
 	return coordinator.runs.RecoverAbandoned(ctx, runID, expectedOwner, expectedHeartbeat, reason, requester)
 }
 
+// Run starts one claim dispatcher plus background maintenance. Admission
+// capacity is decided by Claim against the live database limit, so there is no
+// process-local worker ceiling and no pool of idle pollers.
 func (coordinator *Coordinator) Run(ctx context.Context) {
 	executionCtx, stopExecution := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer stopExecution(ingestionrun.ErrCoordinatorShutdown)
-	var wait sync.WaitGroup
-	for range coordinator.workers {
-		wait.Add(1)
-		go func() { defer wait.Done(); coordinator.worker(ctx, executionCtx) }()
-	}
-	wait.Add(5)
+	var wait, active sync.WaitGroup
+	wait.Add(6)
+	go func() { defer wait.Done(); coordinator.dispatch(ctx, executionCtx, &active) }()
 	go func() { defer wait.Done(); coordinator.recoverStale(ctx) }()
 	go func() { defer wait.Done(); coordinator.reconcile(ctx) }()
 	go func() { defer wait.Done(); coordinator.cleanupDetailStaging(ctx) }()
@@ -142,7 +154,10 @@ func (coordinator *Coordinator) Run(ctx context.Context) {
 	go func() { defer wait.Done(); coordinator.cleanupMasterStaging(ctx) }()
 	<-ctx.Done()
 	stopExecution(ingestionrun.ErrCoordinatorShutdown)
+	// The dispatcher is the only caller of active.Add; once wait returns no new
+	// execution can start, so waiting on active cannot race an Add.
 	wait.Wait()
+	active.Wait()
 }
 
 func (coordinator *Coordinator) cleanupMasterStaging(ctx context.Context) {
@@ -250,7 +265,7 @@ func (coordinator *Coordinator) cleanupDetailStaging(ctx context.Context) {
 	}
 }
 
-func (coordinator *Coordinator) worker(ctx, executionCtx context.Context) {
+func (coordinator *Coordinator) dispatch(ctx, executionCtx context.Context, active *sync.WaitGroup) {
 	for ctx.Err() == nil {
 		attemptOwner, ownerErr := ingestionrun.NewOwnerID()
 		if ownerErr != nil {
@@ -270,40 +285,45 @@ func (coordinator *Coordinator) worker(ctx, executionCtx context.Context) {
 			wait(ctx, 250*time.Millisecond)
 			continue
 		}
-		runCtx, cancel := context.WithCancelCause(executionCtx)
-		coordinator.mu.Lock()
-		coordinator.local[run.ID] = cancel
-		coordinator.mu.Unlock()
-		heartbeatDone := make(chan struct{})
-		go coordinator.heartbeat(runCtx, cancel, *run, heartbeatDone)
-		result := coordinator.executor.Execute(runCtx, *run, attemptOwner)
-		coordinator.mu.Lock()
-		delete(coordinator.local, run.ID)
-		coordinator.mu.Unlock()
-		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		err = coordinator.runs.Finish(finishCtx, run.ID, attemptOwner, result.Status, result.Error)
+		active.Add(1)
+		go func() { defer active.Done(); coordinator.executeClaimedRun(ctx, executionCtx, *run, attemptOwner) }()
+	}
+}
+
+func (coordinator *Coordinator) executeClaimedRun(ctx, executionCtx context.Context, run ingestionrun.Run, attemptOwner string) {
+	runCtx, cancel := context.WithCancelCause(executionCtx)
+	coordinator.mu.Lock()
+	coordinator.local[run.ID] = cancel
+	coordinator.mu.Unlock()
+	heartbeatDone := make(chan struct{})
+	go coordinator.heartbeat(runCtx, cancel, run, heartbeatDone)
+	result := coordinator.executor.Execute(runCtx, run, attemptOwner)
+	coordinator.mu.Lock()
+	delete(coordinator.local, run.ID)
+	coordinator.mu.Unlock()
+	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	err := coordinator.runs.Finish(finishCtx, run.ID, attemptOwner, result.Status, result.Error)
+	finishCancel()
+	if errors.Is(err, ingestionrun.ErrTransition) && result.Status == ingestionrun.StatusSucceeded {
+		finishCtx, finishCancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		err = coordinator.runs.Finish(finishCtx, run.ID, attemptOwner, ingestionrun.StatusCancelled,
+			ingestionrun.SafeError{Class: "cancelled", Message: "run cancellation requested", Step: "finish"})
 		finishCancel()
-		if errors.Is(err, ingestionrun.ErrTransition) && result.Status == ingestionrun.StatusSucceeded {
-			finishCtx, finishCancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			err = coordinator.runs.Finish(finishCtx, run.ID, attemptOwner, ingestionrun.StatusCancelled,
-				ingestionrun.SafeError{Class: "cancelled", Message: "run cancellation requested", Step: "finish"})
-			finishCancel()
+	}
+	cancel(nil)
+	<-heartbeatDone
+	if run.ParentRunID != nil {
+		coordinator.reconcileOwnedParent(ctx, *run.ParentRunID)
+	}
+	if err != nil && !errors.Is(err, ingestionrun.ErrTransition) {
+		coordinator.logger.Error("finish ingestion run", "run_id", run.ID, "job_key", run.JobKey, "error", err)
+	}
+	if result.Cause != nil {
+		attributes := []any{"run_id", run.ID, "job_key", run.JobKey, "class", result.Error.Class, "error", result.Cause}
+		if causeType := fincloud.SafeCauseClass(result.Cause); causeType != "" {
+			attributes = append(attributes, "cause_type", causeType)
 		}
-		cancel(nil)
-		<-heartbeatDone
-		if run.ParentRunID != nil {
-			coordinator.reconcileOwnedParent(ctx, *run.ParentRunID)
-		}
-		if err != nil && !errors.Is(err, ingestionrun.ErrTransition) {
-			coordinator.logger.Error("finish ingestion run", "run_id", run.ID, "job_key", run.JobKey, "error", err)
-		}
-		if result.Cause != nil {
-			attributes := []any{"run_id", run.ID, "job_key", run.JobKey, "class", result.Error.Class, "error", result.Cause}
-			if causeType := fincloud.SafeCauseClass(result.Cause); causeType != "" {
-				attributes = append(attributes, "cause_type", causeType)
-			}
-			coordinator.logger.Warn("ingestion run completed with error", attributes...)
-		}
+		coordinator.logger.Warn("ingestion run completed with error", attributes...)
 	}
 }
 

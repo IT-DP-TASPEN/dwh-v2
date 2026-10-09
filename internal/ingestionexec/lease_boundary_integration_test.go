@@ -259,7 +259,7 @@ func integrationExecutor(t *testing.T, db *sqlx.DB, baseURL, username string) (*
 	}
 	sessions, authProfiles := integrationAuth(t, db, baseURL, username, "pass", "001", "role")
 	executor, err := New(sessions, authProfiles, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMasterRepository(db),
-		ingestionstore.NewMaintenanceRepository(db), runs, catalog, 1, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ingestionstore.NewMaintenanceRepository(db), runs, catalog, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

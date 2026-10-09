@@ -45,6 +45,7 @@ const (
 	ActionIngestionRunAllSubmitted        Action = "ingestion.run_all_submitted"
 	ActionIngestionCancellationRequested  Action = "ingestion.cancellation_requested"
 	ActionIngestionAbandonedRecovered     Action = "ingestion.abandoned_recovered"
+	ActionIngestionRuntimeSettingsUpdated Action = "ingestion.runtime_settings_updated"
 	ActionSourceStateChanged              Action = "source.state_changed"
 	ActionSourceAuthProfileChanged        Action = "source.auth_profile_changed"
 	ActionFincloudAuthProfileCreated      Action = "fincloud_auth_profile.created"
@@ -332,6 +333,19 @@ type IngestionSubmissionMetadata struct {
 
 func (IngestionSubmissionMetadata) auditMetadata() {}
 
+type IngestionRuntimeSettingsValues struct {
+	MaxRunningJobs         int `json:"max_running_jobs"`
+	FixedMemberConcurrency int `json:"fixed_member_concurrency"`
+	DetailConcurrency      int `json:"detail_concurrency"`
+}
+
+type IngestionRuntimeSettingsMetadata struct {
+	From IngestionRuntimeSettingsValues `json:"from"`
+	To   IngestionRuntimeSettingsValues `json:"to"`
+}
+
+func (IngestionRuntimeSettingsMetadata) auditMetadata() {}
+
 type Event struct {
 	Attribution Attribution
 	Action      Action
@@ -442,6 +456,7 @@ func knownAction(action Action) bool {
 		ActionIngestionRunAllSubmitted,
 		ActionIngestionCancellationRequested,
 		ActionIngestionAbandonedRecovered,
+		ActionIngestionRuntimeSettingsUpdated,
 		ActionSourceStateChanged,
 		ActionSourceAuthProfileChanged,
 		ActionFincloudAuthProfileCreated,

@@ -109,7 +109,7 @@ func Run(ctx context.Context) error {
 	}
 	defer fincloudListValues.CloseIdleConnections()
 	runtimeContext := context.WithoutCancel(ctx)
-	ingestionCoordinator, err := coordinator.New(ctx, databaseConnection, fincloudSessions, authProfiles, logger)
+	ingestionCoordinator, err := coordinator.New(databaseConnection, fincloudSessions, authProfiles, logger)
 	if err != nil {
 		return fmt.Errorf("initialize ingestion coordinator: %w", err)
 	}

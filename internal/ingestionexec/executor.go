@@ -23,21 +23,20 @@ import (
 )
 
 type Executor struct {
-	client            *fincloud.Client
-	sessions          *fincloud.SessionCoordinator
-	authProfiles      *fincloudauth.Repository
-	fixed             *ingestionstore.FixedRepository
-	detail            *ingestionstore.DetailRepository
-	master            *ingestionstore.MasterRepository
-	maintenance       *ingestionstore.MaintenanceRepository
-	runs              *ingestionrun.Repository
-	updateProgress    func(context.Context, uint64, string, ingestionrun.Progress, *ingestionrun.MapperDiagnostics) error
-	catalog           ingestion.Catalog
-	fixedConcurrency  int
-	detailConcurrency int
-	acquireSession    func(context.Context, fincloud.AuthContext) (fincloud.Lease, error)
-	now               func() time.Time
-	logger            *slog.Logger
+	client          *fincloud.Client
+	sessions        *fincloud.SessionCoordinator
+	authProfiles    *fincloudauth.Repository
+	fixed           *ingestionstore.FixedRepository
+	detail          *ingestionstore.DetailRepository
+	master          *ingestionstore.MasterRepository
+	maintenance     *ingestionstore.MaintenanceRepository
+	runs            *ingestionrun.Repository
+	updateProgress  func(context.Context, uint64, string, ingestionrun.Progress, *ingestionrun.MapperDiagnostics) error
+	catalog         ingestion.Catalog
+	runtimeSettings func(context.Context) (ingestionrun.RuntimeSettings, error)
+	acquireSession  func(context.Context, fincloud.AuthContext) (fincloud.Lease, error)
+	now             func() time.Time
+	logger          *slog.Logger
 }
 
 type Result struct {
@@ -98,12 +97,12 @@ type maintenanceSourceSelection struct {
 func (failure *maintenanceDateError) Error() string { return failure.cause.Error() }
 func (failure *maintenanceDateError) Unwrap() error { return failure.cause }
 
-func New(sessions *fincloud.SessionCoordinator, authProfiles *fincloudauth.Repository, fixed *ingestionstore.FixedRepository, detail *ingestionstore.DetailRepository, master *ingestionstore.MasterRepository, maintenance *ingestionstore.MaintenanceRepository, runs *ingestionrun.Repository, catalog ingestion.Catalog, fixedConcurrency, detailConcurrency int, logger *slog.Logger) (*Executor, error) {
-	if sessions == nil || authProfiles == nil || fixed == nil || detail == nil || master == nil || maintenance == nil || runs == nil || fixedConcurrency < 1 || detailConcurrency < 1 || logger == nil {
+func New(sessions *fincloud.SessionCoordinator, authProfiles *fincloudauth.Repository, fixed *ingestionstore.FixedRepository, detail *ingestionstore.DetailRepository, master *ingestionstore.MasterRepository, maintenance *ingestionstore.MaintenanceRepository, runs *ingestionrun.Repository, catalog ingestion.Catalog, logger *slog.Logger) (*Executor, error) {
+	if sessions == nil || authProfiles == nil || fixed == nil || detail == nil || master == nil || maintenance == nil || runs == nil || logger == nil {
 		return nil, fmt.Errorf("complete ingestion executor dependencies are required")
 	}
 	return &Executor{sessions: sessions, authProfiles: authProfiles, fixed: fixed, detail: detail, master: master, maintenance: maintenance, runs: runs, updateProgress: runs.UpdateProgress, catalog: catalog,
-		fixedConcurrency: fixedConcurrency, detailConcurrency: detailConcurrency, acquireSession: sessions.Acquire, now: time.Now, logger: logger}, nil
+		runtimeSettings: runs.RuntimeSettings, acquireSession: sessions.Acquire, now: time.Now, logger: logger}, nil
 }
 
 func (executor *Executor) Execute(ctx context.Context, run ingestionrun.Run, ownerID string) Result {
@@ -376,11 +375,15 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
 		return ownershipFailure(err, "persist_run_progress")
 	}
+	concurrency, err := executor.poolConcurrency(ctx, run, "fixed_member")
+	if err != nil {
+		return runtimeSettingsFailure(ctx, err)
+	}
 	var first *fixedMemberResult
 	poolCtx, stopPool := context.WithCancel(ctx)
 	defer stopPool()
 	var progressFatal error
-	runFixedPool(poolCtx, plan.Members, executor.fixedConcurrency,
+	runFixedPool(poolCtx, plan.Members, concurrency,
 		func(workCtx context.Context, descriptor ingestion.RequestDescriptor) fixedMemberResult {
 			result := executor.fetchAndStageFixedMember(workCtx, definition, loadID, descriptor, journalTransactionTypes)
 			result.memberKey = descriptor.MemberKey
@@ -587,6 +590,30 @@ func runFixedPool(ctx context.Context, descriptors []ingestion.RequestDescriptor
 	}
 }
 
+// poolConcurrency reads the live runtime settings exactly once for a new inner
+// pool. The returned value is frozen for that pool; later setting changes only
+// affect pools created afterwards.
+func (executor *Executor) poolConcurrency(ctx context.Context, run ingestionrun.Run, kind string) (int, error) {
+	settings, err := executor.runtimeSettings(ctx)
+	if err != nil {
+		return 0, err
+	}
+	concurrency := settings.DetailConcurrency
+	if kind == "fixed_member" {
+		concurrency = settings.FixedMemberConcurrency
+	}
+	executor.logger.InfoContext(ctx, "ingestion pool concurrency frozen", "run_id", run.ID, "job_key", run.JobKey,
+		"concurrency_kind", kind, "concurrency", concurrency)
+	return concurrency, nil
+}
+
+func runtimeSettingsFailure(ctx context.Context, err error) Result {
+	if result, cancelled := cancellationFailure(ctx, "load_runtime_settings", err); cancelled {
+		return result
+	}
+	return failed("persistence", "ingestion runtime settings could not be loaded", "load_runtime_settings", err)
+}
+
 func fixedFailure(ctx context.Context, result fixedMemberResult) Result {
 	if cancelledResult, cancelled := cancellationFailure(ctx, result.step, result.err); cancelled {
 		return cancelledResult
@@ -622,7 +649,11 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 	if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
 		return ownershipFailure(err, "persist_run_progress")
 	}
-	outcome := runDetailPool(ctx, identifiers, executor.detailConcurrency,
+	concurrency, err := executor.poolConcurrency(ctx, run, "detail")
+	if err != nil {
+		return runtimeSettingsFailure(ctx, err)
+	}
+	outcome := runDetailPool(ctx, identifiers, concurrency,
 		func(workCtx context.Context, identifier string) detailItemResult {
 			return executor.fetchAndStageDetail(workCtx, run.ID, job.Key, identifier)
 		},

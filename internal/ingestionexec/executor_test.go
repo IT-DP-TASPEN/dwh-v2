@@ -1002,3 +1002,72 @@ func fixedReportTestExecutor(t *testing.T, respond func(string, []string) (int, 
 	}
 	return &Executor{client: client}
 }
+
+func TestPoolConcurrencyIsSnapshottedOncePerPool(t *testing.T) {
+	var mu sync.Mutex
+	current, reads := ingestionrun.RuntimeSettings{MaxRunningJobs: 2, FixedMemberConcurrency: 2, DetailConcurrency: 2}, 0
+	executor := &Executor{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), runtimeSettings: func(context.Context) (ingestionrun.RuntimeSettings, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		reads++
+		return current, nil
+	}}
+	setLimits := func(value int) {
+		mu.Lock()
+		current.FixedMemberConcurrency, current.DetailConcurrency = value, value
+		mu.Unlock()
+	}
+	run := ingestionrun.Run{ID: 7, JobKey: "snapshot"}
+	pools := map[string]func(int, func()){
+		"fixed_member": func(width int, work func()) {
+			runFixedPool(context.Background(), make([]ingestion.RequestDescriptor, 8), width, func(context.Context, ingestion.RequestDescriptor) fixedMemberResult {
+				work()
+				return fixedMemberResult{}
+			}, func(fixedMemberResult) {})
+		},
+		"detail": func(width int, work func()) {
+			runDetailPool(context.Background(), make([]string, 8), width, func(context.Context, string) detailItemResult {
+				work()
+				return detailItemResult{}
+			}, func(ingestionrun.Progress, *ingestionrun.MapperDiagnostics) error { return nil })
+		},
+	}
+	for kind, pool := range pools {
+		setLimits(2)
+		reads = 0
+		width, err := executor.poolConcurrency(context.Background(), run, kind)
+		if err != nil || width != 2 {
+			t.Fatalf("%s width=%d err=%v", kind, width, err)
+		}
+		var active, peak int
+		var changed sync.Once
+		pool(width, func() {
+			changed.Do(func() { setLimits(4) }) // operator raises the limit mid-pool
+			mu.Lock()
+			active++
+			peak = max(peak, active)
+			mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+			mu.Lock()
+			active--
+			mu.Unlock()
+		})
+		if peak > 2 || reads != 1 {
+			t.Fatalf("%s active pool resized: peak=%d settings reads=%d", kind, peak, reads)
+		}
+		if next, err := executor.poolConcurrency(context.Background(), run, kind); err != nil || next != 4 || reads != 2 {
+			t.Fatalf("%s next pool width=%d reads=%d err=%v", kind, next, reads, err)
+		}
+	}
+	unavailable := errors.New("settings unavailable")
+	executor.runtimeSettings = func(context.Context) (ingestionrun.RuntimeSettings, error) {
+		return ingestionrun.RuntimeSettings{}, unavailable
+	}
+	if _, err := executor.poolConcurrency(context.Background(), run, "detail"); !errors.Is(err, unavailable) {
+		t.Fatalf("settings failure err=%v", err)
+	}
+	if result := runtimeSettingsFailure(context.Background(), unavailable); result.Status != ingestionrun.StatusFailed ||
+		result.Error.Class != "persistence" || result.Error.Step != "load_runtime_settings" {
+		t.Fatalf("settings failure result=%+v", result)
+	}
+}

@@ -344,3 +344,10 @@ func title(value string) string {
 	}
 	return strings.ToUpper(value[:1]) + value[1:]
 }
+
+type RuntimeSettingsForm struct {
+	MaxRunningJobs, FixedMemberConcurrency, DetailConcurrency string
+	Expected                                                  ingestionrun.RuntimeSettings
+	Running, Min, Max                                         int
+	Errors                                                    map[string]string
+}

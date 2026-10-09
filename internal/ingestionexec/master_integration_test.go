@@ -34,7 +34,7 @@ func TestMasterExecutorPublishesReferenceAndMarketingWithoutSnapshotDate(t *test
 	}))
 	defer server.Close()
 	sessions, authProfiles := integrationAuth(t, db, server.URL, "u", "p", "001", "r")
-	executor, err := New(sessions, authProfiles, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMasterRepository(db), ingestionstore.NewMaintenanceRepository(db), runs, catalog, 1, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	executor, err := New(sessions, authProfiles, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMasterRepository(db), ingestionstore.NewMaintenanceRepository(db), runs, catalog, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

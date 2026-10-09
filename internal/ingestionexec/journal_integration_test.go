@@ -85,7 +85,7 @@ func TestJournalTransactionPartitionsPublishAtomically(t *testing.T) {
 	defer server.Close()
 	sessions, authProfiles := integrationAuth(t, db, server.URL, "user", "pass", "001", "role")
 	executor, err := New(sessions, authProfiles, ingestionstore.NewFixedRepository(db), ingestionstore.NewDetailRepository(db), ingestionstore.NewMasterRepository(db), ingestionstore.NewMaintenanceRepository(db),
-		runs, catalog, 4, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		runs, catalog, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

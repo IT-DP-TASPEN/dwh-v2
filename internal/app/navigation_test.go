@@ -43,6 +43,7 @@ func TestPhaseFourNavigation(t *testing.T) {
 		{name: "sources", path: "/sources", permissions: []string{sourcesfeature.PermissionView}, groups: 1, active: "sources"},
 		{name: "custom datasets", path: "/custom-datasets/7", permissions: []string{customdatasets.PermissionView}, groups: 1, active: "custom-datasets"},
 		{name: "runs", path: "/runs/7", permissions: []string{ingestionfeature.PermissionView}, groups: 2, active: "ingestion-runs"},
+		{name: "runtime settings", path: "/ingestion/runtime-settings", permissions: []string{ingestionfeature.PermissionRuntimeSettings}, groups: 1, active: "ingestion-runtime-settings"},
 		{name: "schedules", path: "/schedules/7", permissions: []string{schedulesfeature.PermissionView}, groups: 1, active: "schedules"},
 		{name: "management hidden", path: "/", permissions: nil, groups: 0},
 	}
@@ -65,8 +66,8 @@ func TestPhaseFourNavigation(t *testing.T) {
 
 func TestPermissionAggregation(t *testing.T) {
 	definitions := PermissionDefinitions()
-	if len(definitions) != 43 {
-		t.Fatalf("got %d permissions, want 43", len(definitions))
+	if len(definitions) != 44 {
+		t.Fatalf("got %d permissions, want 44", len(definitions))
 	}
 	if err := access.ValidateRegistry(definitions); err != nil {
 		t.Fatal(err)

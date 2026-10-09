@@ -118,7 +118,7 @@ func navigationGroups() []navigation.Group {
 	return []navigation.Group{
 		{Key: "general", Label: "General", Items: []navigation.Item{dashboard.Navigation()}},
 		{Key: "data-ingestion", Label: "Data Ingestion", Items: []navigation.Item{
-			ingestionfeature.OverviewNavigation(), sourcesfeature.Navigation(), customdatasetsfeature.Navigation(), fincloudauthprofiles.Navigation(), ingestionfeature.RunsNavigation(), schedulesfeature.Navigation(),
+			ingestionfeature.OverviewNavigation(), sourcesfeature.Navigation(), customdatasetsfeature.Navigation(), fincloudauthprofiles.Navigation(), ingestionfeature.RunsNavigation(), schedulesfeature.Navigation(), ingestionfeature.RuntimeSettingsNavigation(),
 		}},
 		{Key: "reporting", Label: "Reporting", Items: []navigation.Item{
 			reports.Navigation(), reports.ExportsNavigation(),

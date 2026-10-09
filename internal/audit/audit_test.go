@@ -15,7 +15,7 @@ func TestStableActionsAreUnique(t *testing.T) {
 		ActionUserActivated, ActionUserDeactivated, ActionUserPasswordReset,
 		ActionRoleCreated, ActionRoleUpdated, ActionRoleDeleted, ActionRolePermissionsUpdated,
 		ActionAdminBootstrap,
-		ActionIngestionRunSubmitted, ActionIngestionRunAllSubmitted, ActionIngestionCancellationRequested, ActionIngestionAbandonedRecovered,
+		ActionIngestionRunSubmitted, ActionIngestionRunAllSubmitted, ActionIngestionCancellationRequested, ActionIngestionAbandonedRecovered, ActionIngestionRuntimeSettingsUpdated,
 		ActionSourceStateChanged, ActionScheduleCreated, ActionScheduleUpdated, ActionScheduleStateChanged,
 		ActionScheduleBulkEnable, ActionScheduleBulkDisable, ActionScheduleBulkArchive,
 		ActionReportDatasourceCreated, ActionReportDatasourceUpdated, ActionReportDatasourceStateChanged, ActionReportDatasourceTested,
@@ -42,6 +42,7 @@ func TestMetadataIsTypedAndSecretFree(t *testing.T) {
 		PermissionsUpdatedMetadata{Added: []string{"users.view"}, Removed: []string{"roles.view"}},
 		ImpersonationStartedMetadata{TargetRole: "manager"},
 		DatasourceUpdatedMetadata{CredentialsChanged: true},
+		IngestionRuntimeSettingsMetadata{From: IngestionRuntimeSettingsValues{2, 4, 3}, To: IngestionRuntimeSettingsValues{4, 8, 6}},
 	}
 	for _, value := range metadata {
 		typeOf := reflect.TypeOf(value)

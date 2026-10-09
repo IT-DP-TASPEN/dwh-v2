@@ -38,6 +38,9 @@ type coordinator interface {
 	SubmitRunAllManual(context.Context, core.CalendarDate, core.CalendarDate, ingestionrun.Trigger, string, securityctx.Requester) (uint64, error)
 	Cancel(context.Context, uint64, string, securityctx.Requester) error
 	RecoverAbandoned(context.Context, uint64, string, time.Time, string, securityctx.Requester) error
+	RuntimeSettings(context.Context) (ingestionrun.RuntimeSettings, error)
+	UpdateRuntimeSettings(context.Context, ingestionrun.RuntimeSettings, ingestionrun.RuntimeSettings, securityctx.Requester) (bool, error)
+	RunningJobs(context.Context) (int, error)
 }
 
 type Handler struct {
@@ -324,6 +327,91 @@ func (handler *Handler) RecoverAbandoned(writer http.ResponseWriter, request *ht
 		return
 	}
 	http.Redirect(writer, request, fmt.Sprintf("/runs/%d?notice=run-abandoned", id), http.StatusSeeOther)
+}
+
+const runtimeSettingsPath = "/ingestion/runtime-settings"
+
+func (handler *Handler) RuntimeSettingsPage(writer http.ResponseWriter, request *http.Request) {
+	settings, err := handler.coordinator.RuntimeSettings(request.Context())
+	if err != nil {
+		handler.admin.Internal(writer, request, "load ingestion runtime settings", err)
+		return
+	}
+	handler.renderRuntimeSettings(writer, request, http.StatusOK, newRuntimeSettingsForm(settings))
+}
+
+func (handler *Handler) UpdateRuntimeSettings(writer http.ResponseWriter, request *http.Request) {
+	if !browserauth.RequireRecentMFA(writer, request, runtimeSettingsPath) || !webutil.ParseForm(writer, request, maxRunFormBody) {
+		return
+	}
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	form := RuntimeSettingsForm{Errors: map[string]string{}}
+	var target ingestionrun.RuntimeSettings
+	form.MaxRunningJobs, target.MaxRunningJobs = runtimeLimit(request, "max_running_jobs", form.Errors)
+	form.FixedMemberConcurrency, target.FixedMemberConcurrency = runtimeLimit(request, "fixed_member_concurrency", form.Errors)
+	form.DetailConcurrency, target.DetailConcurrency = runtimeLimit(request, "detail_concurrency", form.Errors)
+	expectedErrors := map[string]string{}
+	_, form.Expected.MaxRunningJobs = runtimeLimit(request, "expected_max_running_jobs", expectedErrors)
+	_, form.Expected.FixedMemberConcurrency = runtimeLimit(request, "expected_fixed_member_concurrency", expectedErrors)
+	_, form.Expected.DetailConcurrency = runtimeLimit(request, "expected_detail_concurrency", expectedErrors)
+	if len(expectedErrors) != 0 {
+		handler.runtimeSettingsConflict(writer, request)
+		return
+	}
+	if len(form.Errors) != 0 {
+		handler.renderRuntimeSettings(writer, request, http.StatusUnprocessableEntity, form)
+		return
+	}
+	_, err := handler.coordinator.UpdateRuntimeSettings(request.Context(), form.Expected, target, principal.SecurityContext())
+	if errors.Is(err, ingestionrun.ErrRuntimeSettingsConflict) {
+		handler.runtimeSettingsConflict(writer, request)
+		return
+	}
+	if err != nil {
+		handler.admin.Internal(writer, request, "update ingestion runtime settings", err)
+		return
+	}
+	http.Redirect(writer, request, runtimeSettingsPath+"?notice=ingestion-runtime-settings-updated", http.StatusSeeOther)
+}
+
+// runtimeSettingsConflict discards the stale submission and re-renders the
+// persisted values so the operator reviews them before resubmitting.
+func (handler *Handler) runtimeSettingsConflict(writer http.ResponseWriter, request *http.Request) {
+	settings, err := handler.coordinator.RuntimeSettings(request.Context())
+	if err != nil {
+		handler.admin.Internal(writer, request, "reload ingestion runtime settings", err)
+		return
+	}
+	form := newRuntimeSettingsForm(settings)
+	form.Errors["form"] = "Runtime settings changed while this page was open. Review the current values and submit again."
+	handler.renderRuntimeSettings(writer, request, http.StatusConflict, form)
+}
+
+func (handler *Handler) renderRuntimeSettings(writer http.ResponseWriter, request *http.Request, status int, form RuntimeSettingsForm) {
+	running, err := handler.coordinator.RunningJobs(request.Context())
+	if err != nil {
+		handler.admin.Internal(writer, request, "count running ingestion jobs", err)
+		return
+	}
+	form.Running, form.Min, form.Max = running, ingestionrun.MinRuntimeLimit, ingestionrun.MaxRuntimeLimit
+	handler.admin.RenderPage(writer, request, status, "features/ingestion/runtime_settings", "Runtime Settings", form)
+}
+
+func newRuntimeSettingsForm(settings ingestionrun.RuntimeSettings) RuntimeSettingsForm {
+	return RuntimeSettingsForm{Expected: settings, Errors: map[string]string{},
+		MaxRunningJobs: strconv.Itoa(settings.MaxRunningJobs), FixedMemberConcurrency: strconv.Itoa(settings.FixedMemberConcurrency), DetailConcurrency: strconv.Itoa(settings.DetailConcurrency)}
+}
+
+func runtimeLimit(request *http.Request, field string, errs map[string]string) (string, int) {
+	raw := strings.TrimSpace(request.PostFormValue(field))
+	value, err := strconv.Atoi(raw)
+	if err != nil || !ingestionrun.ValidRuntimeLimit(value) {
+		errs[field] = fmt.Sprintf("Enter a whole number from %d to %d.", ingestionrun.MinRuntimeLimit, ingestionrun.MaxRuntimeLimit)
+	}
+	return raw, value
 }
 
 func (handler *Handler) principal(writer http.ResponseWriter, request *http.Request) (browserauth.Principal, bool) {

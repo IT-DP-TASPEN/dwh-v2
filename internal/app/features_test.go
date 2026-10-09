@@ -37,7 +37,7 @@ func TestFeatureCompositionOwnsCompleteRouteMatrix(t *testing.T) {
 	}
 	sort.Strings(routes)
 	want := []string{
-		"GET /", "GET /audit-logs", "GET /audit-logs/{id}", "GET /ingestion", "GET /ingestion/summary",
+		"GET /", "GET /audit-logs", "GET /audit-logs/{id}", "GET /ingestion", "GET /ingestion/runtime-settings", "GET /ingestion/summary",
 		"GET /custom-datasets", "GET /custom-datasets/new", "GET /custom-datasets/{id}", "GET /custom-datasets/{id}/imports/new", "GET /custom-datasets/{id}/status", "GET /custom-datasets/uploads/{uploadID}/configure",
 		"GET /datasources", "GET /datasources/new", "GET /datasources/{id}", "GET /datasources/{id}/edit",
 		"GET /fincloud-auth-profiles", "GET /fincloud-auth-profiles/new", "GET /fincloud-auth-profiles/{id}", "GET /fincloud-auth-profiles/{id}/edit",
@@ -48,7 +48,7 @@ func TestFeatureCompositionOwnsCompleteRouteMatrix(t *testing.T) {
 		"GET /sources", "GET /sources/{jobKey}/run",
 		"GET /schedules", "GET /schedules/new", "GET /schedules/bulk/new", "GET /schedules/{id}", "GET /schedules/{id}/edit", "GET /schedules/{id}/occurrences/{occurrenceID}",
 		"GET /users", "GET /users/new", "GET /users/{id}", "GET /users/{id}/edit", "GET /users/{id}/reset-password",
-		"POST /impersonation/stop", "POST /roles", "POST /roles/{id}", "POST /roles/{id}/delete", "POST /roles/{id}/permissions",
+		"POST /impersonation/stop", "POST /ingestion/runtime-settings", "POST /roles", "POST /roles/{id}", "POST /roles/{id}/delete", "POST /roles/{id}/permissions",
 		"POST /custom-datasets/uploads", "POST /custom-datasets/imports", "POST /custom-datasets/{id}/metadata", "POST /custom-datasets/{id}/archive",
 		"POST /datasources", "POST /datasources/{id}", "POST /datasources/{id}/test", "POST /datasources/{id}/state",
 		"POST /fincloud-auth-profiles", "POST /fincloud-auth-profiles/{id}", "POST /fincloud-auth-profiles/{id}/test", "POST /fincloud-auth-profiles/{id}/state",

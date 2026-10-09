@@ -22,8 +22,26 @@ type Repository struct {
 	catalog ingestion.Catalog
 }
 
+// RuntimeSettings mirrors the ingestion_runtime_settings singleton. Every limit
+// is bounded by the schema CHECK range; consumers reject values outside it.
 type RuntimeSettings struct {
 	MaxRunningJobs, FixedMemberConcurrency, DetailConcurrency int
+}
+
+const (
+	MinRuntimeLimit = 1
+	MaxRuntimeLimit = 64
+)
+
+var ErrRuntimeSettingsConflict = errors.New("ingestion runtime settings changed concurrently")
+
+func ValidRuntimeLimit(value int) bool { return value >= MinRuntimeLimit && value <= MaxRuntimeLimit }
+
+func (settings RuntimeSettings) Validate() error {
+	if !ValidRuntimeLimit(settings.MaxRunningJobs) || !ValidRuntimeLimit(settings.FixedMemberConcurrency) || !ValidRuntimeLimit(settings.DetailConcurrency) {
+		return fmt.Errorf("invalid ingestion runtime settings: limits must be %d..%d", MinRuntimeLimit, MaxRuntimeLimit)
+	}
+	return nil
 }
 
 func NewRepository(db *sqlx.DB, catalog ingestion.Catalog) (*Repository, error) {
@@ -34,18 +52,70 @@ func NewRepository(db *sqlx.DB, catalog ingestion.Catalog) (*Repository, error) 
 }
 
 func (repository *Repository) RuntimeSettings(ctx context.Context) (RuntimeSettings, error) {
+	return runtimeSettings(ctx, repository.db, "")
+}
+
+func runtimeSettings(ctx context.Context, query sqlx.QueryerContext, lock string) (RuntimeSettings, error) {
 	var settings struct {
 		MaxRunningJobs         int `db:"max_running_jobs"`
 		FixedMemberConcurrency int `db:"fixed_member_concurrency"`
 		DetailConcurrency      int `db:"detail_concurrency"`
 	}
-	if err := repository.db.GetContext(ctx, &settings, `SELECT max_running_jobs,fixed_member_concurrency,detail_concurrency FROM ingestion_runtime_settings WHERE id=1`); err != nil {
+	if err := sqlx.GetContext(ctx, query, &settings, `SELECT max_running_jobs,fixed_member_concurrency,detail_concurrency FROM ingestion_runtime_settings WHERE id=1`+lock); err != nil {
 		return RuntimeSettings{}, err
 	}
-	if settings.MaxRunningJobs < 1 || settings.FixedMemberConcurrency < 1 || settings.DetailConcurrency < 1 {
-		return RuntimeSettings{}, fmt.Errorf("invalid ingestion runtime settings")
+	result := RuntimeSettings(settings)
+	if err := result.Validate(); err != nil {
+		return RuntimeSettings{}, err
 	}
-	return RuntimeSettings(settings), nil
+	return result, nil
+}
+
+// UpdateRuntimeSettings atomically replaces the whole singleton only when the
+// persisted values still equal the values the operator edited from.
+func (repository *Repository) UpdateRuntimeSettings(ctx context.Context, expected, target RuntimeSettings, requester securityctx.Requester) (bool, error) {
+	if err := target.Validate(); err != nil {
+		return false, err
+	}
+	tx, err := repository.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	current, err := runtimeSettings(ctx, tx, " FOR UPDATE")
+	if err != nil {
+		return false, err
+	}
+	if current != expected {
+		return false, ErrRuntimeSettingsConflict
+	}
+	if current == target {
+		return false, tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE ingestion_runtime_settings SET max_running_jobs=?,fixed_member_concurrency=?,detail_concurrency=? WHERE id=1`,
+		target.MaxRunningJobs, target.FixedMemberConcurrency, target.DetailConcurrency); err != nil {
+		return false, err
+	}
+	actor := audit.Identity{UserID: requester.Actor.UserID, Username: requester.Actor.Username}
+	effective := audit.Identity{UserID: requester.Effective.UserID, Username: requester.Effective.Username}
+	if err := audit.Append(ctx, tx, audit.Event{
+		Attribution: audit.Attribution{Actor: &actor, Effective: &effective}, Action: audit.ActionIngestionRuntimeSettingsUpdated,
+		Metadata: audit.IngestionRuntimeSettingsMetadata{From: audit.IngestionRuntimeSettingsValues(current), To: audit.IngestionRuntimeSettingsValues(target)}, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// RunningJobs counts executable runs occupying Claim admission capacity.
+func (repository *Repository) RunningJobs(ctx context.Context) (int, error) {
+	return runningJobs(ctx, repository.db)
+}
+
+func runningJobs(ctx context.Context, query sqlx.QueryerContext) (int, error) {
+	var running int
+	err := sqlx.GetContext(ctx, query, &running, `SELECT COUNT(*) FROM ingestion_runs WHERE kind IN ('job','run_all_child') AND status='running'`)
+	return running, err
 }
 
 func (repository *Repository) Submit(ctx context.Context, jobKey string, parameters Parameters, trigger Trigger, reference string, requester *uint64) (uint64, error) {
@@ -200,12 +270,17 @@ func (repository *Repository) Claim(ctx context.Context, ownerID string) (*Run, 
 		return nil, err
 	}
 	defer tx.Rollback()
+	// The singleton row lock serializes admission across every process, so the
+	// running count below cannot be raced past the live database limit.
 	var limit int
 	if err := tx.GetContext(ctx, &limit, `SELECT max_running_jobs FROM ingestion_runtime_settings WHERE id=1 FOR UPDATE`); err != nil {
 		return nil, err
 	}
-	var running int
-	if err := tx.GetContext(ctx, &running, `SELECT COUNT(*) FROM ingestion_runs WHERE kind IN ('job','run_all_child') AND status='running'`); err != nil {
+	if !ValidRuntimeLimit(limit) {
+		return nil, fmt.Errorf("invalid ingestion max_running_jobs %d", limit)
+	}
+	running, err := runningJobs(ctx, tx)
+	if err != nil {
 		return nil, err
 	}
 	if running >= limit {

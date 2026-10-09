@@ -7,6 +7,8 @@ func (handler *Handler) RegisterRoutes(router chi.Router) {
 	router.With(handler.admin.RequireAnyPermission(PermissionView, "sources.view", "schedules.view")).Get("/ingestion", handler.Overview)
 	router.With(handler.admin.RequireAnyPermission(PermissionView, "sources.view", "schedules.view")).Get("/ingestion/summary", handler.Summary)
 	router.With(view).Get("/runs", handler.Runs)
+	router.With(handler.admin.RequirePermission(PermissionRuntimeSettings)).Get("/ingestion/runtime-settings", handler.RuntimeSettingsPage)
+	router.With(handler.admin.RequirePermission(PermissionRuntimeSettings)).Post("/ingestion/runtime-settings", handler.UpdateRuntimeSettings)
 	router.With(view, handler.admin.RequirePermission(PermissionRunAll)).Get("/runs/run-all", handler.RunAllPage)
 	router.With(view, handler.admin.RequirePermission(PermissionRunAll)).Post("/runs/run-all", handler.SubmitRunAll)
 	router.With(view).Get("/runs/scheduler-wave", handler.SchedulerWave)

@@ -18,9 +18,11 @@ import (
 	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/auth"
 	"github.com/ibldzn/go-admin/internal/browserauth"
+	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
 	"github.com/ibldzn/go-admin/internal/render"
+	"github.com/ibldzn/go-admin/internal/securityctx"
 	"github.com/ibldzn/go-admin/internal/user"
 	webfiles "github.com/ibldzn/go-admin/web"
 )
@@ -144,13 +146,18 @@ func TestSchedulerWaveRouteAuthorizationAndExactTimestamp(t *testing.T) {
 
 func runChildrenRouter(t *testing.T, principal browserauth.Principal, service runService) (http.Handler, string) {
 	t.Helper()
+	return ingestionRouter(t, principal, service, nil)
+}
+
+func ingestionRouter(t *testing.T, principal browserauth.Principal, service runService, coordinator coordinator) (http.Handler, string) {
+	t.Helper()
 	renderer, err := render.New(webfiles.Files, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	errors := render.NewErrorResponder(renderer, "Test", logger)
-	registry, err := navigation.NewRegistry([]navigation.Group{{Key: "ingestion", Label: "Ingestion", Items: []navigation.Item{RunsNavigation()}}}, PermissionDefinitions())
+	registry, err := navigation.NewRegistry([]navigation.Group{{Key: "ingestion", Label: "Ingestion", Items: []navigation.Item{RunsNavigation(), RuntimeSettingsNavigation()}}}, PermissionDefinitions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,10 +166,95 @@ func runChildrenRouter(t *testing.T, principal browserauth.Principal, service ru
 	authentication := browserauth.NewHTTP(&routeAuthentication{principal}, renderer, cookies, "Test", false, logger, func(context.Context, audit.Event) error { return nil }, errors)
 	router := chi.NewRouter()
 	router.Use(authentication.LoadPrincipal)
-	NewHandler(shell, service, nil).RegisterRoutes(router)
+	NewHandler(shell, service, coordinator).RegisterRoutes(router)
 	token, err := auth.GenerateToken()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return router, token
+}
+
+type runtimeSettingsCoordinator struct {
+	coordinator
+	current   ingestionrun.RuntimeSettings
+	updates   int
+	requester securityctx.Requester
+}
+
+func (fake *runtimeSettingsCoordinator) RuntimeSettings(context.Context) (ingestionrun.RuntimeSettings, error) {
+	return fake.current, nil
+}
+
+func (fake *runtimeSettingsCoordinator) RunningJobs(context.Context) (int, error) { return 5, nil }
+
+func (fake *runtimeSettingsCoordinator) UpdateRuntimeSettings(_ context.Context, expected, target ingestionrun.RuntimeSettings, requester securityctx.Requester) (bool, error) {
+	if expected != fake.current {
+		return false, ingestionrun.ErrRuntimeSettingsConflict
+	}
+	fake.updates++
+	fake.current, fake.requester = target, requester
+	return true, nil
+}
+
+func TestRuntimeSettingsRoutesRequirePermissionRecentMFAAndValidValues(t *testing.T) {
+	recent := time.Now().UTC()
+	manager := browserauth.Principal{UserID: 9, Username: "effective", RoleSlug: access.UserRoleSlug, MFAVerifiedAt: recent,
+		Permissions: access.NewPermissionSet([]string{PermissionRuntimeSettings}), Actor: browserauth.Identity{UserID: 1, Username: "actor", RoleSlug: access.AdminRoleSlug}}
+	stale := manager
+	stale.MFAVerifiedAt = recent.Add(-24 * time.Hour)
+	viewer := manager
+	viewer.Permissions = access.NewPermissionSet([]string{PermissionView})
+	admin := browserauth.Principal{UserID: 1, Username: "admin", RoleSlug: access.AdminRoleSlug, MFAVerifiedAt: recent, Actor: browserauth.Identity{UserID: 1, Username: "admin", RoleSlug: access.AdminRoleSlug}}
+	valid := url.Values{"expected_max_running_jobs": {"2"}, "expected_fixed_member_concurrency": {"4"}, "expected_detail_concurrency": {"3"},
+		"max_running_jobs": {"4"}, "fixed_member_concurrency": {"8"}, "detail_concurrency": {"6"}}
+	with := func(field, value string) url.Values {
+		values := url.Values{}
+		for key, value := range valid {
+			values[key] = value
+		}
+		values.Set(field, value)
+		return values
+	}
+	for _, test := range []struct {
+		name       string
+		principal  browserauth.Principal
+		method     string
+		form       url.Values
+		wantStatus int
+		wantBody   string
+		wantUpdate int
+		wantLoc    string
+	}{
+		{name: "viewer get forbidden", principal: viewer, method: http.MethodGet, wantStatus: http.StatusForbidden},
+		{name: "viewer post forbidden", principal: viewer, method: http.MethodPost, form: valid, wantStatus: http.StatusForbidden},
+		{name: "manager get", principal: manager, method: http.MethodGet, wantStatus: http.StatusOK, wantBody: `name="max_running_jobs" type="number" min="1" max="64" step="1" required value="2"`},
+		{name: "stale MFA get still renders", principal: stale, method: http.MethodGet, wantStatus: http.StatusOK, wantBody: "Currently Running Jobs: <strong data-running-jobs>5</strong>"},
+		{name: "stale MFA post steps up", principal: stale, method: http.MethodPost, form: valid, wantStatus: http.StatusSeeOther, wantLoc: "/mfa/step-up?next=%2Fingestion%2Fruntime-settings&resubmit=1"},
+		{name: "zero rejected", principal: manager, method: http.MethodPost, form: with("max_running_jobs", "0"), wantStatus: http.StatusUnprocessableEntity, wantBody: "Enter a whole number from 1 to 64."},
+		{name: "65 rejected", principal: manager, method: http.MethodPost, form: with("fixed_member_concurrency", "65"), wantStatus: http.StatusUnprocessableEntity, wantBody: `value="65"`},
+		{name: "negative rejected", principal: manager, method: http.MethodPost, form: with("detail_concurrency", "-1"), wantStatus: http.StatusUnprocessableEntity, wantBody: `value="-1"`},
+		{name: "malformed rejected", principal: manager, method: http.MethodPost, form: with("detail_concurrency", "3.5"), wantStatus: http.StatusUnprocessableEntity, wantBody: `value="3.5"`},
+		{name: "stale expected conflicts", principal: manager, method: http.MethodPost, form: with("expected_max_running_jobs", "3"), wantStatus: http.StatusConflict, wantBody: "Runtime settings changed while this page was open."},
+		{name: "tampered expected conflicts", principal: manager, method: http.MethodPost, form: with("expected_detail_concurrency", "x"), wantStatus: http.StatusConflict, wantBody: `name="expected_detail_concurrency" value="3"`},
+		{name: "recent MFA update", principal: manager, method: http.MethodPost, form: valid, wantStatus: http.StatusSeeOther, wantUpdate: 1, wantLoc: "/ingestion/runtime-settings?notice=ingestion-runtime-settings-updated"},
+		{name: "admin implicit", principal: admin, method: http.MethodPost, form: valid, wantStatus: http.StatusSeeOther, wantUpdate: 1, wantLoc: "/ingestion/runtime-settings?notice=ingestion-runtime-settings-updated"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &runtimeSettingsCoordinator{current: ingestionrun.RuntimeSettings{MaxRunningJobs: 2, FixedMemberConcurrency: 4, DetailConcurrency: 3}}
+			router, token := ingestionRouter(t, test.principal, nil, fake)
+			request := httptest.NewRequest(test.method, "/ingestion/runtime-settings", strings.NewReader(test.form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.AddCookie(&http.Cookie{Name: "session", Value: token})
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || fake.updates != test.wantUpdate || !strings.Contains(response.Body.String(), test.wantBody) ||
+				response.Header().Get("Location") != test.wantLoc {
+				t.Fatalf("status=%d updates=%d location=%q body=%q", response.Code, fake.updates, response.Header().Get("Location"), response.Body.String())
+			}
+			if test.wantUpdate == 1 && (fake.current != ingestionrun.RuntimeSettings{MaxRunningJobs: 4, FixedMemberConcurrency: 8, DetailConcurrency: 6} ||
+				fake.requester.Actor.UserID != test.principal.Actor.UserID || fake.requester.Effective.UserID != test.principal.UserID) {
+				t.Fatalf("applied=%+v requester=%+v", fake.current, fake.requester)
+			}
+		})
+	}
 }

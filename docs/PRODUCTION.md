@@ -154,6 +154,17 @@ Keep `/opt/new-dwh` and its binaries and migrations operator-owned, readable/tra
 
 SIGTERM stops scheduler delivery, begins graceful HTTP shutdown, cancels owned ingestion work, waits for component cleanup, and force-closes only after the application deadline.
 
+## Ingestion runtime concurrency
+
+Ingestion concurrency is persisted in the `ingestion_runtime_settings` singleton and managed at **Data Ingestion → Runtime Settings** (`/ingestion/runtime-settings`). Viewing and saving require `ingestion.runtime_settings.manage` (Administrators have it implicitly; it is not granted to the User role). Saving also requires recent MFA, is rejected with a conflict if the values changed since the page was rendered, and records one `ingestion.runtime_settings_updated` audit event with the old and new values. A save that changes nothing records no event.
+
+Changes take effect without a restart:
+
+- **Maximum Running Jobs** (`max_running_jobs`) is the global admission limit enforced by the database on every claim. Raising it lets queued jobs start within the next dispatcher poll. Lowering it never cancels or interrupts running jobs; new jobs start only once the running count falls below the new limit.
+- **Fixed Member Concurrency** (`fixed_member_concurrency`) and **Detail Item Concurrency** (`detail_concurrency`) are read once when a Fixed member pool or Detail item pool starts and stay frozen for that pool. Pools already running keep their starting value; the next pool uses the saved value. Chunks and Journal transaction-type variants within one Fixed member stay sequential.
+
+Each value must be an integer from 1 to 64; the database CHECK constraint enforces the same range. Defaults are 2 / 4 / 3. Higher values increase simultaneous load on Fincloud and MySQL, and the effective upstream fan-out is roughly the product of running jobs and inner pool width. The 1..64 range is a hard software bound, not a statement that any value is safe for a given production environment; raise limits gradually while watching Fincloud and database load.
+
 ## Backup and restore
 
 Store MySQL client credentials in a permission-restricted option file rather than command arguments:

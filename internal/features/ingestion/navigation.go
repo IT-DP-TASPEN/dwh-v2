@@ -10,3 +10,8 @@ func OverviewNavigation() navigation.Item {
 func RunsNavigation() navigation.Item {
 	return navigation.Item{Key: "ingestion-runs", Label: "Runs", Icon: "history", Path: "/runs", Permission: PermissionView, Match: navigation.MatchPrefix}
 }
+
+func RuntimeSettingsNavigation() navigation.Item {
+	return navigation.Item{Key: "ingestion-runtime-settings", Label: "Runtime Settings", Icon: "settings", Path: "/ingestion/runtime-settings",
+		Permission: PermissionRuntimeSettings, Match: navigation.MatchExact}
+}

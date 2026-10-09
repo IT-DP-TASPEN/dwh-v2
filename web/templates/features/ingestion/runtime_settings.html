@@ -1,0 +1,31 @@
+{{define "content"}}<section>
+  <p class="text-sm font-medium text-emerald-600 dark:text-emerald-400">Data Ingestion</p>
+  <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-950 dark:text-white">Runtime Settings</h1>
+  <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">Ingestion concurrency. Control how much ingestion work may execute in parallel.</p>
+  {{with .Data.Errors.form}}<p role="alert" class="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-300">{{.}}</p>{{end}}
+  <p class="mt-4 text-sm text-slate-700 dark:text-slate-300">Currently Running Jobs: <strong data-running-jobs>{{.Data.Running}}</strong></p>
+  <form method="post" action="/ingestion/runtime-settings" class="mt-4 space-y-5 rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+    <input type="hidden" name="expected_max_running_jobs" value="{{.Data.Expected.MaxRunningJobs}}">
+    <input type="hidden" name="expected_fixed_member_concurrency" value="{{.Data.Expected.FixedMemberConcurrency}}">
+    <input type="hidden" name="expected_detail_concurrency" value="{{.Data.Expected.DetailConcurrency}}">
+    <div><label class="block text-sm font-medium" for="max_running_jobs">Maximum Running Jobs</label>
+      <input class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950" id="max_running_jobs" name="max_running_jobs" type="number" min="{{.Data.Min}}" max="{{.Data.Max}}" step="1" required value="{{.Data.MaxRunningJobs}}" aria-describedby="max_running_jobs_help">
+      <p id="max_running_jobs_help" class="mt-1 text-sm text-slate-600 dark:text-slate-400">Maximum number of ingestion jobs executing simultaneously.</p>
+      {{with .Data.Errors.max_running_jobs}}<p role="alert" class="mt-1 text-sm text-red-600">{{.}}</p>{{end}}</div>
+    <div><label class="block text-sm font-medium" for="fixed_member_concurrency">Fixed Member Concurrency</label>
+      <input class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950" id="fixed_member_concurrency" name="fixed_member_concurrency" type="number" min="{{.Data.Min}}" max="{{.Data.Max}}" step="1" required value="{{.Data.FixedMemberConcurrency}}" aria-describedby="fixed_member_concurrency_help">
+      <p id="fixed_member_concurrency_help" class="mt-1 text-sm text-slate-600 dark:text-slate-400">Maximum number of Fixed report members/locations/accounts processed concurrently inside one Fixed job.</p>
+      {{with .Data.Errors.fixed_member_concurrency}}<p role="alert" class="mt-1 text-sm text-red-600">{{.}}</p>{{end}}</div>
+    <div><label class="block text-sm font-medium" for="detail_concurrency">Detail Item Concurrency</label>
+      <input class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950" id="detail_concurrency" name="detail_concurrency" type="number" min="{{.Data.Min}}" max="{{.Data.Max}}" step="1" required value="{{.Data.DetailConcurrency}}" aria-describedby="detail_concurrency_help">
+      <p id="detail_concurrency_help" class="mt-1 text-sm text-slate-600 dark:text-slate-400">Maximum number of account/CIF detail items processed concurrently inside one Detail job.</p>
+      {{with .Data.Errors.detail_concurrency}}<p role="alert" class="mt-1 text-sm text-red-600">{{.}}</p>{{end}}</div>
+    <button class="rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Save settings</button>
+  </form>
+  <div class="mt-4 space-y-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
+    <p><strong>Higher concurrency increases simultaneous load against Fincloud and the application database.</strong></p>
+    <p>Changes apply without a restart. Lowering Maximum Running Jobs does not cancel jobs already running; new jobs start only once the running count falls below the new limit.</p>
+    <p>Fixed/Detail changes apply to newly-created worker pools; pools already running retain the value they started with.</p>
+    <p>Allowed range is {{.Data.Min}} to {{.Data.Max}} for each setting. Defaults are 2 / 4 / 3.</p>
+  </div>
+</section>{{end}}

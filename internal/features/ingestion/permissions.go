@@ -8,6 +8,7 @@ const (
 	PermissionRunAll           = "ingestion.run_all"
 	PermissionCancel           = "ingestion.cancel"
 	PermissionRecoverAbandoned = "ingestion.recover_abandoned"
+	PermissionRuntimeSettings  = "ingestion.runtime_settings.manage"
 )
 
 func PermissionDefinitions() []access.PermissionDefinition {
@@ -17,5 +18,6 @@ func PermissionDefinitions() []access.PermissionDefinition {
 		{Key: PermissionRunAll, Name: "Run All Ingestion", Group: "Ingestion", Description: "Submit all canonical ingestion jobs"},
 		{Key: PermissionCancel, Name: "Cancel Ingestion", Group: "Ingestion", Description: "Request cancellation of an ingestion run"},
 		{Key: PermissionRecoverAbandoned, Name: "Recover Abandoned Ingestion", Group: "Ingestion", Description: "Mark a run abandoned after verified worker loss"},
+		{Key: PermissionRuntimeSettings, Name: "Manage Ingestion Runtime Settings", Group: "Ingestion", Description: "Change live ingestion concurrency limits"},
 	}
 }
