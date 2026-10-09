@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ibldzn/go-admin/internal/logging"
 	"github.com/ibldzn/go-admin/internal/reporting"
 )
 
@@ -86,11 +87,15 @@ func (worker *Worker) claimLoop(ctx context.Context) {
 }
 
 func (worker *Worker) execute(parent context.Context, job Job) {
+	started := time.Now()
+	logger := worker.logger.With("export_job_id", job.ID, "report_id", job.ReportID, "datasource_id", job.DatasourceID, "attempt", job.Attempt)
+	logger.Info("report export started", "event", "report_export.started")
 	timeoutContext, timeoutCancel := context.WithTimeout(parent, worker.config.ExportTimeout)
 	attemptContext, cancelAttempt := context.WithCancelCause(timeoutContext)
 	heartbeatDone := make(chan struct{})
 	go worker.heartbeat(attemptContext, cancelAttempt, job, heartbeatDone)
 	var workspace, published string
+	var artifact Artifact
 	stage := "eligibility"
 	err := func() error {
 		eligible, err := worker.repository.EligibleForExecution(attemptContext, job.SubmittedByUserID, job.ReportID, job.DatasourceID)
@@ -125,7 +130,7 @@ func (worker *Worker) execute(parent context.Context, job Job) {
 			defer cancel()
 			owned, progressErr := worker.repository.Progress(progressContext, job.ID, worker.owner, job.Attempt, rows, part)
 			if progressErr != nil {
-				worker.logger.WarnContext(attemptContext, "update report export progress", "job_id", job.ID, "error", progressErr)
+				logger.WarnContext(attemptContext, "update report export progress", "error", progressErr)
 				return nil
 			}
 			if !owned {
@@ -156,7 +161,7 @@ func (worker *Worker) execute(parent context.Context, job Job) {
 			return err
 		}
 		published = relative
-		artifact := Artifact{RelativePath: relative, Name: artifactName, Type: artifactType, Size: size, Parts: parts, Rows: rows}
+		artifact = Artifact{RelativePath: relative, Name: artifactName, Type: artifactType, Size: size, Parts: parts, Rows: rows}
 		owned, err := worker.repository.Succeed(attemptContext, job.ID, worker.owner, job.Attempt, artifact, time.Now().UTC().Add(worker.config.Retention), time.Now().UTC())
 		if err != nil {
 			return err
@@ -173,6 +178,8 @@ func (worker *Worker) execute(parent context.Context, job Job) {
 		_ = worker.storage.RemoveWorkspace(workspace)
 	}
 	if err == nil {
+		logger.Info("report export completed", "event", "report_export.completed", "status", StatusSucceeded,
+			"duration_ms", time.Since(started).Milliseconds(), "rows", artifact.Rows, "parts", artifact.Parts, "artifact_size_bytes", artifact.Size)
 		return
 	}
 	if published != "" {
@@ -180,16 +187,20 @@ func (worker *Worker) execute(parent context.Context, job Job) {
 	}
 	cause := context.Cause(attemptContext)
 	if errors.Is(err, reporting.ErrClaimLost) || errors.Is(cause, reporting.ErrClaimLost) {
-		worker.logger.Info("report export claim lost", "job_id", job.ID, "attempt", job.Attempt)
+		logger.Info("report export claim lost", "event", "report_export.completed", "status", "claim_lost", "duration_ms", time.Since(started).Milliseconds())
 		return
 	}
 	class, message := safeFailure(stage, err, cause)
 	finishContext, finishCancel := context.WithTimeout(context.WithoutCancel(parent), worker.heartbeatTimeout())
 	defer finishCancel()
 	if _, finishErr := worker.repository.Fail(finishContext, job.ID, worker.owner, job.Attempt, class, message, time.Now().UTC()); finishErr != nil {
-		worker.logger.Error("finish failed report export", "job_id", job.ID, "attempt", job.Attempt, "error", finishErr)
+		logger.Error("finish failed report export", "error", finishErr)
 	}
-	worker.logger.Error("report export failed", "job_id", job.ID, "attempt", job.Attempt, "stage", stage, "error", err)
+	// Datasource errors can echo SQL fragments or bound values; ErrorAttrs keeps
+	// only MySQL codes for those.
+	attributes := append([]any{"event", "report_export.completed", "status", StatusFailed, "duration_ms", time.Since(started).Milliseconds(),
+		"stage", stage, "error_class", class}, logging.ErrorAttrs(err)...)
+	logger.Error("report export failed", attributes...)
 }
 
 func (worker *Worker) heartbeat(ctx context.Context, cancel context.CancelCauseFunc, job Job, done chan<- struct{}) {
@@ -213,7 +224,10 @@ func (worker *Worker) heartbeat(ctx context.Context, cancel context.CancelCauseF
 				lastProof = time.Now()
 				continue
 			}
-			worker.logger.WarnContext(ctx, "heartbeat report export", "job_id", job.ID, "attempt", job.Attempt, "error", err)
+			if ctx.Err() != nil {
+				return // the attempt finished while this heartbeat was in flight
+			}
+			worker.logger.WarnContext(ctx, "heartbeat report export", "export_job_id", job.ID, "attempt", job.Attempt, "error", err)
 			if time.Since(lastProof) >= worker.config.StaleAfter {
 				cancel(reporting.ErrLeaseUnproven)
 				return
@@ -271,11 +285,11 @@ func (worker *Worker) cleanup(ctx context.Context, now time.Time) {
 			continue
 		}
 		if err := worker.storage.Remove(*job.ArtifactPath); err != nil {
-			worker.logger.ErrorContext(ctx, "remove expired report artifact", "job_id", job.ID, "error", err)
+			worker.logger.ErrorContext(ctx, "remove expired report artifact", "export_job_id", job.ID, "error", err)
 			continue
 		}
 		if err := worker.repository.MarkArtifactDeleted(ctx, job.ID, now); err != nil {
-			worker.logger.ErrorContext(ctx, "mark report artifact deleted", "job_id", job.ID, "error", err)
+			worker.logger.ErrorContext(ctx, "mark report artifact deleted", "export_job_id", job.ID, "error", err)
 		}
 	}
 	referenced, err := worker.repository.ReferencedArtifacts(ctx)

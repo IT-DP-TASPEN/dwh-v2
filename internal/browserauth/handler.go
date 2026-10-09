@@ -12,6 +12,7 @@ import (
 
 	"github.com/ibldzn/go-admin/internal/audit"
 	"github.com/ibldzn/go-admin/internal/auth"
+	"github.com/ibldzn/go-admin/internal/logging"
 	"github.com/ibldzn/go-admin/internal/mfa"
 	"github.com/ibldzn/go-admin/internal/render"
 	"github.com/ibldzn/go-admin/internal/user"
@@ -207,7 +208,7 @@ func (h *HTTP) appendBestEffortAudit(request *http.Request, event audit.Event) {
 		h.logger.WarnContext(request.Context(), "append authentication audit",
 			"request_id", middleware.GetReqID(request.Context()),
 			"method", request.Method,
-			"path", request.URL.Path,
+			"route", logging.Route(request),
 			"action", event.Action,
 			"error", err,
 		)

@@ -55,7 +55,7 @@ func TestRecoveryLogsPanicAndAvoidsDuplicateWrites(t *testing.T) {
 			t.Fatalf("unsafe panic response: status=%d body=%q", response.Code, body)
 		}
 		logged := logs.String()
-		if !strings.Contains(logged, "private panic detail") || !strings.Contains(logged, "stack=") || !strings.Contains(logged, "path=/panic") {
+		if !strings.Contains(logged, "private panic detail") || !strings.Contains(logged, "stack=") || !strings.Contains(logged, "event=http.request.panic") || !strings.Contains(logged, "route=unmatched") {
 			t.Fatalf("panic context missing from logs: %s", logged)
 		}
 	})

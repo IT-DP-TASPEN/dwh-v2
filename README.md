@@ -127,6 +127,10 @@ User/role management changes and impersonation token transitions append their au
 
 Audit metadata is typed and allowlisted. Passwords, hashes, raw tokens, cookies, credentials, authorization headers, and request bodies are never recorded. The read-only `/audit-logs` viewer requires `audit.view`, uses stored identity snapshots, supports exact-action filtering and 50-row pages, and exposes no mutation route.
 
+## Operational logging
+
+The application writes structured logs to stdout only (JSON in production, text in development). Records carry stable `service`, `environment`, `component`, and `event` fields for later collection; audit logs and ingestion diagnostics stay in the database. See [Observability](docs/OBSERVABILITY.md).
+
 ## Adding a feature
 
 Run `make feature name=customers`, then wire the generated feature in the single composition file. The scaffolder creates only a compiling route, handler, permission, navigation leaf, and template; add model/form/repository/service files only when the domain needs them.

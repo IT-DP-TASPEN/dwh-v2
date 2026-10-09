@@ -6,6 +6,8 @@ import (
 	"runtime/debug"
 
 	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 type ErrorResponder struct {
@@ -35,10 +37,10 @@ func (responder *ErrorResponder) NotFound(writer http.ResponseWriter, request *h
 }
 
 func (responder *ErrorResponder) Internal(writer http.ResponseWriter, request *http.Request, operation string, err error) {
-	responder.logger.ErrorContext(request.Context(), "unexpected request error",
+	responder.logger.ErrorContext(request.Context(), "unexpected request error", "event", "http.request.error",
 		"request_id", middleware.GetReqID(request.Context()),
 		"method", request.Method,
-		"path", request.URL.Path,
+		"route", logging.Route(request),
 		"operation", operation,
 		"error", err,
 	)
@@ -50,10 +52,10 @@ func (responder *ErrorResponder) Recoverer(next http.Handler) http.Handler {
 		wrapped := middleware.NewWrapResponseWriter(writer, request.ProtoMajor)
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				responder.logger.ErrorContext(request.Context(), "request panic recovered",
+				responder.logger.ErrorContext(request.Context(), "request panic recovered", "event", "http.request.panic",
 					"request_id", middleware.GetReqID(request.Context()),
 					"method", request.Method,
-					"path", request.URL.Path,
+					"route", logging.Route(request),
 					"panic", recovered,
 					"stack", string(debug.Stack()),
 				)
@@ -79,10 +81,11 @@ func (responder *ErrorResponder) renderError(writer http.ResponseWriter, request
 	writer.Header().Set("Cache-Control", "no-store")
 	pageData := PageData{Title: http.StatusText(status), AppName: responder.appName, Data: data}
 	if err := responder.renderer.RenderPageWithLayout(writer, status, page, "error", pageData); err != nil && !committed(writer) {
-		responder.logger.ErrorContext(request.Context(), "render error page",
+		responder.logger.ErrorContext(request.Context(), "render error page", "event", "http.request.error",
 			"request_id", middleware.GetReqID(request.Context()),
 			"method", request.Method,
-			"path", request.URL.Path,
+			"route", logging.Route(request),
+			"operation", "render_error_page",
 			"status", status,
 			"error", err,
 		)

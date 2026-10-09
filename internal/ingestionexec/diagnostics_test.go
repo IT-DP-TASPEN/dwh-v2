@@ -42,3 +42,36 @@ func (writer failingTechnicalWriter) AppendTechnicalEvent(context.Context, inges
 func (writer failingTechnicalWriter) AggregateTechnicalEvent(context.Context, ingestionrun.TechnicalEvent) error {
 	return writer.err
 }
+
+func TestDiagnosticStdoutIsSafeSummaryOnly(t *testing.T) {
+	var logs bytes.Buffer
+	recorder := newRunDiagnosticRecorder(recordingTechnicalWriter{}, slog.New(slog.NewJSONHandler(&logs, nil)), 44, "saving_detail")
+	recovered := false
+	recorder.record(context.Background(), ingestionrun.TechnicalEvent{
+		RunID: 44, JobKey: "saving_detail", Severity: "error", Terminal: true, Recovered: &recovered,
+		Class: "source", Step: "fetch_detail", Operation: "fetch_saving_detail", ErrorType: "*fincloud.Error", Attempt: 2,
+		ItemIdentifier: "ACCOUNT-SECRET-0042", MemberKey: "MEMBER-SECRET", ErrorMessage: "rejected ACCOUNT-SECRET-0042",
+		Details: []byte(`{"source":{"request":{"query":{"id":["ACCOUNT-SECRET-0042"]}},"response":{"status_code":502,"body":{"body":"BODY-SECRET CIF-SECRET"}}}}`),
+	}, false)
+	line := logs.String()
+	for _, secret := range []string{"ACCOUNT-SECRET", "MEMBER-SECRET", "BODY-SECRET", "CIF-SECRET"} {
+		if strings.Contains(line, secret) {
+			t.Fatalf("stdout leaked %s: %s", secret, line)
+		}
+	}
+	for _, field := range []string{`"event":"ingestion.technical_diagnostic"`, `"class":"source"`, `"http_status":502`, `"terminal":true`, `"recovered":false`, `"level":"ERROR"`} {
+		if !strings.Contains(line, field) {
+			t.Fatalf("missing %s: %s", field, line)
+		}
+	}
+}
+
+type recordingTechnicalWriter struct{}
+
+func (recordingTechnicalWriter) AppendTechnicalEvent(context.Context, ingestionrun.TechnicalEvent) error {
+	return nil
+}
+
+func (recordingTechnicalWriter) AggregateTechnicalEvent(context.Context, ingestionrun.TechnicalEvent) error {
+	return nil
+}

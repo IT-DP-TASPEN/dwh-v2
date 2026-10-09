@@ -48,16 +48,21 @@ func (recorder *runDiagnosticRecorder) record(ctx context.Context, event ingesti
 		err = recorder.runs.AppendTechnicalEvent(writeCtx, event)
 	}
 	if err != nil {
-		recorder.logger.Error("could not persist ingestion technical diagnostic", "run_id", recorder.runID, "job_key", recorder.jobKey,
+		recorder.logger.Error("could not persist ingestion technical diagnostic", "event", "ingestion.technical_diagnostic.persist_failed", "run_id", recorder.runID, "job_key", recorder.jobKey,
 			"class", event.Class, "step", event.Step, "operation", event.Operation, "diagnostic_error", err)
 		return
 	}
 	if event.Terminal {
 		recorder.terminalRecorded.Store(true)
 	}
+	// The stdout record is a safe summary. Details, messages, and item
+	// identifiers stay in the durable diagnostic only.
 	attributes := []any{
-		"run_id", recorder.runID, "job_key", recorder.jobKey, "class", event.Class, "step", event.Step,
-		"operation", event.Operation, "error_type", event.ErrorType, "attempt", event.Attempt,
+		"event", "ingestion.technical_diagnostic", "run_id", recorder.runID, "job_key", recorder.jobKey, "class", event.Class, "step", event.Step,
+		"operation", event.Operation, "error_type", event.ErrorType, "attempt", event.Attempt, "terminal", event.Terminal,
+	}
+	if event.Recovered != nil {
+		attributes = append(attributes, "recovered", *event.Recovered)
 	}
 	var compact struct {
 		Source struct {

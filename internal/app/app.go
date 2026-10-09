@@ -22,6 +22,7 @@ import (
 	"github.com/ibldzn/go-admin/internal/dwhschema"
 	"github.com/ibldzn/go-admin/internal/fincloud"
 	"github.com/ibldzn/go-admin/internal/fincloudauth"
+	"github.com/ibldzn/go-admin/internal/logging"
 	"github.com/ibldzn/go-admin/internal/mfa"
 	"github.com/ibldzn/go-admin/internal/platform/adminshell"
 	"github.com/ibldzn/go-admin/internal/platform/navigation"
@@ -41,14 +42,14 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("load configuration: %w", err)
 	}
 
-	logger := NewLogger(applicationConfig.App.Environment)
+	logger := NewLogger(applicationConfig.App.Name, applicationConfig.App.Environment)
 	slog.SetDefault(logger)
-	logger.Info("application starting",
-		"name", applicationConfig.App.Name,
-		"environment", applicationConfig.App.Environment,
-	)
+	appLogger := logger.With("component", "app")
+	httpLogger := logger.With("component", "http")
+	authLogger := logger.With("component", "auth")
+	ingestionLogger := logger.With("component", "ingestion")
 	if applicationConfig.Fincloud.InsecureSkipVerify {
-		logger.Warn("Fincloud TLS certificate verification is disabled", "scope", "fincloud_client")
+		appLogger.Warn("Fincloud TLS certificate verification is disabled", "event", "app.fincloud_tls_verification_disabled", "scope", "fincloud_client")
 	}
 
 	databaseContext, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -59,10 +60,10 @@ func Run(ctx context.Context) error {
 	}
 	defer func() {
 		if err := databaseConnection.Close(); err != nil {
-			logger.Error("close database", "error", err)
+			appLogger.Error("close database", "error", err)
 		}
 	}()
-	logger.Info("database connection initialized",
+	appLogger.Info("database connection initialized", "event", "app.database.connected",
 		"network", applicationConfig.Database.Network,
 		"host", applicationConfig.Database.Host,
 		"port", applicationConfig.Database.Port,
@@ -75,7 +76,6 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("verify database schema: %w", err)
 	}
-	logger.Info("database schema compatible", "goose_version", dwhschema.CurrentVersion)
 
 	bootstrapContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 	err = access.Bootstrap(bootstrapContext, databaseConnection, PermissionDefinitions(), time.Now().UTC())
@@ -83,17 +83,18 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize access control: %w", err)
 	}
-	logger.Info("access control initialized")
 
 	secretCipher := secretcrypto.New(applicationConfig.Reporting.MasterKey)
 	authProfiles, err := fincloudauth.NewRepository(databaseConnection, secretCipher)
 	if err != nil {
 		return fmt.Errorf("initialize Fincloud Auth Profiles: %w", err)
 	}
+	fincloudLogger := logger.With("component", "fincloud")
 	fincloudSessions, err := fincloud.NewSessionCoordinator(fincloud.SessionCoordinatorConfig{
 		BaseURL:            applicationConfig.Fincloud.BaseURL,
 		HTTPTimeout:        applicationConfig.Fincloud.HTTPTimeout,
 		InsecureSkipVerify: applicationConfig.Fincloud.InsecureSkipVerify,
+		Logger:             fincloudLogger,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize Fincloud session coordinator: %w", err)
@@ -103,17 +104,18 @@ func Run(ctx context.Context) error {
 		BaseURL:            applicationConfig.Fincloud.BaseURL,
 		HTTPTimeout:        applicationConfig.Fincloud.HTTPTimeout,
 		InsecureSkipVerify: applicationConfig.Fincloud.InsecureSkipVerify,
+		Logger:             fincloudLogger,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize Fincloud list-values client: %w", err)
 	}
 	defer fincloudListValues.CloseIdleConnections()
 	runtimeContext := context.WithoutCancel(ctx)
-	ingestionCoordinator, err := coordinator.New(databaseConnection, fincloudSessions, authProfiles, logger)
+	ingestionCoordinator, err := coordinator.New(databaseConnection, fincloudSessions, authProfiles, ingestionLogger)
 	if err != nil {
 		return fmt.Errorf("initialize ingestion coordinator: %w", err)
 	}
-	scheduleService, err := scheduler.New(databaseConnection, ingestionCoordinator.SubmitInTx, logger)
+	scheduleService, err := scheduler.New(databaseConnection, ingestionCoordinator.SubmitInTx, logger.With("component", "scheduler"))
 	if err != nil {
 		return fmt.Errorf("initialize ingestion scheduler: %w", err)
 	}
@@ -148,7 +150,7 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize report export storage: %w", err)
 	}
-	exportWorker, err := reportexport.NewWorker(exportRepository, reportingRepository, reportingPools, exportStorage, reportexport.WorkerConfig{Concurrency: applicationConfig.Reporting.MaxConcurrentExports, ExportTimeout: applicationConfig.Reporting.ExportTimeout, HeartbeatInterval: applicationConfig.Reporting.HeartbeatInterval, StaleAfter: applicationConfig.Reporting.StaleAfter, Retention: applicationConfig.Reporting.Retention, CleanupInterval: applicationConfig.Reporting.CleanupInterval, OrphanGrace: applicationConfig.Reporting.OrphanGrace}, logger)
+	exportWorker, err := reportexport.NewWorker(exportRepository, reportingRepository, reportingPools, exportStorage, reportexport.WorkerConfig{Concurrency: applicationConfig.Reporting.MaxConcurrentExports, ExportTimeout: applicationConfig.Reporting.ExportTimeout, HeartbeatInterval: applicationConfig.Reporting.HeartbeatInterval, StaleAfter: applicationConfig.Reporting.StaleAfter, Retention: applicationConfig.Reporting.Retention, CleanupInterval: applicationConfig.Reporting.CleanupInterval, OrphanGrace: applicationConfig.Reporting.OrphanGrace}, logger.With("component", "report_export"))
 	if err != nil {
 		return fmt.Errorf("initialize report export worker: %w", err)
 	}
@@ -164,7 +166,7 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize custom dataset storage: %w", err)
 	}
-	customDatasetWorker, err := customdataset.NewWorker(customDatasetRepository, customDatasetDDL, customDatasetStorage, customdataset.WorkerConfig{Concurrency: applicationConfig.CustomDataset.Concurrency, HeartbeatInterval: 2 * time.Second, StaleAfter: 30 * time.Second, CleanupInterval: time.Hour, CleanupGrace: time.Hour}, logger)
+	customDatasetWorker, err := customdataset.NewWorker(customDatasetRepository, customDatasetDDL, customDatasetStorage, customdataset.WorkerConfig{Concurrency: applicationConfig.CustomDataset.Concurrency, HeartbeatInterval: 2 * time.Second, StaleAfter: 30 * time.Second, CleanupInterval: time.Hour, CleanupGrace: time.Hour}, logger.With("component", "custom_dataset"))
 	if err != nil {
 		return fmt.Errorf("initialize custom dataset worker: %w", err)
 	}
@@ -178,7 +180,7 @@ func Run(ctx context.Context) error {
 		sessionRepository,
 		applicationConfig.Session.Lifetime,
 		applicationConfig.Session.RememberLifetime,
-		logger,
+		authLogger,
 		browserauth.SecurityConfig{IdleTimeout: applicationConfig.Session.IdleTimeout, MaxConcurrentPasswordHashes: applicationConfig.Auth.MaxConcurrentPasswordHashes, LoginFailureWindow: applicationConfig.Auth.LoginFailureWindow, LoginMaxFailures: applicationConfig.Auth.LoginMaxFailures, LoginLockout: applicationConfig.Auth.LoginLockout},
 	)
 	if err != nil {
@@ -201,7 +203,7 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize static files: %w", err)
 	}
-	errorResponder := render.NewErrorResponder(renderer, applicationConfig.App.Name, logger)
+	errorResponder := render.NewErrorResponder(renderer, applicationConfig.App.Name, httpLogger)
 
 	cookieManager := browserauth.NewCookieManager(
 		applicationConfig.Session.CookieName,
@@ -214,7 +216,7 @@ func Run(ctx context.Context) error {
 		cookieManager,
 		applicationConfig.App.Name,
 		applicationConfig.App.AllowRegistration,
-		logger,
+		authLogger,
 		func(ctx context.Context, event audit.Event) error {
 			return audit.Append(ctx, databaseConnection, event)
 		},
@@ -248,6 +250,7 @@ func Run(ctx context.Context) error {
 			return dwhschema.VerifyRuntime(ctx, databaseConnection)
 		},
 		Errors: errorResponder,
+		Logger: httpLogger,
 	})
 	coordinatorContext, stopCoordinator := context.WithCancel(runtimeContext)
 	coordinatorDone := make(chan struct{})
@@ -255,31 +258,29 @@ func Run(ctx context.Context) error {
 		defer close(coordinatorDone)
 		ingestionCoordinator.Run(coordinatorContext)
 	}()
-	logger.Info("ingestion coordinator initialized", "owner_id", ingestionCoordinator.OwnerID())
 	schedulerContext, stopScheduler := context.WithCancel(runtimeContext)
 	schedulerDone := make(chan struct{})
 	go func() {
 		defer close(schedulerDone)
 		scheduleService.Run(schedulerContext)
 	}()
-	logger.Info("ingestion scheduler initialized")
 	exportContext, stopExport := context.WithCancel(runtimeContext)
 	exportDone := make(chan struct{})
 	go func() { defer close(exportDone); exportWorker.Run(exportContext) }()
-	logger.Info("report export worker initialized", "owner_id", exportWorker.OwnerID())
 	customDatasetContext, stopCustomDataset := context.WithCancel(runtimeContext)
 	customDatasetDone := make(chan struct{})
 	go func() { defer close(customDatasetDone); customDatasetWorker.Run(customDatasetContext) }()
-	logger.Info("custom dataset worker initialized", "owner_id", customDatasetWorker.OwnerID())
 	cleanupContext, stopCleanup := context.WithCancel(runtimeContext)
 	cleanupDone := make(chan struct{})
 	go func() {
 		defer close(cleanupDone)
-		auth.RunSessionCleanup(cleanupContext, sessionRepository, time.Hour, logger)
+		auth.RunSessionCleanup(cleanupContext, sessionRepository, time.Hour, authLogger)
 	}()
-	httpServer := server.NewHTTPServer(applicationConfig.App.Address(), handler, logger)
+	httpServer := server.NewHTTPServer(applicationConfig.App.Address(), handler, httpLogger)
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- httpServer.Serve() }()
+	appLogger.Info("application started", "event", "app.started", "goose_version", dwhschema.CurrentVersion,
+		"address", applicationConfig.App.Address())
 
 	var serveErr error
 	select {
@@ -287,6 +288,8 @@ func Run(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 
+	appLogger.Info("application stopping", "event", "app.stopping")
+	shutdownStarted := time.Now()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), applicationConfig.App.ShutdownTimeout)
 	defer cancel()
 	stopScheduler()
@@ -325,12 +328,10 @@ func Run(ctx context.Context) error {
 		default:
 		}
 	}
+	appLogger.Info("application stopped", "event", "app.stopped", "duration_ms", time.Since(shutdownStarted).Milliseconds())
 	return errors.Join(serveErr, shutdownErr)
 }
 
-func NewLogger(environment string) *slog.Logger {
-	if environment == "development" {
-		return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+func NewLogger(service, environment string) *slog.Logger {
+	return logging.New(os.Stdout, service, environment)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -32,6 +33,7 @@ type SessionCoordinatorConfig struct {
 	BaseURL            string
 	HTTPTimeout        time.Duration
 	InsecureSkipVerify bool
+	Logger             *slog.Logger
 }
 
 type Lease interface {
@@ -95,7 +97,7 @@ func (coordinator *SessionCoordinator) acquire(ctx context.Context, auth AuthCon
 func (coordinator *SessionCoordinator) newClient(auth AuthContext) (*Client, error) {
 	return NewClient(Config{BaseURL: coordinator.config.BaseURL, Username: auth.Username, Password: auth.Password,
 		LocationID: auth.LocationID, RoleID: auth.RoleID, HTTPTimeout: coordinator.config.HTTPTimeout,
-		InsecureSkipVerify: coordinator.config.InsecureSkipVerify})
+		InsecureSkipVerify: coordinator.config.InsecureSkipVerify, Logger: coordinator.config.Logger})
 }
 
 func (coordinator *SessionCoordinator) Close() {

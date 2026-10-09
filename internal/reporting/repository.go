@@ -452,7 +452,7 @@ func replaceParameters(ctx context.Context, tx *sqlx.Tx, reportID uint64, parame
 
 func parameters(ctx context.Context, executor *sqlx.Tx, reportID uint64) ([]Parameter, error) {
 	parameters := make([]Parameter, 0)
-	if err := executor.SelectContext(ctx, &parameters, `SELECT id,report_id,parameter_key,label,parameter_type,COALESCE(option_source,'') AS option_source,COALESCE(dynamic_option_sql,'') AS dynamic_option_sql,required,default_value,display_order FROM report_parameters WHERE report_id=? ORDER BY display_order,id`, reportID); err != nil {
+	if err := executor.SelectContext(ctx, &parameters, `SELECT id,report_id,parameter_key,label,parameter_type,COALESCE(option_source,'') AS option_source,COALESCE(dynamic_option_sql,'') AS dynamic_option_sql,required,COALESCE(default_value,'null') AS default_value,display_order FROM report_parameters WHERE report_id=? ORDER BY display_order,id`, reportID); err != nil {
 		return nil, err
 	}
 	for index := range parameters {

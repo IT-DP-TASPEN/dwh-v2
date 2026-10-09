@@ -30,6 +30,7 @@ type Coordinator struct {
 	fixed    *ingestionstore.FixedRepository
 	details  *ingestionstore.DetailRepository
 	masters  *ingestionstore.MasterRepository
+	catalog  ingestion.Catalog
 	ownerID  string
 	logger   *slog.Logger
 
@@ -69,7 +70,7 @@ func New(db *sqlx.DB, sessions *fincloud.SessionCoordinator, authProfiles *fincl
 	if err != nil {
 		return nil, err
 	}
-	return &Coordinator{runs: runs, executor: executor, fixed: fixed, details: details, masters: masters, ownerID: ownerID, logger: logger,
+	return &Coordinator{runs: runs, executor: executor, catalog: catalog, fixed: fixed, details: details, masters: masters, ownerID: ownerID, logger: logger,
 		local: map[uint64]context.CancelCauseFunc{}, parents: map[uint64]string{}}, nil
 }
 
@@ -291,6 +292,14 @@ func (coordinator *Coordinator) dispatch(ctx, executionCtx context.Context, acti
 }
 
 func (coordinator *Coordinator) executeClaimedRun(ctx, executionCtx context.Context, run ingestionrun.Run, attemptOwner string) {
+	started := time.Now()
+	logger := coordinator.logger.With("run_id", run.ID, "job_key", run.JobKey)
+	job, _ := coordinator.catalog.Find(run.JobKey)
+	startAttributes := []any{"event", "ingestion.run.started", "category", job.Category, "kind", run.Kind, "trigger", run.Trigger}
+	if run.ParentRunID != nil {
+		startAttributes = append(startAttributes, "parent_run_id", *run.ParentRunID)
+	}
+	logger.Info("ingestion run started", startAttributes...)
 	runCtx, cancel := context.WithCancelCause(executionCtx)
 	coordinator.mu.Lock()
 	coordinator.local[run.ID] = cancel
@@ -316,15 +325,42 @@ func (coordinator *Coordinator) executeClaimedRun(ctx, executionCtx context.Cont
 		coordinator.reconcileOwnedParent(ctx, *run.ParentRunID)
 	}
 	if err != nil && !errors.Is(err, ingestionrun.ErrTransition) {
-		coordinator.logger.Error("finish ingestion run", "run_id", run.ID, "job_key", run.JobKey, "error", err)
+		logger.Error("finish ingestion run", "error", err)
 	}
-	if result.Cause != nil {
-		attributes := []any{"run_id", run.ID, "job_key", run.JobKey, "class", result.Error.Class, "error", result.Cause}
+	coordinator.logRunCompleted(ctx, logger, run, job.Category, result, time.Since(started))
+}
+
+// logRunCompleted emits the single terminal lifecycle record for a run attempt.
+// Status and progress come from the persisted row, so publication-owned
+// finishes, cancellation fallbacks, and stale recovery all report the
+// canonical outcome. It only reads; it never affects Finish.
+func (coordinator *Coordinator) logRunCompleted(ctx context.Context, logger *slog.Logger, run ingestionrun.Run, category ingestion.JobCategory, result ingestionexec.Result, duration time.Duration) {
+	status, progress := result.Status, run.Progress
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	persisted, err := coordinator.runs.Get(readCtx, run.ID)
+	cancel()
+	if err == nil {
+		progress = persisted.Progress
+		if ingestionrun.IsTerminal(persisted.Status) {
+			status = persisted.Status
+		}
+	}
+	attributes := []any{"event", "ingestion.run.completed", "category", category, "status", status, "duration_ms", duration.Milliseconds(),
+		"rows", progress.Rows, "total", progress.Total, "succeeded", progress.Succeeded, "failed", progress.Failed}
+	level := slog.LevelInfo
+	if status != ingestionrun.StatusSucceeded && status != ingestionrun.StatusCancelled {
+		level = slog.LevelWarn
+		if status == ingestionrun.StatusFailed {
+			level = slog.LevelError
+		}
+		attributes = append(attributes, "error_class", result.Error.Class, "error_step", result.Error.Step)
 		if causeType := fincloud.SafeCauseClass(result.Cause); causeType != "" {
 			attributes = append(attributes, "cause_type", causeType)
 		}
-		coordinator.logger.Warn("ingestion run completed with error", attributes...)
+	} else if result.Cause != nil {
+		attributes = append(attributes, "error_class", result.Error.Class, "error_step", result.Error.Step)
 	}
+	logger.Log(ctx, level, "ingestion run completed", attributes...)
 }
 
 func (coordinator *Coordinator) heartbeat(ctx context.Context, cancel context.CancelCauseFunc, run ingestionrun.Run, done chan<- struct{}) {

@@ -67,3 +67,36 @@ func TestDynamicOptionDefinitionPersistsCanonicalState(t *testing.T) {
 		t.Fatalf("database canonical state=%+v", state)
 	}
 }
+
+func TestParameterWithoutDefaultStoresSQLNullAndReadsBackAsJSONNull(t *testing.T) {
+	database := integrationdb.Open(t)
+	integrationdb.Reset(t, database, app.PermissionDefinitions())
+	role := integrationdb.CustomRole(t, database, "Author", "author-null-default")
+	user := integrationdb.User(t, database, "author-null-default", role.ID, true)
+	requester := integrationdb.Requester(user, role)
+	now := integrationdb.Now()
+	datasourceResult, err := database.Exec(`INSERT INTO report_datasources (name,host,port,database_name,username,password_ciphertext,tls_policy,status,created_by_user_id,updated_by_user_id,created_at,updated_at) VALUES ('null-default','127.0.0.1',3306,'test','test',X'01','disabled','active',?,?,?,?)`, user.ID, user.ID, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	datasourceID, _ := datasourceResult.LastInsertId()
+	repository, err := reporting.NewRepository(database, reporting.NewCipher([32]byte{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := repository.CreateTemplate(context.Background(), requester, reporting.TemplateInput{
+		Name: "No default", DatasourceID: uint64(datasourceID), SQLText: "SELECT :branch",
+		Parameters: []reporting.Parameter{{Key: "branch", Label: "Branch", Type: reporting.ParameterText}},
+	}, now)
+	if err != nil {
+		t.Fatalf("create with empty default: %v", err)
+	}
+	var stored *string
+	if err := database.Get(&stored, `SELECT default_value FROM report_parameters WHERE report_id=?`, created.ID); err != nil || stored != nil {
+		t.Fatalf("stored default=%v error=%v, want SQL NULL", stored, err)
+	}
+	found, err := repository.FindTemplate(context.Background(), created.ID)
+	if err != nil || len(found.Parameters) != 1 || string(found.Parameters[0].DefaultValue) != "null" {
+		t.Fatalf("found=%+v error=%v", found.Parameters, err)
+	}
+}

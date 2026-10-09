@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -20,11 +21,13 @@ type RouterDependencies struct {
 	RegisterAuthenticated func(chi.Router)
 	Ready                 func(context.Context) error
 	Errors                *render.ErrorResponder
+	Logger                *slog.Logger
 }
 
 func NewRouter(dependencies RouterDependencies) http.Handler {
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
+	router.Use(accessLog(dependencies.Logger))
 	router.Use(dependencies.Errors.Recoverer)
 	router.Use(securityHeaders)
 	router.NotFound(dependencies.Errors.NotFound)

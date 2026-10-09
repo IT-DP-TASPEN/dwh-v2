@@ -135,11 +135,15 @@ func testRouter(t *testing.T, service *fakeAuthentication, register func(chi.Rou
 
 func testRouterWithReadiness(t *testing.T, service *fakeAuthentication, register func(chi.Router), ready func(context.Context) error) (http.Handler, string) {
 	t.Helper()
+	return testRouterWithLogger(t, service, register, ready, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func testRouterWithLogger(t *testing.T, service *fakeAuthentication, register func(chi.Router), ready func(context.Context) error, logger *slog.Logger) (http.Handler, string) {
+	t.Helper()
 	renderer, err := render.New(webfiles.Files, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	errors := render.NewErrorResponder(renderer, "Test", logger)
 	cookies := browserauth.NewCookieManager("session", false, time.Hour)
 	authentication := browserauth.NewHTTP(service, renderer, cookies, "Test", false, logger, func(context.Context, audit.Event) error { return nil }, errors)
@@ -151,5 +155,5 @@ func testRouterWithReadiness(t *testing.T, service *fakeAuthentication, register
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewRouter(RouterDependencies{StaticFiles: staticFiles, Authentication: authentication, RegisterAuthenticated: register, Ready: ready, Errors: errors}), token
+	return NewRouter(RouterDependencies{StaticFiles: staticFiles, Authentication: authentication, RegisterAuthenticated: register, Ready: ready, Errors: errors, Logger: logger}), token
 }

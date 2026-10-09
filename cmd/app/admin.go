@@ -37,7 +37,7 @@ func runAdminCreate(ctx context.Context, arguments []string, input *os.File, out
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
 	}
-	logger := app.NewLogger(applicationConfig.App.Environment)
+	logger := app.NewLogger(applicationConfig.App.Name, applicationConfig.App.Environment)
 	slog.SetDefault(logger)
 
 	databaseContext, cancel := context.WithTimeout(ctx, 5*time.Second)

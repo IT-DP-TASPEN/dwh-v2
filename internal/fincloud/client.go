@@ -32,6 +32,9 @@ type Config struct {
 	RoleID             string
 	HTTPTimeout        time.Duration
 	InsecureSkipVerify bool
+	// Logger receives operational request/session records; nil discards them.
+	// Records never carry credentials, session IDs, URLs, or bodies.
+	Logger *slog.Logger
 }
 
 type ErrorKind string
@@ -153,6 +156,7 @@ type Client struct {
 	config     Config
 	baseURL    string
 	httpClient *http.Client
+	logger     *slog.Logger
 
 	mu      sync.Mutex
 	session session
@@ -210,7 +214,11 @@ func newPreAuthClient(config Config, httpClient *http.Client) (*Client, error) {
 	if httpClient == nil {
 		return nil, errors.New("Fincloud HTTP client is required")
 	}
-	return &Client{config: config, baseURL: strings.TrimRight(config.BaseURL, "/"), httpClient: httpClient}, nil
+	logger := config.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	return &Client{config: config, baseURL: strings.TrimRight(config.BaseURL, "/"), httpClient: httpClient, logger: logger}, nil
 }
 
 func invalidAuthIdentifier(value string) bool {
@@ -269,6 +277,13 @@ func (c *Client) send(ctx context.Context, operation, sessionID string, build fu
 		return nil, &Error{Kind: ErrorUpstream, Operation: operation, Message: "Fincloud request failed", Cause: cause,
 			diagnostic: &DiagnosticPayload{FailureKind: "network", DurationMS: time.Since(started).Milliseconds(), Request: c.sanitizeRequest(req)}}
 	}
+	// Success is DEBUG only: Detail jobs issue one request per account, so an
+	// INFO record here would flood production logs. Failures stay with the
+	// existing diagnostic path; 401 is handled by reauthentication in do.
+	if resp.StatusCode < http.StatusBadRequest {
+		c.logger.DebugContext(ctx, "Fincloud request completed", "event", "fincloud.request.completed",
+			"operation", operation, "method", req.Method, "http_status", resp.StatusCode, "duration_ms", time.Since(started).Milliseconds())
+	}
 	return resp, nil
 }
 
@@ -298,6 +313,9 @@ func (c *Client) ensureSession(ctx context.Context, staleGeneration *uint64) (se
 		c.mu.Unlock()
 
 		sessionID, err := c.loginRequest(ctx)
+		if err == nil && staleGeneration != nil {
+			c.logger.InfoContext(ctx, "Fincloud session reauthenticated", "event", "fincloud.session.reauthenticated", "reason", "unauthorized")
+		}
 		c.mu.Lock()
 		if err == nil {
 			c.session.id = sessionID

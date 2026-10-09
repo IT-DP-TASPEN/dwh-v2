@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 const (
@@ -91,12 +93,16 @@ func (worker *Worker) claimLoop(ctx context.Context) {
 }
 
 func (worker *Worker) execute(parent context.Context, job Import) {
+	started := time.Now()
+	logger := worker.logger.With("import_id", job.ID, "dataset_id", job.DatasetID, "mode", job.Mode, "attempt", job.Attempt)
+	logger.Info("custom dataset import started", "event", "custom_dataset.import.started")
 	ctx, cancel := context.WithCancelCause(parent)
 	done := make(chan struct{})
 	go worker.heartbeatLoop(ctx, cancel, job, done)
 	class := "infrastructure"
 	diagnostics := []Diagnostic(nil)
 	truncated := false
+	var sourceRecords, rows uint64
 	err := func() error {
 		dataset, err := worker.repository.Find(ctx, job.DatasetID)
 		if err != nil {
@@ -133,7 +139,9 @@ func (worker *Worker) execute(parent context.Context, job Import) {
 		defer file.Close()
 		batch := newInserter(worker.repository, dataset, columns, job, worker.owner, packet)
 		class = "validation"
-		sourceRecords, rows, found, foundTruncated, err := Stream(ctx, file, job.Delimiter, job.HeaderRecordNumber, columns, func(record uint64, values []any) error {
+		var found []Diagnostic
+		var foundTruncated bool
+		sourceRecords, rows, found, foundTruncated, err = Stream(ctx, file, job.Delimiter, job.HeaderRecordNumber, columns, func(record uint64, values []any) error {
 			if dataset.RowCount+batch.rows+uint64(len(batch.records))+1 > MaxDataRows && job.Mode == ModeAppend {
 				return fmt.Errorf("%w: append would exceed %d published rows", ErrInvalid, MaxDataRows)
 			}
@@ -168,11 +176,14 @@ func (worker *Worker) execute(parent context.Context, job Import) {
 	cancel(err)
 	<-done
 	if err == nil {
+		logger.Info("custom dataset import completed", "event", "custom_dataset.import.completed", "status", ImportSucceeded,
+			"duration_ms", time.Since(started).Milliseconds(), "rows", rows, "source_records", sourceRecords)
 		return
 	}
 	cause := context.Cause(ctx)
 	if errors.Is(err, ErrClaimLost) || errors.Is(cause, ErrClaimLost) {
-		worker.logger.Info("custom dataset import claim lost", "import_id", job.ID)
+		logger.Info("custom dataset import claim lost", "event", "custom_dataset.import.completed", "status", "claim_lost",
+			"duration_ms", time.Since(started).Milliseconds())
 		return
 	}
 	if errors.Is(cause, ErrLeaseUnproven) {
@@ -188,9 +199,15 @@ func (worker *Worker) execute(parent context.Context, job Import) {
 	finish, finishCancel := context.WithTimeout(context.WithoutCancel(parent), worker.heartbeatTimeout())
 	defer finishCancel()
 	if owned, failErr := worker.repository.Fail(finish, job, worker.owner, class, publicWorkerError(class, err), diagnostics, truncated); failErr != nil || !owned {
-		worker.logger.Error("finish failed custom dataset import", "import_id", job.ID, "error", failErr)
+		logger.Error("finish failed custom dataset import", "error", failErr)
 	}
-	worker.logger.Error("custom dataset import failed", "import_id", job.ID, "class", class, "error", err)
+	// Validation errors quote CSV content and stay in the import's DB
+	// diagnostics; MySQL errors can quote cell values, so keep only codes.
+	attributes := []any{"event", "custom_dataset.import.completed", "status", ImportFailed, "duration_ms", time.Since(started).Milliseconds(), "error_class", class}
+	if class != "validation" {
+		attributes = append(attributes, logging.ErrorAttrs(err)...)
+	}
+	logger.Error("custom dataset import failed", attributes...)
 }
 
 func (worker *Worker) heartbeatLoop(ctx context.Context, cancel context.CancelCauseFunc, job Import, done chan<- struct{}) {
@@ -213,6 +230,9 @@ func (worker *Worker) heartbeatLoop(ctx context.Context, cancel context.CancelCa
 			if err == nil {
 				lastProof = time.Now()
 				continue
+			}
+			if ctx.Err() != nil {
+				return // the attempt finished while this heartbeat was in flight
 			}
 			worker.logger.WarnContext(ctx, "heartbeat custom dataset import", "import_id", job.ID, "error", err)
 			if time.Since(lastProof) >= worker.config.StaleAfter {

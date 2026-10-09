@@ -1025,7 +1025,7 @@ func TestPoolConcurrencyIsSnapshottedOncePerPool(t *testing.T) {
 				return fixedMemberResult{}
 			}, func(fixedMemberResult) {})
 		},
-		"detail": func(width int, work func()) {
+		"detail_item": func(width int, work func()) {
 			runDetailPool(context.Background(), make([]string, 8), width, func(context.Context, string) detailItemResult {
 				work()
 				return detailItemResult{}
@@ -1035,7 +1035,7 @@ func TestPoolConcurrencyIsSnapshottedOncePerPool(t *testing.T) {
 	for kind, pool := range pools {
 		setLimits(2)
 		reads = 0
-		width, err := executor.poolConcurrency(context.Background(), run, kind)
+		width, err := executor.poolConcurrency(context.Background(), run, kind, 8)
 		if err != nil || width != 2 {
 			t.Fatalf("%s width=%d err=%v", kind, width, err)
 		}
@@ -1055,7 +1055,7 @@ func TestPoolConcurrencyIsSnapshottedOncePerPool(t *testing.T) {
 		if peak > 2 || reads != 1 {
 			t.Fatalf("%s active pool resized: peak=%d settings reads=%d", kind, peak, reads)
 		}
-		if next, err := executor.poolConcurrency(context.Background(), run, kind); err != nil || next != 4 || reads != 2 {
+		if next, err := executor.poolConcurrency(context.Background(), run, kind, 8); err != nil || next != 4 || reads != 2 {
 			t.Fatalf("%s next pool width=%d reads=%d err=%v", kind, next, reads, err)
 		}
 	}
@@ -1063,7 +1063,7 @@ func TestPoolConcurrencyIsSnapshottedOncePerPool(t *testing.T) {
 	executor.runtimeSettings = func(context.Context) (ingestionrun.RuntimeSettings, error) {
 		return ingestionrun.RuntimeSettings{}, unavailable
 	}
-	if _, err := executor.poolConcurrency(context.Background(), run, "detail"); !errors.Is(err, unavailable) {
+	if _, err := executor.poolConcurrency(context.Background(), run, "detail_item", 8); !errors.Is(err, unavailable) {
 		t.Fatalf("settings failure err=%v", err)
 	}
 	if result := runtimeSettingsFailure(context.Background(), unavailable); result.Status != ingestionrun.StatusFailed ||

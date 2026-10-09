@@ -672,19 +672,36 @@ func (service *Service) Run(ctx context.Context) {
 	}
 }
 
+// delivery describes one occurrence handed to ingestion; it is logged only
+// after the scheduler transaction commits.
+type delivery struct {
+	scheduleID, occurrenceID, runID uint64
+	jobKey                          string
+	attempt                         uint32
+	scheduledFor, submittedAt       time.Time
+}
+
 func (service *Service) process(ctx context.Context, id uint64) (bool, error) {
 	var changed bool
+	var delivered delivery
 	_, err := databasepkg.RetryReplaySafeTx(ctx, service.db, func(tx *sqlx.Tx) error {
 		var transactionErr error
-		changed, transactionErr = service.processTransaction(ctx, tx, id)
+		delivered = delivery{}
+		changed, transactionErr = service.processTransaction(ctx, tx, id, &delivered)
 		return transactionErr
 	})
+	if err == nil && delivered.runID != 0 {
+		service.logger.InfoContext(ctx, "scheduled run submitted", "event", "scheduler.run.submitted",
+			"schedule_id", delivered.scheduleID, "occurrence_id", delivered.occurrenceID, "run_id", delivered.runID,
+			"job_key", delivered.jobKey, "attempt", delivered.attempt, "trigger", ingestionrun.TriggerScheduler,
+			"scheduled_for", delivered.scheduledFor.UTC(), "delivery_delay_ms", delivered.submittedAt.Sub(delivered.scheduledFor).Milliseconds())
+	}
 	return changed, err
 }
 
 // processTransaction is DB-only and replay-safe. Source fetching and other
 // irreversible effects must remain outside scheduler transaction retries.
-func (service *Service) processTransaction(ctx context.Context, tx *sqlx.Tx, id uint64) (bool, error) {
+func (service *Service) processTransaction(ctx context.Context, tx *sqlx.Tx, id uint64, delivered *delivery) (bool, error) {
 	now, err := dbNow(ctx, tx)
 	if err != nil {
 		return false, err
@@ -820,6 +837,8 @@ func (service *Service) processTransaction(ctx context.Context, tx *sqlx.Tx, id 
 	if err := requireOne(result); err != nil {
 		return false, err
 	}
+	*delivered = delivery{scheduleID: schedule.ID, occurrenceID: occurrence.ID, runID: runID, jobKey: schedule.JobKey,
+		attempt: attemptNo, scheduledFor: occurrence.ScheduledFor, submittedAt: now}
 	return true, nil
 }
 

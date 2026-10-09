@@ -375,7 +375,7 @@ func (executor *Executor) executeFixed(ctx context.Context, run ingestionrun.Run
 	if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
 		return ownershipFailure(err, "persist_run_progress")
 	}
-	concurrency, err := executor.poolConcurrency(ctx, run, "fixed_member")
+	concurrency, err := executor.poolConcurrency(ctx, run, "fixed_member", len(plan.Members))
 	if err != nil {
 		return runtimeSettingsFailure(ctx, err)
 	}
@@ -593,7 +593,7 @@ func runFixedPool(ctx context.Context, descriptors []ingestion.RequestDescriptor
 // poolConcurrency reads the live runtime settings exactly once for a new inner
 // pool. The returned value is frozen for that pool; later setting changes only
 // affect pools created afterwards.
-func (executor *Executor) poolConcurrency(ctx context.Context, run ingestionrun.Run, kind string) (int, error) {
+func (executor *Executor) poolConcurrency(ctx context.Context, run ingestionrun.Run, kind string, workItems int) (int, error) {
 	settings, err := executor.runtimeSettings(ctx)
 	if err != nil {
 		return 0, err
@@ -602,8 +602,9 @@ func (executor *Executor) poolConcurrency(ctx context.Context, run ingestionrun.
 	if kind == "fixed_member" {
 		concurrency = settings.FixedMemberConcurrency
 	}
-	executor.logger.InfoContext(ctx, "ingestion pool concurrency frozen", "run_id", run.ID, "job_key", run.JobKey,
-		"concurrency_kind", kind, "concurrency", concurrency)
+	// One record per pool, never per item: Detail pools cover every account/CIF.
+	executor.logger.InfoContext(ctx, "ingestion pool started", "event", "ingestion.pool.started", "run_id", run.ID, "job_key", run.JobKey,
+		"pool_kind", kind, "concurrency", concurrency, "work_items", workItems)
 	return concurrency, nil
 }
 
@@ -649,7 +650,7 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 	if err := executor.persistProgress(ctx, run, progress, nil, &progressWrites); err != nil {
 		return ownershipFailure(err, "persist_run_progress")
 	}
-	concurrency, err := executor.poolConcurrency(ctx, run, "detail")
+	concurrency, err := executor.poolConcurrency(ctx, run, "detail_item", len(identifiers))
 	if err != nil {
 		return runtimeSettingsFailure(ctx, err)
 	}
