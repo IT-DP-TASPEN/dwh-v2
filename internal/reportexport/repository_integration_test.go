@@ -22,7 +22,7 @@ func TestExportAuthorizationClaimFencingAndDownloadRules(t *testing.T) {
 	database := integrationdb.Open(t)
 	integrationdb.Reset(t, database, app.PermissionDefinitions())
 	role := integrationdb.CustomRole(t, database, "Exporter", "exporter")
-	if _, err := database.Exec(`INSERT INTO role_permissions (role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?`, role.ID, reports.PermissionExport); err != nil {
+	if _, err := database.Exec(`INSERT INTO role_permissions (role_id,permission_id) SELECT ?,id FROM permissions WHERE `+"`key`"+`=?`, role.ID, reports.PermissionExport); err != nil {
 		t.Fatal(err)
 	}
 	user := integrationdb.User(t, database, "exporter", role.ID, true)
@@ -181,7 +181,7 @@ func TestExportOversightScopesHistoricalAccessAndAudit(t *testing.T) {
 	exporterRole := integrationdb.CustomRole(t, database, "Exporter", "exporter")
 	opsRole := integrationdb.CustomRole(t, database, "Export Operations", "export-operations")
 	for roleID, permission := range map[uint64]string{exporterRole.ID: reports.PermissionExport, opsRole.ID: reports.PermissionViewAllExports} {
-		if _, err := database.Exec(`INSERT INTO role_permissions (role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?`, roleID, permission); err != nil {
+		if _, err := database.Exec(`INSERT INTO role_permissions (role_id,permission_id) SELECT ?,id FROM permissions WHERE `+"`key`"+`=?`, roleID, permission); err != nil {
 			t.Fatal(err)
 		}
 	}

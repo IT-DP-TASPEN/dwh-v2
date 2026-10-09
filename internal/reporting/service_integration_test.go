@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -81,6 +82,10 @@ func TestAuthorTestsUsePersistedDatasource(t *testing.T) {
 	options, err = service.TestOptions(context.Background(), requester, report.ID, defaultDraft, 1, nil)
 	if err != nil || options.State != "ready" || options.Warning == "" || len(options.Options) != 1 {
 		t.Fatalf("optional invalid upstream default did not become unset: result=%+v error=%v", options, err)
+	}
+	invalidUpstream := map[string]reporting.InputValue{"province": {Present: true, Values: []string{"not-an-option"}}}
+	if options, err = service.TestOptions(context.Background(), requester, report.ID, defaultDraft, 1, invalidUpstream); !errors.Is(err, reporting.ErrInvalid) {
+		t.Fatalf("invalid upstream input was not rejected: result=%+v error=%v", options, err)
 	}
 	defaultDraft.Parameters[0].Required = true
 	options, err = service.TestOptions(context.Background(), requester, report.ID, defaultDraft, 1, nil)
@@ -173,7 +178,7 @@ func TestAuthorTestsUsePersistedDatasource(t *testing.T) {
 	if err := database.Select(&testActions, `SELECT action FROM audit_logs WHERE resource_type='report_template' AND resource_id=? AND action IN (?,?) ORDER BY id`, report.ID, audit.ActionReportTemplateQueryTested, audit.ActionReportTemplateOptionsTested); err != nil {
 		t.Fatal(err)
 	}
-	if len(testActions) != 4 || testActions[0] != string(audit.ActionReportTemplateQueryTested) {
+	if len(testActions) != 5 || testActions[0] != string(audit.ActionReportTemplateQueryTested) {
 		t.Fatalf("test audit actions=%v", testActions)
 	}
 	updatedDatasource, err := repository.UpdateDatasource(context.Background(), requester, datasource.ID, datasource.Revision, reporting.DatasourceInput{

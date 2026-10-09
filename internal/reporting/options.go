@@ -318,7 +318,10 @@ func (service *Service) loadTargetOptionsWithAudit(ctx context.Context, database
 		}
 		var value NormalizedValue
 		if effectiveOptionSource(parameter) == OptionSourceDynamic && !dynamicValuesUnset(parameter, values) {
-			options, err := RunDynamicOptions(ctx, service.engine, database, parameter.DynamicOptionSQL, parameters, normalized, service.config.DynamicOptionMaxRows, service.config.DynamicOptionPayloadBytes)
+			// err must stay the outer variable: the checks below this block
+			// read the normalization error.
+			var options []OptionItem
+			options, err = RunDynamicOptions(ctx, service.engine, database, parameter.DynamicOptionSQL, parameters, normalized, service.config.DynamicOptionMaxRows, service.config.DynamicOptionPayloadBytes)
 			if err != nil {
 				return OptionLoad{}, normalized, withFailureStage(failureStageDynamicOptionResolution, fmt.Errorf("dynamic options for %s: %w", parameter.Label, err))
 			}
