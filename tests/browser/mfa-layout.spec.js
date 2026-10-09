@@ -57,7 +57,6 @@ for (const width of [320, 768, 1440]) {
           const action = page.getByRole("link", { name: "Reset MFA", exact: true });
           await expect(action).toBeVisible();
           expect(await action.evaluate((node) => node.closest("section").querySelector("h1").compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
-          await expect(page.locator(".btn-secondary")).toHaveCount(0);
         }
         expect(await page.evaluate(() => window.cspViolations)).toEqual([]);
         await page.screenshot({ path: testInfo.outputPath(`${path}.png`), fullPage: true });

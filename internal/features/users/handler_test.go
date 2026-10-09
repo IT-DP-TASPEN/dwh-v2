@@ -157,9 +157,6 @@ func TestUserDetailMFAResetAction(t *testing.T) {
 			if (reset >= 0) != tc.visible {
 				t.Fatalf("reset visibility=%v, want %v", reset >= 0, tc.visible)
 			}
-			if strings.Contains(body, "btn-secondary") {
-				t.Fatal("undefined button class")
-			}
 			if tc.visible && (reset < strings.Index(body, "mt-6 grid gap-4") || !strings.Contains(body, "Multi-factor authentication")) {
 				t.Fatal("MFA reset must be in lower action card grid")
 			}

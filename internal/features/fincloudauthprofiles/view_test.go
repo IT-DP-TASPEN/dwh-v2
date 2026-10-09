@@ -20,8 +20,8 @@ func TestAuthProfileFormRendersAuthoritativeSelectsAndCanonicalBorders(t *testin
 	data := FormData{Roles: []fincloud.ListValue{{ID: "R-0089", Description: "Operations Role"}}, Locations: []fincloud.ListValue{{ID: "000", Description: "Head Office"}}, Errors: map[string]string{}}
 	body := renderForm(t, data)
 	for _, want := range []string{
-		`<select class="mt-2 w-full rounded-lg border border-slate-300`, `dark:border-slate-700`, `name="role_id"`, `value="R-0089"`, `R-0089 — Operations Role`,
-		`name="location_id"`, `value="000"`, `000 — Head Office`, `rounded-xl border border-slate-200`, `dark:border-slate-800`,
+		`<select class="input mt-2 w-full"`, `name="role_id"`, `value="R-0089"`, `R-0089 — Operations Role`,
+		`name="location_id"`, `value="000"`, `000 — Head Office`, `class="card`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("form missing %q: %s", want, body)

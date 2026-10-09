@@ -66,7 +66,7 @@ test("new CSV preview detects delimiter, header, inferred types, and SQL names",
     expect(heights).toEqual(heights.map(() => heights[0]));
     expect(bottoms).toEqual(bottoms.map(() => bottoms[0]));
   }
-  for (const control of configureControls) await expect(control).toHaveClass(/py-2\.5/);
+  for (const control of configureControls) await expect(control).toHaveCSS("padding-top", "10px");
   await expect(page.getByText("amount", { exact: true })).toBeVisible();
   const amountType = page.locator('select[name="type_1"]');
   const amountDateFormat = page.locator('select[name="date_format_1"]');
@@ -80,8 +80,7 @@ test("new CSV preview detects delimiter, header, inferred types, and SQL names",
   await expect(amountDateFormat).toBeHidden();
   await expect(amountDateFormat).toBeDisabled();
   for (const control of [...configureControls, page.getByLabel("Dataset name"), amountType]) {
-    await expect(control).toHaveClass(/border-slate-300/);
-    await expect(control).toHaveClass(/dark:border-slate-700/);
+    await expect(control).toHaveClass(/(^|\s)(input|btn-secondary)(\s|$)/);
   }
   await expect(page.locator("[data-column-configuration]")).toHaveClass(/border-slate-200/);
   await expect(page.locator("[data-column-configuration]")).toHaveClass(/dark:border-slate-800/);

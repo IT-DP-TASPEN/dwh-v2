@@ -72,13 +72,13 @@ func TestMFARenderingContextAndHeaders(t *testing.T) {
 			if admin.request != nil || strings.Contains(body, "data-admin-shell") || strings.Contains(body, "admin-sidebar") {
 				t.Fatal("auth flow rendered authenticated navigation")
 			}
-			for _, want := range []string{tc.title, "place-items-center", "bg-emerald-500", "dark:bg-slate-900", "dark:border-slate-800"} {
+			for _, want := range []string{tc.title, "place-items-center", "btn-primary", "dark:bg-slate-900", "dark:border-slate-800"} {
 				if !strings.Contains(body, want) {
 					t.Errorf("missing %q", want)
 				}
 			}
 			if tc.page == "mfa" {
-				for _, want := range []string{"dark:border-slate-700", "dark:bg-slate-950", "dark:text-white", "focus:ring-emerald-500/20"} {
+				for _, want := range []string{`class="input`} {
 					if !strings.Contains(body, want) {
 						t.Errorf("missing control style %q", want)
 					}

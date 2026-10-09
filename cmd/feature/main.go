@@ -157,7 +157,7 @@ func templateSource(name string) string {
     <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
             <p class="text-sm font-medium text-emerald-600 dark:text-emerald-400">%s</p>
-            <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-950 dark:text-white">%s</h1>
+            <h1 class="page-title mt-1">%s</h1>
             <p class="mt-2 text-slate-600 dark:text-slate-400">Description</p>
         </div>
     </div>

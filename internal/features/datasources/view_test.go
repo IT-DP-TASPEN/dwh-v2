@@ -32,7 +32,7 @@ func TestDatasourceViewsKeepFormAndStateControls(t *testing.T) {
 	if err := renderer.RenderPage(detail, 200, "features/datasources/show", adminshell.PageData{Title: "Datasource", AppName: "Test", Data: detailData}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Test connection", "Disable", "Archive", "border-orange-300", "border-red-300"} {
+	for _, want := range []string{"Test connection", "Disable", "Archive", "border-orange-300", "btn-danger-outline"} {
 		if !strings.Contains(detail.Body.String(), want) {
 			t.Fatalf("datasource detail missing %q", want)
 		}

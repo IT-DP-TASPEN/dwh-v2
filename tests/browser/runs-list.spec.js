@@ -57,12 +57,10 @@ test("collapsed groups make zero polling requests", async ({ page }) => {
   const filters = page.locator("form[action='/runs'] select");
   await expect(filters).toHaveCount(4);
   for (const filter of await filters.all()) {
-    await expect(filter).toHaveClass(/(^|\s)border-slate-300(\s|$)/);
-    await expect(filter).toHaveClass(/(^|\s)dark:border-slate-700(\s|$)/);
+    await expect(filter).toHaveClass(/(^|\s)input(\s|$)/);
   }
   const tableContainer = page.locator("#runs-table > .overflow-x-auto");
-  await expect(tableContainer).toHaveClass(/(^|\s)border-slate-200(\s|$)/);
-  await expect(tableContainer).toHaveClass(/(^|\s)dark:border-slate-800(\s|$)/);
+  await expect(tableContainer).toHaveClass(/(^|\s)card(\s|$)/);
   await page.clock.runFor(20_000);
 
   expect(requests).toBe(0);

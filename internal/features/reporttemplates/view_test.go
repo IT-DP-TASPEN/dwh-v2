@@ -147,7 +147,7 @@ func TestTemplateDetailKeepsACLControls(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := recorder.Body.String()
-	for _, want := range []string{`hx-post="/report-templates/8/access/4`, `name="grant" value="false"`, "Revoke", "border-red-300"} {
+	for _, want := range []string{`hx-post="/report-templates/8/access/4`, `name="grant" value="false"`, "Revoke", "btn-danger-outline"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("ACL control missing %q: %s", want, body)
 		}

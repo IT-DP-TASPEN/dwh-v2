@@ -66,7 +66,7 @@ func TestReportingMetadataRendersHumanReadableParameters(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := response.Body.String()
-	for _, expected := range []string{"Daily balances", "Core banking", "KC Jakarta (001)", "Tabungan A (TAB001)", "Tabungan B (TAB002)", "Any / Not set", "Technical details", "dark:bg-slate-900"} {
+	for _, expected := range []string{"Daily balances", "Core banking", "KC Jakarta (001)", "Tabungan A (TAB001)", "Tabungan B (TAB002)", "Any / Not set", "Technical details", `class="card`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("render missing %q: %s", expected, body)
 		}

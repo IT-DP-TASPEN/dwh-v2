@@ -80,15 +80,11 @@ test("source binding clears configuration-required and read-only users cannot ma
 
 test("representative borders stay canonical in light and dark modes", async ({ page }) => {
   await page.goto("/fincloud-auth-profiles/1/edit");
-  await expect(page.getByLabel("Name", { exact: true })).toHaveClass(/border-slate-300/);
-  await expect(page.getByLabel("Name", { exact: true })).toHaveClass(/dark:border-slate-700/);
-  await expect(page.locator("main form")).toHaveClass(/border-slate-200/);
-  await expect(page.locator("main form")).toHaveClass(/dark:border-slate-800/);
+  await expect(page.getByLabel("Name", { exact: true })).toHaveClass(/(^|\s)input(\s|$)/);
+  await expect(page.locator("main form")).toHaveClass(/(^|\s)card(\s|$)/);
   await page.goto("/sources");
-  await expect(page.locator('select[name="profile_id"]')).toHaveClass(/border-slate-300/);
-  await expect(page.locator('select[name="profile_id"]')).toHaveClass(/dark:border-slate-700/);
-  await expect(page.locator("main table").locator("..")).toHaveClass(/border-slate-200/);
-  await expect(page.locator("main table").locator("..")).toHaveClass(/dark:border-slate-800/);
+  await expect(page.locator('select[name="profile_id"]')).toHaveClass(/(^|\s)input(\s|$)/);
+  await expect(page.locator("main table").locator("..")).toHaveClass(/(^|\s)card(\s|$)/);
   await page.evaluate(() => localStorage.setItem("theme", "dark"));
   await page.reload();
   await expect(page.locator("html")).toHaveClass(/dark/);

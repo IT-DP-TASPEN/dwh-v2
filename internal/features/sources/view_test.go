@@ -27,7 +27,7 @@ func TestSourceAuthProfileSelectAutoSavesWithoutButton(t *testing.T) {
 	if err != nil || !strings.Contains(string(script), "data-source-auth-select") || !strings.Contains(string(script), "htmx:responseError") || !strings.Contains(string(script), "htmx:sendError") {
 		t.Fatal("delegated autosave/error handlers missing")
 	}
-	for _, want := range []string{`hx-post="/sources/`, `hx-target="closest tr"`, `hx-swap="outerHTML"`, `data-source-auth-error`, `data-source-auth-select`, `border-slate-300`, `dark:border-slate-700`, `rounded-xl border border-slate-200`, `dark:border-slate-800`, "Configuration required"} {
+	for _, want := range []string{`hx-post="/sources/`, `hx-target="closest tr"`, `hx-swap="outerHTML"`, `data-source-auth-error`, `data-source-auth-select`, `class="input`, `class="card`, "Configuration required"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("sources page missing %q: %s", want, body)
 		}
