@@ -3,6 +3,7 @@ package render_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -30,13 +31,19 @@ func TestErrorResponderStatusesAndSafety(t *testing.T) {
 	t.Run("internal", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/broken", nil)
 		response := httptest.NewRecorder()
-		responder.Internal(response, request, "load secret", errors.New("SQL password=hidden"))
+		responder.Internal(response, request, "load secret", fmt.Errorf("query: %w", errors.New("SQL-SECRET-VALUE ACCOUNT-SECRET-0042 password=PASSWORD-SECRET")))
 		body := response.Body.String()
 		if response.Code != http.StatusInternalServerError || strings.Contains(body, "SQL") || strings.Contains(body, "hidden") {
 			t.Fatalf("unsafe 500 response: status=%d body=%q", response.Code, body)
 		}
-		if !strings.Contains(logs.String(), "load secret") {
-			t.Fatal("internal error operation was not logged")
+		logged := logs.String()
+		if !strings.Contains(logged, "load secret") || !strings.Contains(logged, "error_type=*errors.errorString") {
+			t.Fatalf("internal error context missing: %s", logged)
+		}
+		for _, marker := range []string{"SQL-SECRET-VALUE", "ACCOUNT-SECRET-0042", "PASSWORD-SECRET"} {
+			if strings.Contains(logged, marker) {
+				t.Fatalf("log leaked %s: %s", marker, logged)
+			}
 		}
 	})
 }
@@ -46,16 +53,16 @@ func TestRecoveryLogsPanicAndAvoidsDuplicateWrites(t *testing.T) {
 
 	t.Run("before response", func(t *testing.T) {
 		handler := middleware.RequestID(responder.Recoverer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-			panic("private panic detail")
+			panic("PANIC-SECRET-0042")
 		})))
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/panic", nil))
 		body := response.Body.String()
-		if response.Code != http.StatusInternalServerError || strings.Contains(body, "private panic detail") || !strings.Contains(body, "Request ID:") {
+		if response.Code != http.StatusInternalServerError || strings.Contains(body, "PANIC-SECRET-0042") || !strings.Contains(body, "Request ID:") {
 			t.Fatalf("unsafe panic response: status=%d body=%q", response.Code, body)
 		}
 		logged := logs.String()
-		if !strings.Contains(logged, "private panic detail") || !strings.Contains(logged, "stack=") || !strings.Contains(logged, "event=http.request.panic") || !strings.Contains(logged, "route=unmatched") {
+		if strings.Contains(logged, "PANIC-SECRET-0042") || !strings.Contains(logged, "panic_type=string") || !strings.Contains(logged, "stack=") || !strings.Contains(logged, "event=http.request.panic") || !strings.Contains(logged, "route=unmatched") {
 			t.Fatalf("panic context missing from logs: %s", logged)
 		}
 	})

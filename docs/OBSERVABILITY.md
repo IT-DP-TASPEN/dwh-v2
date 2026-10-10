@@ -56,10 +56,12 @@ Every record carries slog's `time`, `level`, `msg`, plus `service` (from
 | app | `app.fincloud_tls_verification_disabled` | WARN | Explicit warning when Fincloud TLS verification is off |
 | app | `app.stopping` / `app.stopped` | INFO | Graceful shutdown start / end (`duration_ms`); exceeding the deadline still fails the process with ERROR |
 | http | `http.request.completed` | INFO | One per request: `request_id`, `method`, `route`, `status`, `duration_ms`, `response_bytes`, `protocol` |
-| http | `http.request.error` | ERROR | Handler error via ErrorResponder: `request_id`, `method`, `route`, `operation`, `error` |
-| http | `http.request.panic` | ERROR | Recovered panic with stack |
+| http | `http.request.error` | ERROR | Handler error via ErrorResponder: `request_id`, `method`, `route`, `operation`, safe error fields (see Errors on stdout) |
+| http | `http.request.panic` | ERROR | Recovered panic: `panic_type` and `stack`; never the panic value |
 | ingestion | `ingestion.run.started` | INFO | A claimed run begins: `run_id`, `job_key`, `category`, `kind`, `trigger`, `parent_run_id` |
-| ingestion | `ingestion.run.completed` | INFO / WARN / ERROR | Exactly one per executed attempt: `status`, `duration_ms`, `rows`, `total`, `succeeded`, `failed`; on failure `error_class`, `error_step`, `cause_type` |
+| ingestion | `ingestion.run.completed` | INFO / WARN / ERROR | At most one per executed attempt, only when the persisted run row is proven terminal: `status`, `duration_ms`, `rows`, `total`, `succeeded`, `failed`; on failure `error_class`, `error_step`, `cause_type` |
+| ingestion | `ingestion.run.finalization_failed` | ERROR | Execution ended but a terminal persisted row could not be proven: `category`, `duration_ms`, `executor_status`, `persisted_status` (only when read), `finish_error`, `readback_error` |
+| ingestion | `ingestion.run.recovered_abandoned` | WARN | Stale recovery moved an expired run to `abandoned`: `run_id`, `job_key`, `status=abandoned`, `error_class`, `error_step` |
 | ingestion | `ingestion.pool.started` | INFO | One per worker pool: `pool_kind` (`fixed_member`, `detail_item`), `concurrency`, `work_items` |
 | ingestion | `ingestion.technical_diagnostic` | per severity | Safe summary of a persisted diagnostic: `class`, `step`, `operation`, `error_type`, `attempt`, `terminal`, `recovered`, `http_status`, `table`, `mysql_error`, `sqlstate`, `tx_attempt` |
 | fincloud | `fincloud.request.completed` | DEBUG | Successful request: `operation`, `method`, `http_status`, `duration_ms` |
@@ -70,10 +72,33 @@ Every record carries slog's `time`, `level`, `msg`, plus `service` (from
 | custom_dataset | `custom_dataset.import.started` | INFO | `import_id`, `dataset_id`, `mode`, `attempt` |
 | custom_dataset | `custom_dataset.import.completed` | INFO / ERROR | `status`, `duration_ms`, `rows`, `source_records`; failure adds `error_class` |
 
-Ingestion completion level: `succeeded` and `cancelled` are INFO, `abandoned`
-is WARN, `failed` is ERROR. The status is read from the persisted run row after
-Finish, so publication-owned finishes, cancellation fallbacks, and stale
-recovery report the canonical outcome. The read never influences Finish.
+### Ingestion completion semantics
+
+`ingestion.run.completed` means the run row was read back after finalization
+and is terminal in the database. Its `status` is the persisted status
+(`succeeded`, `failed`, `cancelled`, `abandoned`), not the executor's result,
+so publication-owned finishes, the success-to-cancelled fallback, and a race
+with stale recovery all report the canonical outcome. A Finish error is
+acceptable when the readback still proves a terminal row.
+
+The executor result alone is never enough. If Finish fails and the row is still
+`running`/`queued`, or the readback itself fails, the attempt emits
+`ingestion.run.finalization_failed` (ERROR) instead, and no `completed` record.
+`executor_status` there is only what execution returned and is not an outcome;
+do not count these records as successes. The readback and logging never
+influence Finish.
+
+Completion level: `succeeded` and `cancelled` are INFO, `abandoned` is WARN,
+`failed` is ERROR.
+
+Stale recovery never emits `ingestion.run.completed`: the recovering process
+did not execute the run. When its fenced update actually moves a stale run to
+`abandoned`, it emits `ingestion.run.recovered_abandoned` once (the update only
+matches the exact stale owner and heartbeat). If the original worker is still
+alive, its own finalization reads back `abandoned` and emits its single
+`completed` with `status=abandoned`; a crashed worker emits nothing. Count
+abandonments with `recovered_abandoned`, and use `completed` for per-attempt
+outcomes.
 
 Remaining records without an `event` (cleanup sweeps, heartbeat warnings,
 claim/sweep errors) are unchanged degraded-state or failure logs.
@@ -114,9 +139,24 @@ Operational logs never contain:
   ingestion item identifiers, or Fixed member keys;
 - ownership/fencing tokens.
 
-MySQL server messages can quote offending values or SQL fragments. Report
-export and custom dataset failures therefore log only `mysql_error` and
-`sqlstate` for MySQL errors.
+### Errors on stdout
+
+Error text can quote SQL, bound values, CSV cells, upstream payloads, or
+customer identifiers, so no operational record contains an error message.
+Every error crossing into stdout goes through `logging.Err`, which emits only:
+
+- `error_type`: the Go type of the first non-`fmt` wrapper in the chain;
+- `error_kind`: `cancelled` or `deadline_exceeded` for context errors;
+- for MySQL errors (found through wrapping), `mysql_error` (number) and
+  `sqlstate`, never the server message.
+
+Call sites add bounded domain classifications (`error_class`, `stage`,
+`error_step`) where they already exist. A recovered HTTP panic logs only
+`panic_type` and the stack. Rich detail stays in the durable stores:
+`ingestion_run_errors`, run rows, report export job state, and custom dataset
+import diagnostics. The only raw error text left on a process stream is the
+interactive CLI (`app admin create`, `app user mfa-reset`), which prints its
+error to the operator's terminal.
 
 ## Examples
 

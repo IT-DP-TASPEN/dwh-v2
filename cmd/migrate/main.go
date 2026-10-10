@@ -17,6 +17,8 @@ import (
 	"github.com/ibldzn/go-admin/internal/config"
 	"github.com/ibldzn/go-admin/internal/database"
 	"github.com/ibldzn/go-admin/internal/dwhschema"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 const migrationDirectory = "migrations"
@@ -28,7 +30,7 @@ func main() {
 	defer stop()
 
 	if err := run(ctx, os.Args[1:]); err != nil {
-		slog.Error("migration failed", "error", err)
+		slog.Error("migration failed", logging.Err(err))
 		os.Exit(1)
 	}
 }

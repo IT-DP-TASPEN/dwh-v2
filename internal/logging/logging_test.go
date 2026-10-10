@@ -2,7 +2,9 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -57,10 +59,54 @@ func TestRouteUsesPatternNeverRawPathOrQuery(t *testing.T) {
 	}
 }
 
-func TestErrorAttrsDropMySQLMessages(t *testing.T) {
-	err := fmt.Errorf("insert: %w", &mysql.MySQLError{Number: 1062, SQLState: [5]byte{'2', '3', '0', '0', '0'}, Message: "Duplicate entry 'ACCOUNT-0042' for key"})
-	rendered := fmt.Sprint(ErrorAttrs(err)...)
-	if strings.Contains(rendered, "ACCOUNT-0042") || !strings.Contains(rendered, "1062") || !strings.Contains(rendered, "23000") {
-		t.Fatalf("attrs=%s", rendered)
+func renderJSON(t *testing.T, args ...any) map[string]any {
+	t.Helper()
+	var output bytes.Buffer
+	New(&output, "dwh", "production").Error("failed", args...)
+	for _, marker := range []string{"ACCOUNT-SECRET-0042", "CIF-SECRET-991", "SQL-SECRET-VALUE", "CSV-CELL-SECRET", "PASSWORD-SECRET", "PANIC-SECRET-0042"} {
+		if strings.Contains(output.String(), marker) {
+			t.Fatalf("stdout leaked %s: %s", marker, output.String())
+		}
+	}
+	var record map[string]any
+	if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+		t.Fatalf("not JSON: %q", output.String())
+	}
+	return record
+}
+
+func TestErrNeverEmitsArbitraryMessages(t *testing.T) {
+	secret := errors.New("ACCOUNT-SECRET-0042 CIF-SECRET-991 SQL-SECRET-VALUE CSV-CELL-SECRET PASSWORD-SECRET")
+	record := renderJSON(t, "run_id", 7, Err(fmt.Errorf("operation failed: %w", secret)))
+	if record["error_type"] != "*errors.errorString" || record["run_id"] != float64(7) {
+		t.Fatalf("record=%v", record)
+	}
+	record = renderJSON(t, Err(fmt.Errorf("a: %w", errors.Join(secret, secret))))
+	if record["error_type"] != "*errors.joinError" {
+		t.Fatalf("record=%v", record)
+	}
+}
+
+func TestErrKeepsOnlyMySQLCodes(t *testing.T) {
+	err := fmt.Errorf("insert: %w", &mysql.MySQLError{Number: 1062, SQLState: [5]byte{'2', '3', '0', '0', '0'}, Message: "Duplicate entry 'ACCOUNT-SECRET-0042' for key"})
+	record := renderJSON(t, Err(err))
+	if record["error_type"] != "*mysql.MySQLError" || record["mysql_error"] != float64(1062) || record["sqlstate"] != "23000" {
+		t.Fatalf("record=%v", record)
+	}
+}
+
+func TestErrClassifiesContextErrors(t *testing.T) {
+	if record := renderJSON(t, Err(fmt.Errorf("query CIF-SECRET-991: %w", context.Canceled))); record["error_kind"] != "cancelled" {
+		t.Fatalf("record=%v", record)
+	}
+	if record := renderJSON(t, Err(fmt.Errorf("query: %w", context.DeadlineExceeded))); record["error_kind"] != "deadline_exceeded" {
+		t.Fatalf("record=%v", record)
+	}
+}
+
+func TestErrNilAndPanicAddNoValues(t *testing.T) {
+	record := renderJSON(t, Err(nil), Panic("PANIC-SECRET-0042"))
+	if _, ok := record["error_type"]; ok || record["panic_type"] != "string" {
+		t.Fatalf("record=%v", record)
 	}
 }

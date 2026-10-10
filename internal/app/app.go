@@ -60,7 +60,7 @@ func Run(ctx context.Context) error {
 	}
 	defer func() {
 		if err := databaseConnection.Close(); err != nil {
-			appLogger.Error("close database", "error", err)
+			appLogger.Error("close database", logging.Err(err))
 		}
 	}()
 	appLogger.Info("database connection initialized", "event", "app.database.connected",

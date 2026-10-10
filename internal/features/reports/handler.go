@@ -22,6 +22,8 @@ import (
 	"github.com/ibldzn/go-admin/internal/reportexport"
 	"github.com/ibldzn/go-admin/internal/reporting"
 	"github.com/ibldzn/go-admin/internal/securityctx"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 type Handler struct {
@@ -198,7 +200,7 @@ func (handler *Handler) Options(writer http.ResponseWriter, request *http.Reques
 		status = http.StatusGatewayTimeout
 	} else if !errors.Is(err, reporting.ErrInvalid) && !errors.Is(err, reporting.ErrInactive) && !errors.Is(err, reporting.ErrForbidden) {
 		status = http.StatusInternalServerError
-		slog.ErrorContext(request.Context(), "load report options", "report_id", report.ID, "parameter", chi.URLParam(request, "key"), "error", err)
+		slog.ErrorContext(request.Context(), "load report options", "report_id", report.ID, "parameter", chi.URLParam(request, "key"), logging.Err(err))
 	}
 	writeOptionJSON(writer, status, reporting.OptionLoad{State: "error"})
 }

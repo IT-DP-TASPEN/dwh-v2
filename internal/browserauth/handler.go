@@ -210,7 +210,7 @@ func (h *HTTP) appendBestEffortAudit(request *http.Request, event audit.Event) {
 			"method", request.Method,
 			"route", logging.Route(request),
 			"action", event.Action,
-			"error", err,
+			logging.Err(err),
 		)
 	}
 }

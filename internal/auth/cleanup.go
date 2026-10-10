@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 type expiredSessionDeleter interface {
@@ -34,7 +36,7 @@ func runSessionCleanup(ctx context.Context, sessions expiredSessionDeleter, init
 func deleteExpiredSessions(ctx context.Context, sessions expiredSessionDeleter, now time.Time, logger *slog.Logger) {
 	deleted, err := sessions.DeleteExpired(ctx, now.UTC())
 	if err != nil {
-		logger.WarnContext(ctx, "delete expired sessions", "error", err)
+		logger.WarnContext(ctx, "delete expired sessions", logging.Err(err))
 		return
 	}
 	if deleted != 0 {

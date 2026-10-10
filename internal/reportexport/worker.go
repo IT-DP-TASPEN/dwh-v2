@@ -72,7 +72,7 @@ func (worker *Worker) claimLoop(ctx context.Context) {
 	for {
 		job, err := worker.repository.Claim(ctx, worker.owner, time.Now().UTC())
 		if err != nil && !errors.Is(err, context.Canceled) {
-			worker.logger.ErrorContext(ctx, "claim report export", "error", err)
+			worker.logger.ErrorContext(ctx, "claim report export", logging.Err(err))
 		}
 		if job != nil {
 			worker.execute(ctx, *job)
@@ -130,7 +130,7 @@ func (worker *Worker) execute(parent context.Context, job Job) {
 			defer cancel()
 			owned, progressErr := worker.repository.Progress(progressContext, job.ID, worker.owner, job.Attempt, rows, part)
 			if progressErr != nil {
-				logger.WarnContext(attemptContext, "update report export progress", "error", progressErr)
+				logger.WarnContext(attemptContext, "update report export progress", logging.Err(progressErr))
 				return nil
 			}
 			if !owned {
@@ -194,13 +194,10 @@ func (worker *Worker) execute(parent context.Context, job Job) {
 	finishContext, finishCancel := context.WithTimeout(context.WithoutCancel(parent), worker.heartbeatTimeout())
 	defer finishCancel()
 	if _, finishErr := worker.repository.Fail(finishContext, job.ID, worker.owner, job.Attempt, class, message, time.Now().UTC()); finishErr != nil {
-		logger.Error("finish failed report export", "error", finishErr)
+		logger.Error("finish failed report export", logging.Err(finishErr))
 	}
-	// Datasource errors can echo SQL fragments or bound values; ErrorAttrs keeps
-	// only MySQL codes for those.
-	attributes := append([]any{"event", "report_export.completed", "status", StatusFailed, "duration_ms", time.Since(started).Milliseconds(),
-		"stage", stage, "error_class", class}, logging.ErrorAttrs(err)...)
-	logger.Error("report export failed", attributes...)
+	logger.Error("report export failed", "event", "report_export.completed", "status", StatusFailed, "duration_ms", time.Since(started).Milliseconds(),
+		"stage", stage, "error_class", class, logging.Err(err))
 }
 
 func (worker *Worker) heartbeat(ctx context.Context, cancel context.CancelCauseFunc, job Job, done chan<- struct{}) {
@@ -227,7 +224,7 @@ func (worker *Worker) heartbeat(ctx context.Context, cancel context.CancelCauseF
 			if ctx.Err() != nil {
 				return // the attempt finished while this heartbeat was in flight
 			}
-			worker.logger.WarnContext(ctx, "heartbeat report export", "export_job_id", job.ID, "attempt", job.Attempt, "error", err)
+			worker.logger.WarnContext(ctx, "heartbeat report export", "export_job_id", job.ID, "attempt", job.Attempt, logging.Err(err))
 			if time.Since(lastProof) >= worker.config.StaleAfter {
 				cancel(reporting.ErrLeaseUnproven)
 				return
@@ -254,7 +251,7 @@ func (worker *Worker) staleLoop(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			if _, err := worker.repository.RequeueStale(ctx, now.UTC().Add(-worker.config.StaleAfter)); err != nil {
-				worker.logger.ErrorContext(ctx, "requeue stale report exports", "error", err)
+				worker.logger.ErrorContext(ctx, "requeue stale report exports", logging.Err(err))
 			}
 		}
 	}
@@ -277,7 +274,7 @@ func (worker *Worker) cleanupLoop(ctx context.Context) {
 func (worker *Worker) cleanup(ctx context.Context, now time.Time) {
 	expired, err := worker.repository.ExpiredArtifacts(ctx, now)
 	if err != nil {
-		worker.logger.ErrorContext(ctx, "list expired report artifacts", "error", err)
+		worker.logger.ErrorContext(ctx, "list expired report artifacts", logging.Err(err))
 		return
 	}
 	for _, job := range expired {
@@ -285,23 +282,23 @@ func (worker *Worker) cleanup(ctx context.Context, now time.Time) {
 			continue
 		}
 		if err := worker.storage.Remove(*job.ArtifactPath); err != nil {
-			worker.logger.ErrorContext(ctx, "remove expired report artifact", "export_job_id", job.ID, "error", err)
+			worker.logger.ErrorContext(ctx, "remove expired report artifact", "export_job_id", job.ID, logging.Err(err))
 			continue
 		}
 		if err := worker.repository.MarkArtifactDeleted(ctx, job.ID, now); err != nil {
-			worker.logger.ErrorContext(ctx, "mark report artifact deleted", "export_job_id", job.ID, "error", err)
+			worker.logger.ErrorContext(ctx, "mark report artifact deleted", "export_job_id", job.ID, logging.Err(err))
 		}
 	}
 	referenced, err := worker.repository.ReferencedArtifacts(ctx)
 	if err != nil {
-		worker.logger.ErrorContext(ctx, "list referenced report artifacts", "error", err)
+		worker.logger.ErrorContext(ctx, "list referenced report artifacts", logging.Err(err))
 		return
 	}
 	if err := worker.storage.ReconcileFinal(referenced, now.Add(-worker.config.OrphanGrace)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		worker.logger.ErrorContext(ctx, "reconcile report artifacts", "error", err)
+		worker.logger.ErrorContext(ctx, "reconcile report artifacts", logging.Err(err))
 	}
 	if err := worker.storage.CleanupWorkspaces(now.Add(-worker.config.OrphanGrace)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		worker.logger.ErrorContext(ctx, "clean report workspaces", "error", err)
+		worker.logger.ErrorContext(ctx, "clean report workspaces", logging.Err(err))
 	}
 }
 

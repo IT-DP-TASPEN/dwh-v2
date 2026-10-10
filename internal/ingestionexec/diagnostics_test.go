@@ -21,7 +21,8 @@ func TestDiagnosticStorageFailureNeverReplacesPrimaryFailure(t *testing.T) {
 	primary := errors.New("Fincloud HTTP 500")
 	result := failed("source", "Fincloud source operation failed", "download_report", primary)
 	recordTerminalFallback(ctx, recorder, result)
-	if !errors.Is(result.Cause, primary) || recorder.terminalRecorded.Load() || !strings.Contains(logs.String(), storageFailure.Error()) {
+	if !errors.Is(result.Cause, primary) || recorder.terminalRecorded.Load() ||
+		!strings.Contains(logs.String(), "event=ingestion.technical_diagnostic.persist_failed") || strings.Contains(logs.String(), storageFailure.Error()) {
 		t.Fatalf("result=%+v terminal=%v logs=%q", result, recorder.terminalRecorded.Load(), logs.String())
 	}
 }

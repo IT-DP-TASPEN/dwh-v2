@@ -30,16 +30,19 @@ func TestRunLifecycleLogsOneStartAndOneCanonicalCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := queueDistinctIntegrationJobs(t, db, runs, 3)
+	ids := queueDistinctIntegrationJobs(t, db, runs, 4)
 	if _, err := db.Exec(`UPDATE ingestion_runtime_settings SET max_running_jobs=? WHERE id=1`, ingestionrun.MaxRuntimeLimit); err != nil {
 		t.Fatal(err)
 	}
 	secretCause := errors.New("upstream rejected ACCOUNT-SECRET-0042")
-	want := map[uint64]ingestionrun.Status{ids[0]: ingestionrun.StatusSucceeded, ids[1]: ingestionrun.StatusFailed, ids[2]: ingestionrun.StatusCancelled}
+	want := map[uint64]ingestionrun.Status{ids[0]: ingestionrun.StatusSucceeded, ids[1]: ingestionrun.StatusFailed, ids[2]: ingestionrun.StatusCancelled,
+		ids[3]: ingestionrun.StatusCancelled}
 	fake := scriptedExecutor{
 		ids[0]: {Status: ingestionrun.StatusSucceeded, BusinessComplete: true},
 		ids[1]: {Status: ingestionrun.StatusFailed, Cause: secretCause, Error: ingestionrun.SafeError{Class: "source", Message: "failed", Step: "fetch_detail"}},
 		ids[2]: {Status: ingestionrun.StatusCancelled, Cause: ingestionrun.ErrCancellationRequested, Error: ingestionrun.SafeError{Class: "cancelled", Message: "cancelled", Step: "fetch_detail"}},
+		// Executor succeeds after cancellation was requested: Finish falls back to cancelled.
+		ids[3]: {Status: ingestionrun.StatusSucceeded, BusinessComplete: true},
 	}
 	var logs bytes.Buffer
 	coordinator := &Coordinator{runs: runs, executor: fake, catalog: catalog, logger: slog.New(slog.NewJSONHandler(&logs, nil)),
@@ -52,6 +55,11 @@ func TestRunLifecycleLogsOneStartAndOneCanonicalCompletion(t *testing.T) {
 			t.Fatalf("claim=%+v err=%v", run, err)
 		}
 		owners = append(owners, owner)
+		if run.ID == ids[3] {
+			if _, err := db.Exec(`UPDATE ingestion_runs SET cancel_requested_at=UTC_TIMESTAMP(6) WHERE id=?`, run.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
 		coordinator.executeClaimedRun(context.Background(), context.Background(), *run, owner)
 	}
 
@@ -68,6 +76,8 @@ func TestRunLifecycleLogsOneStartAndOneCanonicalCompletion(t *testing.T) {
 			if record["job_key"] == "" || record["category"] == "" || record["trigger"] != "direct" {
 				t.Fatalf("start=%v", record)
 			}
+		case "ingestion.run.finalization_failed":
+			t.Fatalf("unexpected finalization failure: %v", record)
 		case "ingestion.run.completed":
 			if completed[id] != nil {
 				t.Fatalf("duplicate completion for %d", id)

@@ -3,10 +3,10 @@
 package coordinator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -69,10 +69,15 @@ func TestPeriodicRecoverySweepDrainsManyStaleRunsAndReleasesJobs(t *testing.T) {
 		}
 		_, _ = db.Exec("DELETE FROM ingestion_runs WHERE id IN ("+placeholders+")", arguments...)
 	})
-	coordinator := &Coordinator{runs: runs, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	var logs bytes.Buffer
+	coordinator := &Coordinator{runs: runs, logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 		local: map[uint64]context.CancelCauseFunc{}, parents: map[uint64]string{}}
 	if recovered := coordinator.recoverStaleSweep(context.Background()); recovered != len(ids) {
 		t.Fatalf("recovered=%d want=%d", recovered, len(ids))
+	}
+	if got := strings.Count(logs.String(), `"event":"ingestion.run.recovered_abandoned"`); got != len(ids) ||
+		strings.Contains(logs.String(), "ingestion.run.completed") || strings.Contains(logs.String(), fmt.Sprintf("%064x", 1)) {
+		t.Fatalf("recovered_abandoned=%d want=%d logs=%s", got, len(ids), logs.String())
 	}
 	var abandoned int
 	if err := db.Get(&abandoned, `SELECT COUNT(*) FROM ingestion_runs WHERE status='abandoned' AND id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`)`, uint64sToAny(ids)...); err != nil || abandoned != len(ids) {

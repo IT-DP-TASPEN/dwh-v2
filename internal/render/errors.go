@@ -42,7 +42,7 @@ func (responder *ErrorResponder) Internal(writer http.ResponseWriter, request *h
 		"method", request.Method,
 		"route", logging.Route(request),
 		"operation", operation,
-		"error", err,
+		logging.Err(err),
 	)
 	responder.renderInternal(writer, request)
 }
@@ -56,7 +56,7 @@ func (responder *ErrorResponder) Recoverer(next http.Handler) http.Handler {
 					"request_id", middleware.GetReqID(request.Context()),
 					"method", request.Method,
 					"route", logging.Route(request),
-					"panic", recovered,
+					logging.Panic(recovered),
 					"stack", string(debug.Stack()),
 				)
 				responder.renderInternal(wrapped, request)
@@ -87,7 +87,7 @@ func (responder *ErrorResponder) renderError(writer http.ResponseWriter, request
 			"route", logging.Route(request),
 			"operation", "render_error_page",
 			"status", status,
-			"error", err,
+			logging.Err(err),
 		)
 		http.Error(writer, http.StatusText(status), status)
 	}

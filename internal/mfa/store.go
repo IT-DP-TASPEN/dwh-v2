@@ -11,6 +11,8 @@ import (
 	"github.com/ibldzn/go-admin/internal/auth"
 	"github.com/ibldzn/go-admin/internal/secretcrypto"
 	"github.com/jmoiron/sqlx"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 var ErrInvalid = errors.New("invalid verification code")
@@ -375,7 +377,7 @@ func (s *Store) Verify(ctx context.Context, token, input string, sessionID uint6
 		}
 		for _, action := range actions {
 			if auditErr := audit.Append(ctx, s.DB, audit.Event{Attribution: attribution, Action: action, Resource: audit.ResourceUser, ResourceID: id, CreatedAt: now}); auditErr != nil {
-				slog.WarnContext(ctx, "append MFA failure audit", "action", action, "error", auditErr)
+				slog.WarnContext(ctx, "append MFA failure audit", "action", action, logging.Err(auditErr))
 			}
 		}
 		if failures == MaxFailures {

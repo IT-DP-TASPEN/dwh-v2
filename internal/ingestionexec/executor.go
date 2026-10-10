@@ -20,6 +20,8 @@ import (
 	"github.com/ibldzn/go-admin/internal/ingestiondiag"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/ingestionstore"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 type Executor struct {
@@ -252,7 +254,7 @@ func (executor *Executor) executeMaster(ctx context.Context, run ingestionrun.Ru
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	if err := executor.master.CleanupRun(cleanupCtx, run.ID); err != nil {
-		executor.logger.Warn("clean Master staging", "run_id", run.ID, "job_key", run.JobKey, "error", err)
+		executor.logger.Warn("clean Master staging", "run_id", run.ID, "job_key", run.JobKey, logging.Err(err))
 	}
 	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
 }
@@ -288,7 +290,7 @@ func (executor *Executor) persistProgress(ctx context.Context, run ingestionrun.
 	*enabled = false
 	progressCtx := diagnosticScope(ctx, "persistence", "persist_run_progress", "persist_run_progress", "", "")
 	recordProgressDegraded(progressCtx, err)
-	executor.logger.Warn("progress persistence degraded; ingestion continues", "run_id", run.ID, "job_key", run.JobKey, "error", err)
+	executor.logger.Warn("progress persistence degraded; ingestion continues", "run_id", run.ID, "job_key", run.JobKey, logging.Err(err))
 	return nil
 }
 
@@ -700,7 +702,7 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	if err := executor.detail.CleanupRun(cleanupCtx, run.ID); err != nil {
-		executor.logger.Warn("clean Detail staging", "run_id", run.ID, "job_key", run.JobKey, "error", err)
+		executor.logger.Warn("clean Detail staging", "run_id", run.ID, "job_key", run.JobKey, logging.Err(err))
 	}
 	return Result{Status: ingestionrun.StatusSucceeded, BusinessComplete: true}
 }

@@ -17,6 +17,8 @@ import (
 	"github.com/ibldzn/go-admin/internal/ingestion"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/securityctx"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 const (
@@ -651,7 +653,7 @@ func (service *Service) Sweep(ctx context.Context) error {
 	}
 	for _, id := range ids {
 		if _, err := service.process(ctx, id); err != nil && ctx.Err() == nil {
-			service.logger.Error("process schedule", "schedule_id", id, "error", err)
+			service.logger.Error("process schedule", "schedule_id", id, logging.Err(err))
 		}
 	}
 	return nil
@@ -662,7 +664,7 @@ func (service *Service) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		if err := service.Sweep(ctx); err != nil && ctx.Err() == nil {
-			service.logger.Error("sweep schedules", "error", err)
+			service.logger.Error("sweep schedules", logging.Err(err))
 		}
 		select {
 		case <-ctx.Done():

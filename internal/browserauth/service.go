@@ -14,6 +14,8 @@ import (
 	"github.com/ibldzn/go-admin/internal/mfa"
 	"github.com/ibldzn/go-admin/internal/securityctx"
 	"github.com/ibldzn/go-admin/internal/user"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 const LastSeenTouchInterval = 5 * time.Minute
@@ -291,7 +293,7 @@ func (s *Service) ResolveSession(ctx context.Context, tokenHash [32]byte, now ti
 	}
 	if now.Sub(session.LastSeenAt) >= min(LastSeenTouchInterval, s.security.IdleTimeout/2) {
 		if err := s.sessions.UpdateLastSeenAt(ctx, session.ID, now); err != nil {
-			s.logger.WarnContext(ctx, "update session activity", "session_id", session.ID, "error", err)
+			s.logger.WarnContext(ctx, "update session activity", "session_id", session.ID, logging.Err(err))
 		}
 	}
 

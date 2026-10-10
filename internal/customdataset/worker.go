@@ -78,7 +78,7 @@ func (worker *Worker) claimLoop(ctx context.Context) {
 	for {
 		job, err := worker.repository.Claim(ctx, worker.owner)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			worker.logger.ErrorContext(ctx, "claim custom dataset import", "error", err)
+			worker.logger.ErrorContext(ctx, "claim custom dataset import", logging.Err(err))
 		}
 		if job != nil {
 			worker.execute(ctx, *job)
@@ -199,15 +199,10 @@ func (worker *Worker) execute(parent context.Context, job Import) {
 	finish, finishCancel := context.WithTimeout(context.WithoutCancel(parent), worker.heartbeatTimeout())
 	defer finishCancel()
 	if owned, failErr := worker.repository.Fail(finish, job, worker.owner, class, publicWorkerError(class, err), diagnostics, truncated); failErr != nil || !owned {
-		logger.Error("finish failed custom dataset import", "error", failErr)
+		logger.Error("finish failed custom dataset import", logging.Err(failErr))
 	}
-	// Validation errors quote CSV content and stay in the import's DB
-	// diagnostics; MySQL errors can quote cell values, so keep only codes.
-	attributes := []any{"event", "custom_dataset.import.completed", "status", ImportFailed, "duration_ms", time.Since(started).Milliseconds(), "error_class", class}
-	if class != "validation" {
-		attributes = append(attributes, logging.ErrorAttrs(err)...)
-	}
-	logger.Error("custom dataset import failed", attributes...)
+	logger.Error("custom dataset import failed", "event", "custom_dataset.import.completed", "status", ImportFailed,
+		"duration_ms", time.Since(started).Milliseconds(), "error_class", class, logging.Err(err))
 }
 
 func (worker *Worker) heartbeatLoop(ctx context.Context, cancel context.CancelCauseFunc, job Import, done chan<- struct{}) {
@@ -234,7 +229,7 @@ func (worker *Worker) heartbeatLoop(ctx context.Context, cancel context.CancelCa
 			if ctx.Err() != nil {
 				return // the attempt finished while this heartbeat was in flight
 			}
-			worker.logger.WarnContext(ctx, "heartbeat custom dataset import", "import_id", job.ID, "error", err)
+			worker.logger.WarnContext(ctx, "heartbeat custom dataset import", "import_id", job.ID, logging.Err(err))
 			if time.Since(lastProof) >= worker.config.StaleAfter {
 				cancel(ErrLeaseUnproven)
 				return
@@ -260,7 +255,7 @@ func (worker *Worker) staleLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if _, err := worker.repository.RequeueStale(ctx, worker.config.StaleAfter); err != nil {
-				worker.logger.ErrorContext(ctx, "requeue stale custom dataset imports", "error", err)
+				worker.logger.ErrorContext(ctx, "requeue stale custom dataset imports", logging.Err(err))
 			}
 		}
 	}
@@ -283,14 +278,14 @@ func (worker *Worker) cleanupLoop(ctx context.Context) {
 func (worker *Worker) cleanup(ctx context.Context) {
 	items, err := worker.repository.CleanupCandidates(ctx, worker.config.CleanupGrace)
 	if err != nil {
-		worker.logger.ErrorContext(ctx, "list custom dataset cleanup candidates", "error", err)
+		worker.logger.ErrorContext(ctx, "list custom dataset cleanup candidates", logging.Err(err))
 		return
 	}
 	for _, item := range items {
 		for {
 			deleted, err := worker.repository.CleanupRows(ctx, item)
 			if err != nil {
-				worker.logger.ErrorContext(ctx, "clean custom dataset rows", "import_id", item.ID, "error", err)
+				worker.logger.ErrorContext(ctx, "clean custom dataset rows", "import_id", item.ID, logging.Err(err))
 				break
 			}
 			if deleted < 5000 {
@@ -300,14 +295,14 @@ func (worker *Worker) cleanup(ctx context.Context) {
 	}
 	uploads, err := worker.repository.ExpiredUploads(ctx)
 	if err != nil {
-		worker.logger.ErrorContext(ctx, "list expired custom dataset uploads", "error", err)
+		worker.logger.ErrorContext(ctx, "list expired custom dataset uploads", logging.Err(err))
 		return
 	}
 	for _, upload := range uploads {
 		if upload.Status == "uploaded" {
 			expired, err := worker.repository.ExpireUpload(ctx, upload.ID, upload.Revision)
 			if err != nil {
-				worker.logger.ErrorContext(ctx, "expire custom dataset upload", "upload_id", upload.ID, "error", err)
+				worker.logger.ErrorContext(ctx, "expire custom dataset upload", "upload_id", upload.ID, logging.Err(err))
 				continue
 			}
 			if !expired {
@@ -315,16 +310,16 @@ func (worker *Worker) cleanup(ctx context.Context) {
 			}
 		}
 		if err := worker.storage.Remove(upload.StorageKey); err != nil && !errors.Is(err, os.ErrNotExist) {
-			worker.logger.ErrorContext(ctx, "remove expired custom dataset upload", "upload_id", upload.ID, "error", err)
+			worker.logger.ErrorContext(ctx, "remove expired custom dataset upload", "upload_id", upload.ID, logging.Err(err))
 		}
 	}
 	referenced, err := worker.repository.ReferencedUploadKeys(ctx)
 	if err != nil {
-		worker.logger.ErrorContext(ctx, "list referenced custom dataset uploads", "error", err)
+		worker.logger.ErrorContext(ctx, "list referenced custom dataset uploads", logging.Err(err))
 		return
 	}
 	if err := worker.storage.Reconcile(referenced, time.Now().Add(-worker.config.CleanupGrace)); err != nil {
-		worker.logger.ErrorContext(ctx, "reconcile custom dataset upload storage", "error", err)
+		worker.logger.ErrorContext(ctx, "reconcile custom dataset upload storage", logging.Err(err))
 	}
 }
 

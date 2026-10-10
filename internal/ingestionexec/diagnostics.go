@@ -17,6 +17,8 @@ import (
 	"github.com/ibldzn/go-admin/internal/ingestiondiag"
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/ingestionstore"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 const diagnosticWriteTimeout = 5 * time.Second
@@ -49,7 +51,7 @@ func (recorder *runDiagnosticRecorder) record(ctx context.Context, event ingesti
 	}
 	if err != nil {
 		recorder.logger.Error("could not persist ingestion technical diagnostic", "event", "ingestion.technical_diagnostic.persist_failed", "run_id", recorder.runID, "job_key", recorder.jobKey,
-			"class", event.Class, "step", event.Step, "operation", event.Operation, "diagnostic_error", err)
+			"class", event.Class, "step", event.Step, "operation", event.Operation, logging.Err(err))
 		return
 	}
 	if event.Terminal {

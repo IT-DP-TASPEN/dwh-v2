@@ -17,6 +17,8 @@ import (
 	"github.com/ibldzn/go-admin/internal/ingestionrun"
 	"github.com/ibldzn/go-admin/internal/ingestionstore"
 	"github.com/ibldzn/go-admin/internal/securityctx"
+
+	"github.com/ibldzn/go-admin/internal/logging"
 )
 
 // runExecutor is the narrow execution seam the dispatcher depends on.
@@ -107,7 +109,7 @@ func (coordinator *Coordinator) SubmitRunAllManual(ctx context.Context, from, to
 func (coordinator *Coordinator) registerParent(ctx context.Context, id uint64) {
 	run, err := coordinator.runs.Get(ctx, id)
 	if err != nil || run.Kind != ingestionrun.KindRunAllParent || run.Status != ingestionrun.StatusRunning || run.OwnerID == "" {
-		coordinator.logger.Warn("register Run All parent ownership", "run_id", id, "error", err)
+		coordinator.logger.Warn("register Run All parent ownership", "run_id", id, logging.Err(err))
 		return
 	}
 	coordinator.mu.Lock()
@@ -169,7 +171,7 @@ func (coordinator *Coordinator) cleanupMasterStaging(ctx context.Context) {
 			deleted, err := coordinator.masters.CleanupTerminal(cleanupCtx, 100)
 			if err != nil {
 				if ctx.Err() == nil {
-					coordinator.logger.Warn("clean terminal Master staging", "error", err)
+					coordinator.logger.Warn("clean terminal Master staging", logging.Err(err))
 				}
 				return
 			}
@@ -244,7 +246,7 @@ func (coordinator *Coordinator) cleanupDetailStaging(ctx context.Context) {
 			deleted, err := coordinator.details.CleanupTerminal(cleanupCtx, 100)
 			if err != nil {
 				if ctx.Err() == nil {
-					coordinator.logger.Warn("clean terminal Detail staging", "error", err)
+					coordinator.logger.Warn("clean terminal Detail staging", logging.Err(err))
 				}
 				return
 			}
@@ -270,14 +272,14 @@ func (coordinator *Coordinator) dispatch(ctx, executionCtx context.Context, acti
 	for ctx.Err() == nil {
 		attemptOwner, ownerErr := ingestionrun.NewOwnerID()
 		if ownerErr != nil {
-			coordinator.logger.Error("create ingestion owner", "error", ownerErr)
+			coordinator.logger.Error("create ingestion owner", logging.Err(ownerErr))
 			wait(ctx, time.Second)
 			continue
 		}
 		run, err := coordinator.runs.Claim(ctx, attemptOwner)
 		if err != nil {
 			if ctx.Err() == nil {
-				coordinator.logger.Error("claim ingestion run", "error", err)
+				coordinator.logger.Error("claim ingestion run", logging.Err(err))
 			}
 			wait(ctx, 500*time.Millisecond)
 			continue
@@ -324,27 +326,38 @@ func (coordinator *Coordinator) executeClaimedRun(ctx, executionCtx context.Cont
 	if run.ParentRunID != nil {
 		coordinator.reconcileOwnedParent(ctx, *run.ParentRunID)
 	}
-	if err != nil && !errors.Is(err, ingestionrun.ErrTransition) {
-		logger.Error("finish ingestion run", "error", err)
-	}
-	coordinator.logRunCompleted(ctx, logger, run, job.Category, result, time.Since(started))
+	readCtx, readCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	persisted, readErr := coordinator.runs.Get(readCtx, run.ID)
+	readCancel()
+	logRunOutcome(ctx, logger, job.Category, result, time.Since(started), persisted, err, readErr)
 }
 
-// logRunCompleted emits the single terminal lifecycle record for a run attempt.
-// Status and progress come from the persisted row, so publication-owned
-// finishes, cancellation fallbacks, and stale recovery all report the
-// canonical outcome. It only reads; it never affects Finish.
-func (coordinator *Coordinator) logRunCompleted(ctx context.Context, logger *slog.Logger, run ingestionrun.Run, category ingestion.JobCategory, result ingestionexec.Result, duration time.Duration) {
-	status, progress := result.Status, run.Progress
-	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	persisted, err := coordinator.runs.Get(readCtx, run.ID)
-	cancel()
-	if err == nil {
-		progress = persisted.Progress
-		if ingestionrun.IsTerminal(persisted.Status) {
-			status = persisted.Status
+// logRunOutcome emits the single terminal lifecycle record for a run attempt.
+// ingestion.run.completed is only emitted when the persisted row read back
+// after finalization is terminal, and it reports that canonical status, so
+// publication-owned finishes, cancellation fallbacks, and stale recovery are
+// reported as persisted. When terminal persistence cannot be proven the
+// executor's status is not trusted and ingestion.run.finalization_failed is
+// emitted instead. It only logs; it never affects Finish.
+func logRunOutcome(ctx context.Context, logger *slog.Logger, category ingestion.JobCategory, result ingestionexec.Result, duration time.Duration,
+	persisted ingestionrun.Run, finishErr, readErr error) {
+	if readErr != nil || !ingestionrun.IsTerminal(persisted.Status) {
+		attributes := []any{"event", "ingestion.run.finalization_failed", "category", category, "duration_ms", duration.Milliseconds(),
+			"executor_status", result.Status}
+		if readErr == nil {
+			attributes = append(attributes, "persisted_status", persisted.Status)
 		}
+		if finishErr != nil && !errors.Is(finishErr, ingestionrun.ErrTransition) {
+			attributes = append(attributes, slog.Attr{Key: "finish_error", Value: logging.Err(finishErr).Value})
+		}
+		attributes = append(attributes, slog.Attr{Key: "readback_error", Value: logging.Err(readErr).Value})
+		logger.ErrorContext(ctx, "ingestion run finalization could not be proven", attributes...)
+		return
 	}
+	if finishErr != nil && !errors.Is(finishErr, ingestionrun.ErrTransition) {
+		logger.WarnContext(ctx, "finish ingestion run", logging.Err(finishErr))
+	}
+	status, progress := persisted.Status, persisted.Progress
 	attributes := []any{"event", "ingestion.run.completed", "category", category, "status", status, "duration_ms", duration.Milliseconds(),
 		"rows", progress.Rows, "total", progress.Total, "succeeded", progress.Succeeded, "failed", progress.Failed}
 	level := slog.LevelInfo
@@ -377,7 +390,7 @@ func (coordinator *Coordinator) heartbeat(ctx context.Context, cancel context.Ca
 			state, err := coordinator.runs.Heartbeat(heartbeatCtx, run.ID, run.OwnerID)
 			heartbeatCancel()
 			if err != nil {
-				coordinator.logger.Warn("heartbeat ingestion run", "run_id", run.ID, "error", err)
+				coordinator.logger.Warn("heartbeat ingestion run", "run_id", run.ID, logging.Err(err))
 				if time.Since(lastProof) >= ingestionLease {
 					cancel(ingestionrun.ErrLeaseUnproven)
 					return
@@ -417,7 +430,7 @@ func (coordinator *Coordinator) recoverStaleSweep(ctx context.Context) int {
 	for range ingestionRecoveryBatch {
 		owner, err := ingestionrun.NewOwnerID()
 		if err != nil {
-			coordinator.logger.Error("create recovery owner", "error", err)
+			coordinator.logger.Error("create recovery owner", logging.Err(err))
 			return recovered
 		}
 		recoveryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -425,7 +438,7 @@ func (coordinator *Coordinator) recoverStaleSweep(ctx context.Context) int {
 		cancel()
 		if err != nil {
 			if ctx.Err() == nil {
-				coordinator.logger.Error("recover stale ingestion run", "error", err)
+				coordinator.logger.Error("recover stale ingestion run", logging.Err(err))
 			}
 			return recovered
 		}
@@ -445,6 +458,12 @@ func (coordinator *Coordinator) recoverStaleSweep(ctx context.Context) int {
 		if jobKey == "" {
 			jobKey = "run_all_parent"
 		}
+		if found.Kind != ingestionrun.KindRunAllParent {
+			// The recovering process never executed the run, so it reports the
+			// fenced abandon transition, not ingestion.run.completed.
+			coordinator.logger.Warn("stale ingestion run abandoned", "event", "ingestion.run.recovered_abandoned", "run_id", found.RunID,
+				"job_key", jobKey, "status", ingestionrun.StatusAbandoned, "error_class", "abandoned", "error_step", "ownership_lease")
+		}
 		diagnosticCtx, diagnosticCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		err = coordinator.runs.AppendTechnicalEvent(diagnosticCtx, ingestionrun.TechnicalEvent{
 			RunID: found.RunID, Severity: "warning", EventKind: "recovery", Recovered: boolPointer(true),
@@ -453,7 +472,7 @@ func (coordinator *Coordinator) recoverStaleSweep(ctx context.Context) int {
 		})
 		diagnosticCancel()
 		if err != nil {
-			coordinator.logger.Warn("persist stale recovery diagnostic", "run_id", found.RunID, "error", err)
+			coordinator.logger.Warn("persist stale recovery diagnostic", "run_id", found.RunID, logging.Err(err))
 		}
 	}
 	return recovered
@@ -507,7 +526,7 @@ func (coordinator *Coordinator) reconcileParent(ctx context.Context, id uint64, 
 			return
 		}
 		if err != nil {
-			coordinator.logger.Error("reconcile Run All", "run_id", id, "error", err)
+			coordinator.logger.Error("reconcile Run All", "run_id", id, logging.Err(err))
 			return
 		}
 		if !changed {

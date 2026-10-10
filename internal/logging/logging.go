@@ -4,6 +4,7 @@
 package logging
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -35,12 +36,47 @@ func Route(request *http.Request) string {
 	return "unmatched"
 }
 
-// ErrorAttrs describes err for stdout. MySQL server messages can quote the
-// offending value or SQL fragment, so only their number and SQLSTATE are kept.
-func ErrorAttrs(err error) []any {
+// Err describes err for operational stdout without its message. Arbitrary
+// error text can quote SQL, bound values, CSV cells or upstream payloads, so
+// only the error's type and structured codes are emitted; rich diagnostics
+// belong in the durable DB stores. MySQL errors keep number and SQLSTATE but
+// never the server message. The attr is an inline group: pass it directly to
+// a slog call; a nil err adds nothing.
+func Err(err error) slog.Attr {
+	return slog.Attr{Value: slog.GroupValue(errorAttrs(err)...)}
+}
+
+func errorAttrs(err error) []slog.Attr {
 	var mysqlError *mysql.MySQLError
-	if errors.As(err, &mysqlError) {
-		return []any{"error_type", fmt.Sprintf("%T", mysqlError), "mysql_error", mysqlError.Number, "sqlstate", string(mysqlError.SQLState[:])}
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, context.Canceled):
+		return []slog.Attr{slog.String("error_type", errorType(err)), slog.String("error_kind", "cancelled")}
+	case errors.Is(err, context.DeadlineExceeded):
+		return []slog.Attr{slog.String("error_type", errorType(err)), slog.String("error_kind", "deadline_exceeded")}
+	case errors.As(err, &mysqlError):
+		return []slog.Attr{slog.String("error_type", fmt.Sprintf("%T", mysqlError)),
+			slog.Any("mysql_error", mysqlError.Number), slog.String("sqlstate", string(mysqlError.SQLState[:]))}
 	}
-	return []any{"error", err}
+	return []slog.Attr{slog.String("error_type", errorType(err))}
+}
+
+// errorType names the first error in the chain that is not a plain fmt
+// wrapper, so "load x: %w" chains report the underlying type.
+func errorType(err error) string {
+	for {
+		name := fmt.Sprintf("%T", err)
+		next := errors.Unwrap(err)
+		if name != "*fmt.wrapError" || next == nil {
+			return name
+		}
+		err = next
+	}
+}
+
+// Panic describes a recovered panic value by type only: the value itself can
+// carry request or source data.
+func Panic(recovered any) slog.Attr {
+	return slog.String("panic_type", fmt.Sprintf("%T", recovered))
 }

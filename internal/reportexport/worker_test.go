@@ -1,10 +1,13 @@
 package reportexport
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,8 +31,10 @@ func TestHeartbeatCancelsAttemptWhenFencedUpdateProvesClaimLoss(t *testing.T) {
 
 func TestHeartbeatBoundsWorkWhenOwnershipCannotBeProven(t *testing.T) {
 	worker := heartbeatTestWorker(func(context.Context, uint64, string, uint32, time.Time) (bool, error) {
-		return false, errors.New("transient database failure")
+		return false, fmt.Errorf("heartbeat: %w", errors.New("SQL-SECRET-VALUE ACCOUNT-SECRET-0042"))
 	})
+	var logs bytes.Buffer
+	worker.logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	ctx, cancel := context.WithCancelCause(context.Background())
 	done := make(chan struct{})
 	started := time.Now()
@@ -44,6 +49,10 @@ func TestHeartbeatBoundsWorkWhenOwnershipCannotBeProven(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
 		t.Fatalf("lease cancellation took %s", elapsed)
+	}
+	if logged := logs.String(); !strings.Contains(logged, `"export_job_id":7`) || !strings.Contains(logged, `"error_type":"*errors.errorString"`) ||
+		strings.Contains(logged, "SQL-SECRET-VALUE") || strings.Contains(logged, "ACCOUNT-SECRET-0042") {
+		t.Fatalf("heartbeat log=%s", logged)
 	}
 }
 
