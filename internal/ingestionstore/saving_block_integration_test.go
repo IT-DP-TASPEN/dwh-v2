@@ -5,7 +5,9 @@ package ingestionstore
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -226,5 +228,64 @@ func TestSavingBlockPublicationRefusesIncompleteOrUnownedCandidates(t *testing.T
 	var status string
 	if err := db.Get(&status, `SELECT status FROM ingestion_runs WHERE id=?`, runID); err != nil || status != "running" {
 		t.Fatalf("refused run status=%q error=%v", status, err)
+	}
+}
+
+// Concurrent first-time staging of sorted accounts must not deadlock: every
+// worker inserts at the index tail, where a DELETE-before-INSERT gap lock used
+// to collide with other workers' insert intention (MySQL 1213).
+func TestConcurrentDetailStagingDoesNotDeadlock(t *testing.T) {
+	db := integrationdb.Open(t)
+	repository := NewDetailRepository(db)
+	deadlocks := func() int64 {
+		var count int64
+		if err := db.Get(&count, `SELECT COUNT FROM information_schema.INNODB_METRICS WHERE NAME='lock_deadlocks'`); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	accounts := make([]string, 400)
+	for index := range accounts {
+		accounts[index] = fmt.Sprintf("ACC%06d", index)
+	}
+	fetched := time.Date(2026, 10, 13, 1, 2, 3, 0, time.UTC)
+	stages := map[string]func(uint64, string) error{
+		"saving_block_detail": func(runID uint64, account string) error {
+			return repository.StageSavingBlockTransactions(context.Background(), runID, account, fetched, savingBlockItems(t, account, "x", "y"))
+		},
+		"saving_detail": func(runID uint64, account string) error {
+			return repository.Stage(context.Background(), runID, mapDetailRecord(t, ingestion.DetailSaving, account, 1))
+		},
+	}
+	for jobKey, stage := range stages {
+		t.Run(jobKey, func(t *testing.T) {
+			runID, _ := detailRun(t, db.DB, jobKey, 0)
+			before := deadlocks()
+			jobs, failures := make(chan string), make(chan error, len(accounts))
+			var wait sync.WaitGroup
+			for range 16 {
+				wait.Add(1)
+				go func() {
+					defer wait.Done()
+					for account := range jobs {
+						if err := stage(runID, account); err != nil {
+							failures <- err
+						}
+					}
+				}()
+			}
+			for _, account := range accounts {
+				jobs <- account
+			}
+			close(jobs)
+			wait.Wait()
+			close(failures)
+			for err := range failures {
+				t.Fatal(err)
+			}
+			if delta := deadlocks() - before; delta != 0 {
+				t.Fatalf("concurrent staging hit %d InnoDB deadlocks", delta)
+			}
+		})
 	}
 }

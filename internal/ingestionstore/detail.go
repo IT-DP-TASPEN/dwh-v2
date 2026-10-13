@@ -220,7 +220,7 @@ func (repository *DetailRepository) stageTransaction(ctx context.Context, tx *sq
 		return err
 	}
 	for _, extension := range specification.extensions {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM `"+extension.stage+"` WHERE ingestion_run_id=? AND cif_no=?", runID, record.Identifier); err != nil {
+		if err := deleteStagedRows(ctx, tx, extension.stage, "cif_no", runID, record.Identifier); err != nil {
 			return wrapDatabaseError(fmt.Errorf("delete staged %s section: %w", extension.stage, err), "stage_detail", "delete_staged_extension", extension.stage, 0, 0)
 		}
 		section, present := record.Sections[extension.key]
@@ -255,7 +255,7 @@ func (repository *DetailRepository) stageTransaction(ctx context.Context, tx *sq
 
 // stageDetailChildren replaces one account's staged children for this run.
 func stageDetailChildren(ctx context.Context, tx *sqlx.Tx, runID uint64, identifier string, fetchedAt time.Time, childSpecification detailChildSpec, children []ingestion.DetailChildRecord) error {
-	if _, err := tx.ExecContext(ctx, "DELETE FROM `"+childSpecification.stage+"` WHERE ingestion_run_id=? AND account_no=?", runID, identifier); err != nil {
+	if err := deleteStagedRows(ctx, tx, childSpecification.stage, "account_no", runID, identifier); err != nil {
 		return wrapDatabaseError(fmt.Errorf("delete staged %s children: %w", childSpecification.stage, err), "stage_detail", "delete_staged_child_rows", childSpecification.stage, 0, 0)
 	}
 	childColumns := []string{"ingestion_run_id", "account_no", "item_index"}
@@ -286,6 +286,20 @@ func stageDetailChildren(ctx context.Context, tx *sqlx.Tx, runID uint64, identif
 		rows[index] = row
 	}
 	return insertRows(ctx, tx, childSpecification.stage, childColumns, rows)
+}
+
+// deleteStagedRows clears one identifier's staged rows only when some exist.
+// Under REPEATABLE READ a DELETE matching nothing still takes a next-key gap
+// lock, and concurrent workers inserting into that same gap (sorted accounts
+// all land at the index tail) deadlock on insert intention. The EXISTS probe
+// is a non-locking consistent read, so a first stage takes no gap lock.
+func deleteStagedRows(ctx context.Context, tx *sqlx.Tx, stage, key string, runID uint64, identifier string) error {
+	var present bool
+	if err := tx.GetContext(ctx, &present, "SELECT EXISTS(SELECT 1 FROM `"+stage+"` WHERE ingestion_run_id=? AND `"+key+"`=?)", runID, identifier); err != nil || !present {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, "DELETE FROM `"+stage+"` WHERE ingestion_run_id=? AND `"+key+"`=?", runID, identifier)
+	return err
 }
 
 func detailSQLValue(value any, field detailColumn) (any, error) {
