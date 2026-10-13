@@ -26,8 +26,13 @@ func TestDetailStagingNoLongerLocksRunProgressRow(t *testing.T) {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`INSERT INTO stg_fincloud_saving_details
-		(ingestion_run_id,as_of_date,account_no,cif_no,beginning_balance,balance,raw_payload,raw_checksum,last_fetched_at)
-		VALUES (?,'2026-08-26','NO-FK-LOCK','CIF',0,0,JSON_OBJECT(),REPEAT('0',64),UTC_TIMESTAMP(6))`, runID); err != nil {
+		(ingestion_run_id,account_no,cif_no,beginning_balance,balance,raw_payload,raw_checksum,last_fetched_at)
+		VALUES (?,'NO-FK-LOCK','CIF',0,0,JSON_OBJECT(),REPEAT('0',64),UTC_TIMESTAMP(6))`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO stg_fincloud_saving_block_transactions
+		(ingestion_run_id,account_no,item_index,raw_item_payload,raw_item_checksum,last_fetched_at)
+		VALUES (?,'NO-FK-LOCK',0,JSON_OBJECT(),REPEAT('0',64),UTC_TIMESTAMP(6))`, runID); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -73,7 +78,7 @@ func TestStaleDetailWorkerCannotPublishAfterNewRunSucceeds(t *testing.T) {
 		t.Fatalf("new run status=%q error=%v", status, err)
 	}
 	var payload string
-	if err := db.Get(&payload, `SELECT CAST(raw_payload AS CHAR) FROM fincloud_saving_details WHERE account_no='FENCED-ACCOUNT'`); err != nil || !strings.Contains(payload, `"version": 2`) {
+	if err := db.Get(&payload, `SELECT CAST(raw_payload AS CHAR) FROM fincloud_saving_details WHERE account_no='FENCED-ACCOUNT'`); err != nil || !strings.Contains(payload, `"saldoawal": "2"`) {
 		t.Fatalf("authoritative payload=%s error=%v", payload, err)
 	}
 }
@@ -87,8 +92,8 @@ func TestDetailCleanupReclaimsRecoveredAndOrphanStagingWithoutRunFK(t *testing.T
 	}
 	for id, account := range map[uint64]string{runID: "RECOVERED-STAGE", 9223372036854775807: "ORPHAN-STAGE"} {
 		if _, err := db.Exec(`INSERT INTO stg_fincloud_saving_details
-			(ingestion_run_id,as_of_date,account_no,cif_no,beginning_balance,balance,raw_payload,raw_checksum,last_fetched_at)
-			VALUES (?,'2026-08-26',?,'CIF',0,0,JSON_OBJECT(),REPEAT('0',64),UTC_TIMESTAMP(6))`, id, account); err != nil {
+			(ingestion_run_id,account_no,cif_no,beginning_balance,balance,raw_payload,raw_checksum,last_fetched_at)
+			VALUES (?,?,'CIF',0,0,JSON_OBJECT(),REPEAT('0',64),UTC_TIMESTAMP(6))`, id, account); err != nil {
 			t.Fatal(err)
 		}
 	}

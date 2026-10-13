@@ -72,6 +72,7 @@ func TestExactMaintenanceReportPublishesValidEmptySnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	runID, _ := result.LastInsertId()
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, runID) })
 	rows, err := executor.fetchAndSaveMaintenance(context.Background(), ingestionrun.Run{ID: uint64(runID), OwnerID: owner}, definition, requested)
 	if err != nil || rows != 0 {
 		t.Fatalf("rows=%d error=%v", rows, err)
@@ -178,6 +179,7 @@ func TestDetailOutstandingMergedAndSplitPublicationIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	runID, _ := result.LastInsertId()
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, runID) })
 	run := ingestionrun.Run{ID: uint64(runID), OwnerID: owner}
 
 	rows, err := executor.fetchAndSaveMaintenance(context.Background(), run, definition, requested)
@@ -204,7 +206,7 @@ func TestDetailOutstandingMergedAndSplitPublicationIsAtomic(t *testing.T) {
 		RowNumber   int    `db:"row_number"`
 	}
 	var published []publishedRow
-	if err := db.Select(&published, "SELECT no_rekening AS account, branch, `value`, source_file_name AS file_name, source_row_number AS row_number, source_row_checksum AS checksum, business_key_hash AS business_key FROM `"+definition.TableName+"` WHERE as_of_date=? ORDER BY source_row_number", requested.String()); err != nil {
+	if err := db.Select(&published, "SELECT no_rekening AS account, branch, `value`, source_file_name AS file_name, source_row_number AS `row_number`, source_row_checksum AS checksum, business_key_hash AS business_key FROM `"+definition.TableName+"` WHERE as_of_date=? ORDER BY source_row_number", requested.String()); err != nil {
 		t.Fatal(err)
 	}
 	if len(published) != 9 {
@@ -262,7 +264,7 @@ func TestDetailOutstandingMergedAndSplitPublicationIsAtomic(t *testing.T) {
 			t.Fatalf("mode=%s class=%s error=%v", failure.mode, maintenanceErrorClass(err), err)
 		}
 		published = nil
-		if err := db.Select(&published, "SELECT no_rekening AS account, branch, `value`, source_file_name AS file_name, source_row_number AS row_number, source_row_checksum AS checksum, business_key_hash AS business_key FROM `"+definition.TableName+"` WHERE as_of_date=? ORDER BY source_row_number", requested.String()); err != nil || !reflect.DeepEqual(published, stable) {
+		if err := db.Select(&published, "SELECT no_rekening AS account, branch, `value`, source_file_name AS file_name, source_row_number AS `row_number`, source_row_checksum AS checksum, business_key_hash AS business_key FROM `"+definition.TableName+"` WHERE as_of_date=? ORDER BY source_row_number", requested.String()); err != nil || !reflect.DeepEqual(published, stable) {
 			t.Fatalf("mode=%s changed authoritative snapshot: rows=%+v error=%v", failure.mode, published, err)
 		}
 	}

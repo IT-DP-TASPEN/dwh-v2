@@ -803,6 +803,10 @@ func TestSavingAccountStatementExactSetTextAndTimestamps(t *testing.T) {
 	if err := db.Get(&staged, `SELECT COUNT(*) FROM stg_fincloud_saving_details WHERE ingestion_run_id=?`, missingRun); err != nil || staged != 0 {
 		t.Fatalf("failed mandatory child stage left parent=%d error=%v", staged, err)
 	}
+	// Free the active saving_detail slot for the following runs.
+	if _, err := db.Exec(`DELETE FROM ingestion_runs WHERE id=?`, missingRun); err != nil {
+		t.Fatal(err)
+	}
 
 	firstID, firstOwner := detailRun(t, db.DB, "saving_detail", 1)
 	first := savingStatementRecord(t, "S-1", firstFetched, duplicate, duplicate)

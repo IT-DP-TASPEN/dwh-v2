@@ -200,7 +200,7 @@ WHERE kind='run_all_parent'
 
 Do not deploy the 41-job binary while this count is nonzero. Apply `20260903090000_rename_live_snapshot.sql` before `20260903091000_create_master_reference_ingestion.sql`, verify no executable legacy live-snapshot rows remain and exactly 41 source settings exist, then start only the new binary.
 
-For 41→42, `20261013120000_create_saving_block_transactions.sql` only adds the `saving_block_detail` tables and its source setting; existing tables are untouched. Verify exactly 42 source settings exist before starting the new binary.
+For 41→42, `20261013120000_create_saving_block_transactions.sql` only adds the `saving_block_detail` tables and its source setting, and `20261013130000_drop_saving_block_staging_run_fk.sql` drops the block staging run FK; existing tables are untouched. Verify exactly 42 source settings exist before starting the new binary.
 
 The candidate smoke order—Vault, Balance Sheet, representative EOD, representative CBR, detail, then CoA—is not proven or mandatory. Live evidence decides the final selection and order.
 

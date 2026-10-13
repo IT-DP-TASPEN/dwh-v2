@@ -48,6 +48,18 @@ func TestPeriodicRecoverySweepDrainsManyStaleRunsAndReleasesJobs(t *testing.T) {
 	}
 	jobs := catalog.Jobs()[:12]
 	ids := make([]uint64, 0, len(jobs))
+	// Registered before inserting so a mid-loop failure cannot leak running runs.
+	t.Cleanup(func() {
+		if len(ids) == 0 {
+			return
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		arguments := make([]any, len(ids))
+		for index := range ids {
+			arguments[index] = ids[index]
+		}
+		_, _ = db.Exec("DELETE FROM ingestion_runs WHERE id IN ("+placeholders+")", arguments...)
+	})
 	for index, job := range jobs {
 		owner := fmt.Sprintf("%064x", index+1)
 		result, err := db.Exec(`INSERT INTO ingestion_runs
@@ -61,14 +73,6 @@ func TestPeriodicRecoverySweepDrainsManyStaleRunsAndReleasesJobs(t *testing.T) {
 		id, _ := result.LastInsertId()
 		ids = append(ids, uint64(id))
 	}
-	t.Cleanup(func() {
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-		arguments := make([]any, len(ids))
-		for index := range ids {
-			arguments[index] = ids[index]
-		}
-		_, _ = db.Exec("DELETE FROM ingestion_runs WHERE id IN ("+placeholders+")", arguments...)
-	})
 	var logs bytes.Buffer
 	coordinator := &Coordinator{runs: runs, logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 		local: map[uint64]context.CancelCauseFunc{}, parents: map[uint64]string{}}
