@@ -454,5 +454,7 @@ func attachRawPayload(result any, payload []byte) {
 		detail.RawPayload = raw
 	case *LoanDetail:
 		detail.RawPayload = raw
+	case *SavingBlockDetail:
+		detail.RawPayload = raw
 	}
 }

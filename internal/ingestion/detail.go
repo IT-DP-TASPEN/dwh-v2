@@ -22,8 +22,10 @@ const (
 	DetailSaving      DetailDomain = "saving"
 	DetailTimeDeposit DetailDomain = "time_deposit"
 	DetailLoan        DetailDomain = "loan"
+	DetailSavingBlock DetailDomain = "saving_block"
 
 	SavingAccountStatementChildKey = "mutasi"
+	SavingBlockChildKey            = "datablockopen"
 )
 
 type MapperMetadata struct {
@@ -41,7 +43,7 @@ func IsSafeMapperDiagnostic(class, field, category, reason, message string) bool
 	if class != "detail_mapping" || !mapperFieldAllowed(field) {
 		return false
 	}
-	if _, found := map[string]struct{}{"string": {}, "decimal": {}, "integer": {}, "date": {}, "time": {}, "datetime": {}, "identifier": {}, "structure": {}}[category]; !found {
+	if _, found := map[string]struct{}{"string": {}, "decimal": {}, "integer": {}, "date": {}, "time": {}, "datetime": {}, "boolean": {}, "identifier": {}, "structure": {}}[category]; !found {
 		return false
 	}
 	if _, found := map[string]struct{}{"missing": {}, "required": {}, "invalid_json": {}, "expected_array": {}, "expected_object": {}, "invalid_value": {}}[reason]; !found {
@@ -59,7 +61,7 @@ func mapperFieldAllowed(field string) bool {
 	if field == "payload" || field == "identifier" {
 		return true
 	}
-	for _, domain := range []DetailDomain{DetailCIF, DetailSaving, DetailTimeDeposit, DetailLoan} {
+	for _, domain := range []DetailDomain{DetailCIF, DetailSaving, DetailTimeDeposit, DetailLoan, DetailSavingBlock} {
 		shape, _ := detailShapeFor(domain)
 		for _, candidate := range shape.fields {
 			if field == candidate.target {
@@ -187,6 +189,58 @@ func MapSavingAccountStatement(ctx context.Context, accountNo string, statement 
 	return mapped, nil
 }
 
+// MapSavingBlockDetail maps only result.datablockopen. Parent fields are
+// validated (norekening) but never persisted; every item must belong to the
+// requested account. An empty array is a valid zero-row result.
+func MapSavingBlockDetail(ctx context.Context, accountNo string, detail *fincloud.SavingBlockDetail) ([]DetailChildRecord, error) {
+	if strings.TrimSpace(accountNo) == "" || detail == nil || len(bytes.TrimSpace(detail.RawPayload)) == 0 {
+		return nil, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(detail.RawPayload))
+	decoder.UseNumber()
+	var result map[string]any
+	if err := decoder.Decode(&result); err != nil || result == nil {
+		return nil, mapperError("payload", "structure", "invalid_json", "detail payload is invalid", err)
+	}
+	shape, _ := detailShapeFor(DetailSavingBlock)
+	identifier, ok := result[shape.identifierKey].(string)
+	if !ok || strings.TrimSpace(identifier) == "" {
+		return nil, mapperError("account_no", "identifier", "required", "detail identifier is missing", nil)
+	}
+	if identifier != accountNo {
+		return nil, mapperError("account_no", "identifier", "invalid_value", "detail field value is invalid", nil)
+	}
+	childShape := shape.children[0]
+	children, ok := result[childShape.sourceKey].([]any)
+	if !ok {
+		return nil, mapperError(childShape.sourceKey, "structure", "expected_array", "detail child collection is invalid", nil)
+	}
+	mapped := make([]DetailChildRecord, len(children))
+	for index, child := range children {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		object, ok := child.(map[string]any)
+		if !ok {
+			return nil, mapperError(childShape.sourceKey, "structure", "expected_object", "detail child item is invalid", nil)
+		}
+		data, err := json.Marshal(object)
+		if err != nil {
+			return nil, mapperError(childShape.sourceKey, "structure", "invalid_json", "detail child item is invalid", err)
+		}
+		fields, err := mapFields(object, childShape.fields, childShape.sourceKey+".")
+		if err != nil {
+			return nil, fmt.Errorf("%s[%d]: %w", childShape.sourceKey, index, err)
+		}
+		if fields["account_no"] != accountNo {
+			return nil, fmt.Errorf("%s[%d]: %w", childShape.sourceKey, index,
+				mapperFieldError(childShape.sourceKey+".account_no", "norekening", "identifier", "invalid_value", "detail field value is invalid", nil))
+		}
+		mapped[index] = DetailChildRecord{Identifier: accountNo, ItemIndex: index, Fields: fields, RawItemPayload: data, RawItemChecksum: sha256Hex(data)}
+	}
+	return mapped, nil
+}
+
 func MapTimeDepositDetail(ctx context.Context, detail *fincloud.TimeDepositDetail, fetchedAt time.Time) (DetailRecord, error) {
 	if detail == nil {
 		return DetailRecord{}, mapperError("payload", "structure", "missing", "detail payload is missing", nil)
@@ -296,6 +350,7 @@ const (
 	detailExactDate
 	detailTime
 	detailDateTime
+	detailBoolean
 )
 
 type detailField struct {
@@ -551,6 +606,16 @@ func detailShapeFor(domain DetailDomain) (detailShape, error) {
 				field("dwp_nominal", "nominaldwp", detailDecimal), preservedString("description", "keterangan"), preservedString("officer", "officer"), preservedString("authorizer", "otor"),
 			}},
 		}}, nil
+	case DetailSavingBlock:
+		return detailShape{identifierKey: "norekening", fields: []detailField{requiredField("account_no", "norekening", detailString)},
+			children: []detailChildShape{{sourceKey: SavingBlockChildKey, fields: []detailField{
+				requiredField("account_no", "norekening", detailSourceText), sourceText("transaction_id", "id_transaction"),
+				exactField("transaction_date", "tgltransaksi", detailExactDate), sourceText("customer_name", "namanasabah"),
+				exactField("block_date", "tglblokir", detailExactDate), exactField("block_end_date", "tglakhirblokir", detailExactDate),
+				sourceText("currency", "currency"), sourceText("description", "keterangan"), sourceText("block_reason", "alasanblokir"),
+				sourceText("transaction_type", "jenistransaksi"), exactField("blocked_amount", "nilaiblokir", detailDecimal),
+				sourceText("officer", "officer"), exactField("not_batch", "not_batch", detailBoolean), exactField("is_open", "is_open", detailBoolean),
+			}}}}, nil
 	default:
 		return detailShape{}, fmt.Errorf("unsupported detail domain %q", domain)
 	}
@@ -640,6 +705,8 @@ func (valueType detailValueType) category() string {
 		return "time"
 	case detailDateTime:
 		return "datetime"
+	case detailBoolean:
+		return "boolean"
 	default:
 		return "structure"
 	}
@@ -736,6 +803,12 @@ func convertDetailValue(value any, valueType detailValueType) (any, error) {
 			return nil, fmt.Errorf("invalid Fincloud time")
 		}
 		return text, nil
+	case detailBoolean:
+		boolean, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("must be JSON boolean")
+		}
+		return boolean, nil
 	case detailDateTime:
 		if wrapper, ok := value.(map[string]any); ok {
 			wrapped, ok := wrapper["date"].(string)

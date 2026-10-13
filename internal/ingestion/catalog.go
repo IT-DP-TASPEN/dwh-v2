@@ -29,7 +29,7 @@ const (
 	ReferenceTimeDeposit ReferenceDomain = "time_deposit"
 	ReferenceLoan        ReferenceDomain = "loan"
 
-	CanonicalJobCount = 41
+	CanonicalJobCount = 42
 )
 
 type MasterDefinition struct {
@@ -85,6 +85,7 @@ func NewCatalog() (Catalog, error) {
 		{"saving_detail", "Saving Detail"},
 		{"time_deposit_detail", "Time Deposit Detail"},
 		{"loan_detail", "Loan Detail"},
+		{"saving_block_detail", "Saving Block Detail"},
 	} {
 		jobs = append(jobs, JobDefinition{Key: detail.key, Name: detail.name, Category: CategoryDetail, DateStrategy: NoDate, Active: true})
 	}
@@ -125,7 +126,7 @@ func NewCatalog() (Catalog, error) {
 		strategies[job.DateStrategy]++
 		byKey[job.Key] = job
 	}
-	if strategies[RangeCapable] != 7 || strategies[SingleDate] != 25 || strategies[NoDate] != 9 {
+	if strategies[RangeCapable] != 7 || strategies[SingleDate] != 25 || strategies[NoDate] != 10 {
 		return Catalog{}, fmt.Errorf("canonical date strategies are range=%d single=%d none=%d", strategies[RangeCapable], strategies[SingleDate], strategies[NoDate])
 	}
 	return Catalog{jobs: jobs, byKey: byKey}, nil

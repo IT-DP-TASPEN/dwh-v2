@@ -52,7 +52,7 @@ func TestCanonicalParametersCoverAllJobDateContracts(t *testing.T) {
 			}
 		}
 	}
-	if counts[ingestion.RangeCapable] != 7 || counts[ingestion.SingleDate] != 25 || counts[ingestion.NoDate] != 9 {
+	if counts[ingestion.RangeCapable] != 7 || counts[ingestion.SingleDate] != 25 || counts[ingestion.NoDate] != 10 {
 		t.Fatalf("date strategy counts=%v", counts)
 	}
 }

@@ -687,12 +687,18 @@ func (executor *Executor) executeDetail(ctx context.Context, run ingestionrun.Ru
 	if err := executor.persistProgress(ctx, run, outcome.progress, diagnostics, &progressWrites); err != nil {
 		return ownershipFailure(err, "persist_run_progress")
 	}
-	domain, err := detailDomain(job.Key)
-	if err != nil {
-		return failed("contract", "unsupported Detail job", "publish_detail", err)
-	}
 	publishCtx := diagnosticScope(ctx, "persistence", "publish_detail", "publish_"+job.Key, "", "")
-	if err := executor.detail.Publish(publishCtx, run.ID, run.OwnerID, domain, outcome.progress.Total); err != nil {
+	if job.Key == "saving_block_detail" {
+		// Parentless: the staged candidate is every block item of every account.
+		err = executor.detail.PublishSavingBlockTransactions(publishCtx, run.ID, run.OwnerID, outcome.progress.Rows)
+	} else {
+		domain, domainErr := detailDomain(job.Key)
+		if domainErr != nil {
+			return failed("contract", "unsupported Detail job", "publish_detail", domainErr)
+		}
+		err = executor.detail.Publish(publishCtx, run.ID, run.OwnerID, domain, outcome.progress.Total)
+	}
+	if err != nil {
 		if result, cancelled := cancellationFailure(ctx, "publish_detail", err); cancelled {
 			return result
 		}
@@ -850,6 +856,8 @@ func (executor *Executor) enumerateDetails(ctx context.Context, jobKey string, s
 		return executor.client.FetchTimeDepositAccounts(ctx)
 	case "loan_detail":
 		return executor.client.FetchLoanAccounts(ctx)
+	case "saving_block_detail":
+		return executor.client.FetchBlockedSavingAccounts(ctx)
 	default:
 		return nil, fmt.Errorf("unsupported detail job %s", jobKey)
 	}
@@ -894,6 +902,22 @@ func (executor *Executor) fetchAndStageDetail(ctx context.Context, runID uint64,
 			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
 		}
 		record, err = ingestion.MapLoanDetail(ctx, value, fetchedAt)
+	case "saving_block_detail":
+		value, fetchErr := executor.client.FetchSavingBlockDetail(ctx, identifier)
+		if fetchErr != nil {
+			return detailItemResult{layer: detailLayerFetch, identifier: identifier, err: fetchErr}
+		}
+		items, mapErr := ingestion.MapSavingBlockDetail(ctx, identifier, value)
+		if mapErr != nil {
+			return detailItemResult{layer: detailLayerMap, identifier: identifier, err: mapErr}
+		}
+		persistCtx := diagnosticScope(ctx, "persistence", "stage_detail", "stage_"+jobKey, identifier, "")
+		if err := executor.detail.StageSavingBlockTransactions(persistCtx, runID, identifier, fetchedAt, items); err != nil {
+			result := detailPersistenceFailure(err)
+			result.identifier = identifier
+			return result
+		}
+		return detailItemResult{rows: uint64(len(items)), identifier: identifier}
 	}
 	if err != nil {
 		return detailItemResult{layer: detailLayerMap, identifier: identifier, err: err}

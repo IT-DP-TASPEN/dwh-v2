@@ -404,6 +404,9 @@ func TestDurableQueueRunAllAndTerminalCAS(t *testing.T) {
 	if err := db.Get(&detailJSON, `SELECT CAST(parameters_json AS CHAR) FROM ingestion_runs WHERE parent_run_id=? AND job_key='cif_detail'`, parentID); err != nil || detailJSON != "{}" {
 		t.Fatalf("detail params=%q error=%v", detailJSON, err)
 	}
+	if err := db.Get(&detailJSON, `SELECT CAST(parameters_json AS CHAR) FROM ingestion_runs WHERE parent_run_id=? AND job_key='saving_block_detail'`, parentID); err != nil || detailJSON != "{}" {
+		t.Fatalf("saving block detail Run All child params=%q error=%v", detailJSON, err)
+	}
 	changed, err := repository.ReconcileOneParent(context.Background())
 	if err != nil || !changed {
 		t.Fatalf("first reconciliation changed=%v error=%v", changed, err)

@@ -18,7 +18,7 @@ func coverageTestDate(t *testing.T, value string) CalendarDate {
 
 func TestFixedCanonicalPublicationAndSourceModes(t *testing.T) {
 	catalog, err := NewCatalog()
-	if err != nil || len(catalog.Jobs()) != 41 {
+	if err != nil || len(catalog.Jobs()) != 42 {
 		t.Fatalf("catalog jobs=%d error=%v", len(catalog.Jobs()), err)
 	}
 	definitions := FixedDefinitions()

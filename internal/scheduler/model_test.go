@@ -166,7 +166,7 @@ func TestOccurrenceParametersUseHistoricalJakartaBusinessDate(t *testing.T) {
 			t.Fatalf("%s scheduled parameters: %v", job.Key, err)
 		}
 	}
-	if counts[ingestion.RangeCapable] != 7 || counts[ingestion.SingleDate] != 25 || counts[ingestion.NoDate] != 9 {
+	if counts[ingestion.RangeCapable] != 7 || counts[ingestion.SingleDate] != 25 || counts[ingestion.NoDate] != 10 {
 		t.Fatalf("scheduled date strategies=%v", counts)
 	}
 }

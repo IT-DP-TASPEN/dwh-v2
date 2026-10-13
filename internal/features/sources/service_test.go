@@ -38,7 +38,7 @@ func TestManualParameterContractsCoverCatalog(t *testing.T) {
 			}
 		}
 	}
-	if counts[core.RangeCapable] != 7 || counts[core.SingleDate] != 25 || counts[core.NoDate] != 9 {
+	if counts[core.RangeCapable] != 7 || counts[core.SingleDate] != 25 || counts[core.NoDate] != 10 {
 		t.Fatalf("date strategy counts=%v", counts)
 	}
 }

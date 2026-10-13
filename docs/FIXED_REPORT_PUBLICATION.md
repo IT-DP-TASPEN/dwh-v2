@@ -1,6 +1,6 @@
 # Fixed Report publication
 
-Fixed definitions explicitly separate publication authority from source request chunking. The canonical catalog still contains 41 jobs. Scheduling remains the previous Jakarta calendar day, with existing Run All hierarchy, admission, retries and head-of-line behavior.
+Fixed definitions explicitly separate publication authority from source request chunking. The canonical catalog contains 42 jobs. Scheduling remains the previous Jakarta calendar day, with existing Run All hierarchy, admission, retries and head-of-line behavior.
 
 | Job | Publication authority | Source requests |
 | --- | --- | --- |

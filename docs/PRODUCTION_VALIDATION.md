@@ -42,6 +42,16 @@ See [Fixed Report publication](FIXED_REPORT_PUBLICATION.md). Seven Fixed reports
 | `saving_detail` | Detail | Complete current state | frozen Jakarta execution date, failure-atomic publication |
 | `time_deposit_detail` | Detail | Complete current state | frozen Jakarta execution date, atomic parent/children publication |
 | `loan_detail` | Detail | Complete current state | frozen Jakarta execution date, atomic parent/children publication |
+| `saving_block_detail` | Detail | Complete current state, parentless | frozen Jakarta execution date, global exact-set publication |
+
+### Saving Block Detail
+
+`saving_block_detail` (Detail, NoDate, current state) is canonical: manual, schedulable and a Run All child.
+
+- Discovery: `GET /cs/inquiry/block_savings/cari?cabang=ALL&datamutasi=false&pagenumber=0&pagesize=999999999999`. Only each row's `id` is used (trimmed, blanks dropped, deduplicated, sorted); no listing field is persisted and no pagination/rowCount check exists, matching the other Detail enumerators.
+- Per account, through the shared Detail pool sized by `detail_concurrency`: `GET /cs/inquiry/block_savings/tabungan?id=<account_no>`. `result.norekening` and every item's `norekening` must equal the requested account; `datablockopen` must be a present array (`[]` is valid). Parent fields, including `total_bo_open`, are not persisted.
+- Only `result.datablockopen[]` is stored, in `fincloud_saving_block_transactions` keyed by `(account_no, item_index)` with typed columns plus `raw_item_payload`/`raw_item_checksum`. There is no parent table and no foreign key to `fincloud_saving_details`; join on `account_no` when reporting.
+- Publication replaces the whole table with the run's candidate in one transaction that also finishes the run. Accounts that disappear or return `[]` lose their rows; an empty enumeration or all-empty accounts empty the table. Any account failure publishes nothing.
 
 ## Acceptance per job
 

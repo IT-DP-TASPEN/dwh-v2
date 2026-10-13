@@ -27,9 +27,10 @@ var ApplicationVersions = []int64{
 	20260905120000,
 	20260929120000,
 	20261005120000,
+	20261013120000,
 }
 
-const CurrentVersion int64 = 20261005120000
+const CurrentVersion int64 = 20261013120000
 
 type MigrationRecord struct {
 	Version int64 `db:"version_id"`
@@ -159,6 +160,7 @@ func VerifyRuntime(ctx context.Context, db *sqlx.DB) error {
 	for _, table := range []string{"user_totp_enrollments", "user_mfa_recovery_codes", "mfa_challenges", "schedules", "schedule_attempts", "fincloud_auth_profiles", "report_datasources", "report_templates", "report_parameters", "report_parameter_options", "report_template_user_access", "report_export_jobs", "report_user_folders", "report_user_preferences",
 		"fincloud_reference_categories", "fincloud_reference_items", "stg_fincloud_reference_categories", "stg_fincloud_reference_items", "fincloud_marketing_master", "stg_fincloud_marketing_master",
 		"fincloud_saving_account_statements", "stg_fincloud_saving_account_statements",
+		"fincloud_saving_block_transactions", "stg_fincloud_saving_block_transactions",
 		"custom_dataset_uploads", "custom_datasets", "custom_dataset_columns", "custom_dataset_imports"} {
 		var count int
 		if err := db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.TABLES

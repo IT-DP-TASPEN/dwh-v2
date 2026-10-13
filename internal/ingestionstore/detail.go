@@ -246,41 +246,46 @@ func (repository *DetailRepository) stageTransaction(ctx context.Context, tx *sq
 		if childSpecification.required && !present {
 			return fmt.Errorf("required %s child is missing", childSpecification.key)
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM `"+childSpecification.stage+"` WHERE ingestion_run_id=? AND account_no=?", runID, record.Identifier); err != nil {
-			return wrapDatabaseError(fmt.Errorf("delete staged %s children: %w", childSpecification.stage, err), "stage_detail", "delete_staged_child_rows", childSpecification.stage, 0, 0)
-		}
-		childColumns := []string{"ingestion_run_id", "account_no", "item_index"}
-		for _, field := range childSpecification.fields {
-			childColumns = append(childColumns, field.name)
-		}
-		childColumns = append(childColumns, "raw_item_payload", "raw_item_checksum")
-		if childSpecification.fetched {
-			childColumns = append(childColumns, "last_fetched_at")
-		}
-		rows := make([][]any, len(children))
-		for index, child := range children {
-			if child.Identifier != record.Identifier || child.ItemIndex != index || len(child.RawItemPayload) == 0 || child.RawItemChecksum == "" {
-				return fmt.Errorf("%s child %d does not belong to detail", childSpecification.key, index)
-			}
-			row := []any{runID, record.Identifier, child.ItemIndex}
-			for _, field := range childSpecification.fields {
-				value, valueErr := detailSQLValue(child.Fields[field.name], field)
-				if valueErr != nil {
-					return fmt.Errorf("%s[%d].%s: %w", childSpecification.key, index, field.name, valueErr)
-				}
-				row = append(row, value)
-			}
-			row = append(row, string(child.RawItemPayload), child.RawItemChecksum)
-			if childSpecification.fetched {
-				row = append(row, record.LastFetchedAt.UTC())
-			}
-			rows[index] = row
-		}
-		if err := insertRows(ctx, tx, childSpecification.stage, childColumns, rows); err != nil {
+		if err := stageDetailChildren(ctx, tx, runID, record.Identifier, record.LastFetchedAt, childSpecification, children); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// stageDetailChildren replaces one account's staged children for this run.
+func stageDetailChildren(ctx context.Context, tx *sqlx.Tx, runID uint64, identifier string, fetchedAt time.Time, childSpecification detailChildSpec, children []ingestion.DetailChildRecord) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM `"+childSpecification.stage+"` WHERE ingestion_run_id=? AND account_no=?", runID, identifier); err != nil {
+		return wrapDatabaseError(fmt.Errorf("delete staged %s children: %w", childSpecification.stage, err), "stage_detail", "delete_staged_child_rows", childSpecification.stage, 0, 0)
+	}
+	childColumns := []string{"ingestion_run_id", "account_no", "item_index"}
+	for _, field := range childSpecification.fields {
+		childColumns = append(childColumns, field.name)
+	}
+	childColumns = append(childColumns, "raw_item_payload", "raw_item_checksum")
+	if childSpecification.fetched {
+		childColumns = append(childColumns, "last_fetched_at")
+	}
+	rows := make([][]any, len(children))
+	for index, child := range children {
+		if child.Identifier != identifier || child.ItemIndex != index || len(child.RawItemPayload) == 0 || child.RawItemChecksum == "" {
+			return fmt.Errorf("%s child %d does not belong to detail", childSpecification.key, index)
+		}
+		row := []any{runID, identifier, child.ItemIndex}
+		for _, field := range childSpecification.fields {
+			value, valueErr := detailSQLValue(child.Fields[field.name], field)
+			if valueErr != nil {
+				return fmt.Errorf("%s[%d].%s: %w", childSpecification.key, index, field.name, valueErr)
+			}
+			row = append(row, value)
+		}
+		row = append(row, string(child.RawItemPayload), child.RawItemChecksum)
+		if childSpecification.fetched {
+			row = append(row, fetchedAt.UTC())
+		}
+		rows[index] = row
+	}
+	return insertRows(ctx, tx, childSpecification.stage, childColumns, rows)
 }
 
 func detailSQLValue(value any, field detailColumn) (any, error) {
@@ -328,9 +333,16 @@ func (repository *DetailRepository) Publish(ctx context.Context, runID uint64, o
 	if repository == nil || repository.db == nil || runID == 0 || ownerID == "" {
 		return fmt.Errorf("complete detail publication identity is required")
 	}
-	err = retryReplaySafeTx(ctx, repository.db, "publish_detail", func(tx *sqlx.Tx) error {
+	return repository.publishCommitted(ctx, runID, specification.table, func(tx *sqlx.Tx) error {
 		return repository.publishTransaction(ctx, tx, runID, ownerID, expected, specification)
 	})
+}
+
+// publishCommitted runs one replay-safe publication transaction. When the
+// commit outcome is uncertain it reports success only if the run is already
+// canonically succeeded; the source is never refetched on retry.
+func (repository *DetailRepository) publishCommitted(ctx context.Context, runID uint64, table string, publish func(*sqlx.Tx) error) error {
+	err := retryReplaySafeTx(ctx, repository.db, "publish_detail", publish)
 	if err == nil {
 		return nil
 	}
@@ -343,23 +355,12 @@ func (repository *DetailRepository) Publish(ctx context.Context, runID uint64, o
 	if checkErr != nil {
 		err = errors.Join(err, fmt.Errorf("check Detail publication outcome: %w", checkErr))
 	}
-	return wrapDatabaseError(err, "publish_detail", "publish_current_detail", specification.table, 0, 0)
+	return wrapDatabaseError(err, "publish_detail", "publish_current_detail", table, 0, 0)
 }
 
 func (repository *DetailRepository) publishTransaction(ctx context.Context, tx *sqlx.Tx, runID uint64, ownerID string, expected uint64, specification detailSpec) error {
-	var run struct {
-		JobKey          string `db:"job_key"`
-		Status          string `db:"status"`
-		OwnerID         string `db:"owner_id"`
-		CancelRequested bool   `db:"cancel_requested"`
-	}
-	if err := tx.GetContext(ctx, &run, `SELECT COALESCE(job_key,'') job_key,status,COALESCE(owner_id,'') owner_id,
-		cancel_requested_at IS NOT NULL cancel_requested
-		FROM ingestion_runs WHERE id=?`, runID); err != nil {
-		return wrapDatabaseError(err, "publish_detail", "check_ingestion_run", "ingestion_runs", 0, 0)
-	}
-	if run.JobKey != specification.jobKey || run.Status != string(ingestionrun.StatusRunning) || run.OwnerID != ownerID || run.CancelRequested {
-		return fmt.Errorf("Detail candidate is not complete and publishable")
+	if err := requirePublishableDetailRun(ctx, tx, runID, ownerID, specification.jobKey); err != nil {
+		return err
 	}
 	quotedStage, _ := quoteIdentifier(specification.stage)
 	var staged uint64
@@ -374,6 +375,24 @@ func (repository *DetailRepository) publishTransaction(ctx context.Context, tx *
 	}
 	if err := ingestionrun.FinishSucceededInTx(ctx, tx, runID, ownerID); err != nil {
 		return wrapDatabaseError(err, "publish_detail", "finish_published_run", "ingestion_runs", 0, 0)
+	}
+	return nil
+}
+
+func requirePublishableDetailRun(ctx context.Context, tx *sqlx.Tx, runID uint64, ownerID, jobKey string) error {
+	var run struct {
+		JobKey          string `db:"job_key"`
+		Status          string `db:"status"`
+		OwnerID         string `db:"owner_id"`
+		CancelRequested bool   `db:"cancel_requested"`
+	}
+	if err := tx.GetContext(ctx, &run, `SELECT COALESCE(job_key,'') job_key,status,COALESCE(owner_id,'') owner_id,
+		cancel_requested_at IS NOT NULL cancel_requested
+		FROM ingestion_runs WHERE id=?`, runID); err != nil {
+		return wrapDatabaseError(err, "publish_detail", "check_ingestion_run", "ingestion_runs", 0, 0)
+	}
+	if run.JobKey != jobKey || run.Status != string(ingestionrun.StatusRunning) || run.OwnerID != ownerID || run.CancelRequested {
+		return fmt.Errorf("Detail candidate is not complete and publishable")
 	}
 	return nil
 }
@@ -482,7 +501,14 @@ func reconcileDetailChildren(ctx context.Context, tx *sqlx.Tx, runID uint64, par
 	if _, err := tx.ExecContext(ctx, deleteMissing, runID, runID); err != nil {
 		return wrapDatabaseError(err, "publish_detail", "delete_missing_children", child.table, 0, 0)
 	}
+	return upsertDetailChildren(ctx, tx, runID, child)
+}
 
+// upsertDetailChildren refreshes unchanged, updates changed and inserts new
+// candidate children. Deleting absent rows is the caller's scope decision.
+func upsertDetailChildren(ctx context.Context, tx *sqlx.Tx, runID uint64, child detailChildSpec) error {
+	finalTable, _ := quoteIdentifier(child.table)
+	stageTable, _ := quoteIdentifier(child.stage)
 	difference := detailDifference("current_child", "candidate_child", child.fields, "raw_item_checksum")
 	if child.fetched {
 		updateUnchanged := "UPDATE " + finalTable + " current_child JOIN " + stageTable +
@@ -588,9 +614,9 @@ func (repository *DetailRepository) clearRun(ctx context.Context, runID uint64, 
 		return fmt.Errorf("Detail staging cleanup requires a run")
 	}
 	return retryReplaySafeTx(ctx, repository.db, operation, func(tx *sqlx.Tx) error {
-		for _, specification := range detailSpecifications {
-			if _, err := tx.ExecContext(ctx, "DELETE FROM `"+specification.stage+"` WHERE ingestion_run_id=?", runID); err != nil {
-				return wrapDatabaseError(err, operation, "delete_run_staging", specification.stage, 0, 0)
+		for _, stage := range detailRootStages() {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM `"+stage+"` WHERE ingestion_run_id=?", runID); err != nil {
+				return wrapDatabaseError(err, operation, "delete_run_staging", stage, 0, 0)
 			}
 		}
 		return nil
@@ -604,14 +630,14 @@ func (repository *DetailRepository) CleanupTerminal(ctx context.Context, limit i
 	var deleted int64
 	err := retryReplaySafeTx(ctx, repository.db, "cleanup_detail_staging", func(tx *sqlx.Tx) error {
 		var attemptDeleted int64
-		for _, specification := range detailSpecifications {
-			query := "DELETE FROM `" + specification.stage + "` WHERE ingestion_run_id IN (SELECT ingestion_run_id FROM (" +
-				"SELECT DISTINCT candidate.ingestion_run_id FROM `" + specification.stage + "` candidate LEFT JOIN ingestion_runs run ON run.id=candidate.ingestion_run_id " +
+		for _, stage := range detailRootStages() {
+			query := "DELETE FROM `" + stage + "` WHERE ingestion_run_id IN (SELECT ingestion_run_id FROM (" +
+				"SELECT DISTINCT candidate.ingestion_run_id FROM `" + stage + "` candidate LEFT JOIN ingestion_runs run ON run.id=candidate.ingestion_run_id " +
 				"WHERE run.id IS NULL OR run.status IN ('succeeded','failed','skipped','cancelled','abandoned','completed','completed_with_skips') ORDER BY candidate.ingestion_run_id LIMIT ?" +
 				") stale_runs)"
 			result, err := tx.ExecContext(ctx, query, limit)
 			if err != nil {
-				return wrapDatabaseError(err, "cleanup_detail_staging", "delete_terminal_staging", specification.stage, 0, 0)
+				return wrapDatabaseError(err, "cleanup_detail_staging", "delete_terminal_staging", stage, 0, 0)
 			}
 			affected, err := result.RowsAffected()
 			if err != nil {
